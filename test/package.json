@@ -2,7 +2,7 @@
   "name": "edit-room-checks",
   "private": true,
   "type": "module",
-  "description": "Checks for the Edit Room database rules and screens.",
+  "description": "Checks for the DN Studios team app: its database rules and its screens.",
   "scripts": {
     "check": "node check-api.mjs && node db.test.mjs",
     "check:browser": "node e2e.mjs"

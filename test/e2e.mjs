@@ -19,7 +19,8 @@ const problems = [];
 
 const srv = await startServer(0);
 const browser = await chromium.launch();
-const PHONE = { viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true, locale: "en-US", timezoneId: "America/Los_Angeles" };
+// reduced motion: sheets and messages appear at once, so a screenshot never catches one halfway in
+const PHONE = { viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true, locale: "en-US", timezoneId: "America/Los_Angeles", reducedMotion: "reduce" };
 
 async function open(name, extra) {
   const ctx = await browser.newContext(Object.assign({}, PHONE, extra || {}));
@@ -65,7 +66,8 @@ async function look(page, name, label) {
 try {
   /* ------------------------------------------------------------ first run */
   const admin = await open("admin", { permissions: ["clipboard-read", "clipboard-write"] });
-  await see(admin, "Set up Edit Room", "a fresh app opens on the setup screen");
+  await see(admin, "Set up DN Studios", "a fresh app opens on the setup screen");
+  ok((await admin.title()) === "DN Studios" && (await admin.locator("h1.brand").innerText()).replace(/\s+/g, " ").trim() === "DN Studios", "the app carries the studio's name", await admin.locator("h1.brand").innerText());
   await look(admin, "01-setup", "setup screen");
   await admin.fill("#su-code", "nope-nope");
   await admin.fill("#su-name", "Sam Okafor");
@@ -75,7 +77,9 @@ try {
   await see(admin, "That setup code isn't right.", "a wrong setup code is refused with a clear message");
   await admin.fill("#su-code", srv.code.toLowerCase());
   await admin.getByRole("button", { name: "Create my admin login" }).click();
-  await see(admin, "Set up your room", "the right code creates the admin and opens the inbox");
+  await see(admin, "Get your team started", "the right code creates the admin and opens the inbox");
+  const navAt = await admin.evaluate(() => { const r = document.getElementById("tabs").getBoundingClientRect(); return { bottom: Math.round(innerHeight - r.bottom), fixed: getComputedStyle(document.getElementById("tabs")).position }; });
+  ok(navAt.fixed === "fixed" && navAt.bottom === 0, "on a phone the sections sit in a bar along the bottom of the screen", JSON.stringify(navAt));
   ok((await admin.locator("#who").innerText()).replace(/\s+/g, " ").toLowerCase().includes("sam okafor admin"), "the header shows who is signed in and their role", await admin.locator("#who").innerText());
   await look(admin, "02-inbox-empty", "empty inbox");
 
@@ -93,6 +97,17 @@ try {
   await admin.locator(".inline-form button[type=submit]").click();
   await toast(admin, "already on the list");
   ok(true, "a duplicate category is refused");
+  await admin.fill("#cat-new", "Made by mistake");
+  await admin.fill("#cat-rate", "");
+  await admin.locator(".inline-form button[type=submit]").click();
+  const oops = admin.locator("#view .rows > li", { hasText: "Made by mistake" });
+  await oops.getByRole("button", { name: "Edit" }).click();
+  await sheet(admin).getByRole("button", { name: "Remove category" }).click();
+  await sheet(admin).getByText("from the list editors pick from?").waitFor();
+  await sheet(admin).getByRole("button", { name: "Remove category" }).click();
+  await toast(admin, "Category removed");
+  await closed(admin);
+  ok((await admin.locator(".rows .tape").count()) === 3, "a category can be removed from its Edit sheet");
   await admin.fill("#cat-new", "");
   await admin.fill("#set-currency", "$");
   await admin.locator("#set-currency").blur();
@@ -113,7 +128,7 @@ try {
     await sheet(admin).getByRole("button", { name: "Create login" }).click();
     await sheet(admin).getByText("Login created").waitFor();
     const cred = await admin.locator("#cred-text").innerText();
-    ok(cred.includes("Username: " + username) && cred.includes("Password: " + password) && cred.includes(srv.url + "/"), "the new login is shown once, with the link to the app", cred.replace(/\n/g, " | "));
+    ok(cred.startsWith("DN Studios login for " + name) && cred.includes("Username: " + username) && cred.includes("Password: " + password) && cred.includes(srv.url + "/"), "the new login is shown once, with the link to the app", cred.replace(/\n/g, " | "));
     if (name === "Ada Obi") {
       await look(admin, "04-login-created", "login created sheet");
       await sheet(admin).getByRole("button", { name: "Copy" }).click();
@@ -300,7 +315,8 @@ try {
   await tab(admin, "projects");
   await see(admin, "Deadlines by category", "projects opens with the category summary");
   const sumRow = admin.locator("#view .rows > li", { hasText: "Long form" });
-  ok(/1\s*On time/.test((await sumRow.innerText()).replace(/\n/g, " ")), "each category shows what was on time and what is late", (await sumRow.innerText()).replace(/\n/g, " "));
+  const sumText = await sumRow.getByRole("button").getAttribute("aria-label");
+  ok(/^Long form: 1 on time, 0 late, 0 past deadline\./.test(sumText) && (await sumRow.locator(".cat-n").allInnerTexts()).join("|") === "1|0|0" && (await admin.locator("#view .cat-head").innerText()).replace(/\s+/g, " ").trim() === "On time Late Past deadline", "each category shows what was on time, what was late and what is past its deadline", sumText);
   await pick(admin, "#f-status", "all");
   await admin.locator("#p-list .section-note", { hasText: /^3 projects/ }).waitFor();
   ok((await admin.locator("#p-list article.clip").count()) === 3, "all projects are listed: received, received, reassigned", String(await admin.locator("#p-list article.clip").count()));
@@ -554,7 +570,14 @@ try {
   await tab(admin, "projects");
   const shortsRow = admin.locator("#view .rows > li", { hasText: "Shorts" });
   await shortsRow.getByText("81", { exact: true }).waitFor();
-  ok(/81\s*On time\s*20\s*Late, 6h on average/.test((await shortsRow.innerText()).replace(/\n/g, " ")), "category figures count the whole 10 weeks, worked out by the server", (await shortsRow.innerText()).replace(/\n/g, " "));
+  const shortsText = await shortsRow.getByRole("button").getAttribute("aria-label");
+  ok(/^Shorts: 81 on time, 20 late by 6h on average, 0 past deadline\./.test(shortsText) && /Late by 6h on average\./.test(await shortsRow.innerText()), "category figures count the whole 10 weeks, worked out by the server", shortsText);
+  const headline = (await admin.locator("#view .slate").first().innerText()).replace(/\s+/g, " ");
+  ok(/8\d of 10\d videos submitted on time/.test(headline) && /Late 2\d/.test(headline), "the headline adds the categories up", headline);
+  await shortsRow.getByRole("button").click();
+  await settle(admin);
+  ok((await admin.inputValue("#f-cat")) !== "all" && (await admin.inputValue("#f-status")) === "all", "tapping a category lists its projects");
+  await pick(admin, "#f-cat", "all");
   await pick(admin, "#f-status", "received");
   const note = admin.locator("#p-list .section-note");
   await note.getByText(/^42\+ projects/).waitFor();
@@ -618,6 +641,8 @@ try {
   await admin.emulateMedia({ colorScheme: "light" });
   await admin.setViewportSize({ width: 1280, height: 800 });
   await tab(admin, "editors");
+  const wideNav = await admin.evaluate(() => { const t = document.getElementById("tabs"), top = document.querySelector("header.top").getBoundingClientRect(), r = t.getBoundingClientRect(); return getComputedStyle(t).position !== "fixed" && r.top >= top.top && r.bottom <= top.bottom; });
+  ok(wideNav, "on a wide screen the sections sit in the top bar");
   await look(admin, "35-wide-editors", "wide editors");
   await tab(admin, "settings");
   await look(admin, "36-wide-settings", "wide settings");

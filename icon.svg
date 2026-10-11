@@ -1,14 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" fill="#0E1417"/>
-  <g transform="translate(0 6)">
-    <g transform="rotate(-11 124 214)">
-      <clipPath id="arm"><rect x="112" y="150" width="288" height="56" rx="10"/></clipPath>
-      <rect x="112" y="150" width="288" height="56" rx="10" fill="#E7EDF0"/>
-      <g clip-path="url(#arm)" fill="#0E1417"><polygon points="86,150 114,150 84,206 56,206"/><polygon points="142,150 170,150 140,206 112,206"/><polygon points="198,150 226,150 196,206 168,206"/><polygon points="254,150 282,150 252,206 224,206"/><polygon points="310,150 338,150 308,206 280,206"/><polygon points="366,150 394,150 364,206 336,206"/><polygon points="422,150 450,150 420,206 392,206"/><polygon points="478,150 506,150 476,206 448,206"/></g>
-    </g>
-    <rect x="112" y="222" width="288" height="164" rx="18" fill="#E7EDF0"/>
-    <rect x="144" y="288" width="224" height="32" rx="6" fill="#AEBAC1"/>
-    <rect x="144" y="288" width="142" height="32" rx="6" fill="#0A6A8A"/>
-    <rect x="278" y="266" width="16" height="76" rx="8" fill="#0E1417"/>
-  </g>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="116" fill="#000000"/><g fill="#FFFFFF"><path transform="translate(118.93 290.55) scale(0.21300 -0.21300)" d="M85 0Q80 0 76.5 3.5Q73 7 73 12L73 688Q73 693 76.5 696.5Q80 700 85 700L329 700Q400 700 454 675Q508 650 537.5 603.5Q567 557 567 495L567 205Q567 143 537.5 96.5Q508 50 454 25Q400 0 329 0L85 0ZM189 105Q189 100 194 100L334 100Q387 100 418.5 133.5Q450 167 451 223L451 476Q451 533 419 566.5Q387 600 333 600L194 600Q189 600 189 595L189 105Z"/><path transform="translate(250.57 290.55) scale(0.21300 -0.21300)" d="M480 688Q480 693 483.5 696.5Q487 700 492 700L584 700Q589 700 592.5 696.5Q596 693 596 688L596 12Q596 7 592.5 3.5Q589 0 584 0L495 0Q485 0 481 8L193 480Q191 483 189 482.5Q187 482 187 478L189 12Q189 7 185.5 3.5Q182 0 177 0L85 0Q80 0 76.5 3.5Q73 7 73 12L73 688Q73 693 76.5 696.5Q80 700 85 700L174 700Q184 700 188 692L475 220Q477 217 479 217.5Q481 218 481 222L480 688Z"/></g><rect x="132.5" y="330.5" width="247" height="40" rx="20" fill="#FFD21E"/></svg>

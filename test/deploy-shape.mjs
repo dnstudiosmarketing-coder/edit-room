@@ -56,7 +56,7 @@ const home = "http://127.0.0.1:" + site.address().port + "/edit-room/";
 const browser = await chromium.launch();
 const problems = [];
 const open = async (name) => {
-  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true, reducedMotion: "reduce" });
   const page = await ctx.newPage();
   page.setDefaultTimeout(8000);
   page.on("console", (m) => { if ((m.type() === "error" || m.type() === "warning") && !String(m.location().url).includes("/rest/v1/rpc/")) problems.push(name + ": " + m.text()); });
@@ -66,13 +66,13 @@ const open = async (name) => {
 };
 try {
   const admin = await open("admin");
-  await admin.getByText("Set up Edit Room").waitFor();
+  await admin.getByText("Set up DN Studios").waitFor();
   await admin.fill("#su-code", SETUP_CODE);
   await admin.fill("#su-name", "Sam Okafor");
   await admin.fill("#su-user", "sam");
   await admin.fill("#su-pass", "admin-pass-1");
   await admin.getByRole("button", { name: "Create my admin login" }).click();
-  await admin.getByText("Set up your room").waitFor();
+  await admin.getByText("Get your team started").waitFor();
   ok(true, "setup works from a sub-folder against an API on another address");
   await admin.locator('#tabs button[data-tab="settings"]').click();
   await admin.fill("#cat-new", "Shorts");
@@ -111,14 +111,14 @@ try {
   const man = await admin.evaluate(async () => { const l = document.querySelector('link[rel="manifest"]'); const r = await fetch(l.href); const m = await r.json(); return { status: r.status, start: new URL(m.start_url, l.href).href, scope: new URL(m.scope, l.href).href, icons: await Promise.all(m.icons.map(async (i) => (await fetch(new URL(i.src, l.href))).status)) }; });
   ok(man.status === 200 && man.start === home && man.scope === home && man.icons.every((s) => s === 200), "the home-screen details point at the app's folder and its icons load", JSON.stringify(man));
   const fonts = await admin.evaluate(() => document.fonts.ready.then(() => Array.from(document.fonts).filter((f) => f.status === "loaded").map((f) => f.family.replace(/"/g, "")).filter((v, i, a) => a.indexOf(v) === i).sort().join(", ")));
-  ok(/Barlow/.test(fonts) && /Barlow Condensed/.test(fonts) && /DM Mono/.test(fonts), "the app's own fonts load from its folder", fonts);
+  ok(fonts === "Barlow", "the app's own font loads from its folder", fonts);
   ok(seen.preflights > 0 && seen.posts > 10 && ["apikey", "authorization", "content-type"].every((h) => seen.headers.has(h)) && seen.headers.size === 3, "every call was cross-origin and asked to send only the three expected headers", seen.preflights + " pre-flights, " + seen.posts + " calls, headers: " + Array.from(seen.headers).join(","));
   ok(seen.origins.size === 1 && seen.origins.has(new URL(home).origin), "calls came from the app's address", Array.from(seen.origins).join(","));
   // with the connection gone, the saved copy of the app still opens and says so plainly
   await new Promise((r) => site.close(r)); site.closeAllConnections && site.closeAllConnections();
   await new Promise((r) => api.close(r)); api.closeAllConnections && api.closeAllConnections();
   await admin.reload();
-  await admin.getByText("Can't reach Edit Room right now").waitFor();
+  await admin.getByText("Can't reach DN Studios right now").waitFor();
   ok(true, "with no connection at all, the app still opens from the phone and says it can't reach the server");
 } catch (e) {
   ok(false, "the run stopped early", String(e && e.message).split("\n").slice(0, 3).join(" / "));

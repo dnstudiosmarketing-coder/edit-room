@@ -1,12 +1,12 @@
 {
-  "name": "Edit Room",
-  "short_name": "Edit Room",
-  "description": "Log every brief, keep to the deadline and submit finished videos with a Drive link.",
+  "name": "DN Studios",
+  "short_name": "DN Studios",
+  "description": "The DN Studios team app: log every brief, keep to the deadline and submit finished videos with a Drive link.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#0E1417",
-  "theme_color": "#0E1417",
+  "background_color": "#000000",
+  "theme_color": "#000000",
   "icons": [
     {
       "src": "icon-192.png",

@@ -1,9 +1,10 @@
 (function () {
 "use strict";
 
+const APP = "DN Studios";
 if (window.top !== window.self) {      // never run inside a frame on someone else's page
   const a = document.createElement("a");
-  a.href = location.href; a.target = "_top"; a.rel = "noopener"; a.textContent = "Open Edit Room";
+  a.href = location.href; a.target = "_top"; a.rel = "noopener"; a.textContent = "Open " + APP;
   document.body.replaceChildren(a);
   return;
 }
@@ -36,7 +37,7 @@ const state = {
 // Older projects for the admin's Projects list, fetched a page at a time for the filters in use.
 const hist = { key: null, rows: new Map(), next: null, more: false, busy: false, failed: false };
 function resetHist() { hist.key = null; hist.rows = new Map(); hist.next = null; hist.more = false; hist.busy = false; hist.failed = false; }
-const ui = { view: "editor", tab: "inbox", etab: "work", fStatus: "active", fEditor: "all", fCat: "all", period: "week", manage: null, limit: 40, older: false, earnAll: false, catConfirm: null, spark: null };
+const ui = { view: "editor", tab: "inbox", etab: "work", fStatus: "active", fEditor: "all", fCat: "all", period: "week", manage: null, limit: 40, older: false, earnAll: false, spark: null };
 const pics = new Map();        // user id -> { ver, url }
 
 /* ---------- small helpers ---------- */
@@ -60,13 +61,22 @@ function add(el, kid) {
   if (Array.isArray(kid)) { for (const k of kid) add(el, k); return; }
   el.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
 }
-function iconOut() {
-  const NS = "http://www.w3.org/2000/svg";
-  const s = document.createElementNS(NS, "svg");
-  s.setAttribute("viewBox", "0 0 16 16"); s.setAttribute("width", "14"); s.setAttribute("height", "14"); s.setAttribute("aria-hidden", "true");
-  const p = document.createElementNS(NS, "path");
-  p.setAttribute("d", "M6 3h7v7M13 3L4 12"); p.setAttribute("fill", "none"); p.setAttribute("stroke", "currentColor");
-  p.setAttribute("stroke-width", "2"); p.setAttribute("stroke-linecap", "round"); p.setAttribute("stroke-linejoin", "round");
+const ICONS = {       // line drawings on a 24-unit square
+  out: "M9 4.5h10.5V15M19.5 4.5L5.5 18.5",
+  next: "M9 5l7 7-7 7",
+  inbox: "M4 13l2.3-6.4a1.5 1.5 0 0 1 1.4-1h8.6a1.5 1.5 0 0 1 1.4 1L20 13v4.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5V13zM4 13h4.3l1.1 2.3h5.2l1.1-2.3H20",
+  projects: "M5.5 4.5h13A1.5 1.5 0 0 1 20 6v12a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18V6a1.5 1.5 0 0 1 1.5-1.5zM8.5 4.5v15M15.5 4.5v15M4 9.5h4.5M4 14.5h4.5M15.5 9.5H20M15.5 14.5H20",
+  editors: "M9 11.2a3.3 3.3 0 1 0 0-6.6 3.3 3.3 0 0 0 0 6.6zM3 19.4c0-3 2.7-5 6-5s6 2 6 5M15.6 4.9a3.3 3.3 0 0 1 0 6M17.6 14.8c2 .7 3.4 2.3 3.4 4.6",
+  settings: "M4 7.5h7.5M18 7.5h2M4 16.5h2M12.5 16.5H20M14.75 5.2a2.3 2.3 0 1 0 0 4.6 2.3 2.3 0 0 0 0-4.6zM9.25 14.2a2.3 2.3 0 1 0 0 4.6 2.3 2.3 0 0 0 0-4.6z",
+  work: "M4 10.5h16v7.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18v-7.5zM4 10.5l-.7-3.4 15.1-3.2.7 3.4L4 10.5zM8 6.1l2.6 3M12.9 5.1l2.6 3",
+  board: "M8 4.5h8v4.7a4 4 0 0 1-8 0V4.5zM8 6.3H5.2v.7A2.8 2.8 0 0 0 8 9.8M16 6.3h2.8v.7A2.8 2.8 0 0 1 16 9.8M12 13.2v3.3M8.5 19.5h7M10 16.5h4v3h-4z",
+  earn: "M17.5 8.5V7a1.5 1.5 0 0 0-1.5-1.5H6A2 2 0 0 0 4 7.5V17a2 2 0 0 0 2 2h12.5a1.5 1.5 0 0 0 1.5-1.5V10a1.5 1.5 0 0 0-1.5-1.5H6a2 2 0 0 1-2-1.5M16 13.8h.2",
+};
+function icon(name, size, weight) {
+  const NS = "http://www.w3.org/2000/svg", s = document.createElementNS(NS, "svg"), p = document.createElementNS(NS, "path");
+  s.setAttribute("viewBox", "0 0 24 24"); s.setAttribute("width", String(size || 22)); s.setAttribute("height", String(size || 22)); s.setAttribute("aria-hidden", "true");
+  p.setAttribute("d", ICONS[name]); p.setAttribute("fill", "none"); p.setAttribute("stroke", "currentColor");
+  p.setAttribute("stroke-width", String(weight || 2)); p.setAttribute("stroke-linecap", "round"); p.setAttribute("stroke-linejoin", "round");
   s.append(p);
   return s;
 }
@@ -166,7 +176,7 @@ const ERRORS = {
   inactive: "This login has been switched off. Ask your admin.",
   busy: "Too many sign-in attempts right now. Try again in a minute.",
   bad_code: "That setup code isn't right.",
-  setup_done: "Edit Room is already set up. Reload and sign in.",
+  setup_done: APP + " is already set up. Reload and sign in.",
   bad_name_setup: "Enter your name.",
   in_use: "This login has work or bonuses on record, so it can't be deleted. Switch it off instead.",
 };
@@ -371,27 +381,39 @@ function editorStats(uid) {      // submitted work is counted by the server; wha
 
 /* ---------- shared pieces ---------- */
 const pill = (kind, text) => h("span", { class: "pill" + (kind ? " " + kind : ""), text: text });
-const catClass = (cat) => (cat.c >= 0 ? " cat-" + cat.c : "");
 const tape = (cat) => h("span", { class: "tape", text: cat.name });
 const quote = (label, text) => h("div", { class: "quote" }, h("span", { class: "quote-label", text: label }), h("p", { text: text }));
-const fact = (value, label) => h("div", { class: "fact" }, h("span", { class: "fact-num", text: value }), h("span", { class: "fact-label", text: label }));
-const stat = (n, label, flag) => h("div", { class: "stat" + (flag ? " flag-" + flag : "") }, h("span", { class: "stat-num", text: String(n) }), h("span", { class: "stat-label", text: label }));
+// A label with its figure under it. These sit inside a <dl>: stat on the black slate, fact on a card.
+const stat = (n, label, flag) => h("div", { class: "stat" + (flag ? " flag-" + flag : "") }, h("dt", { class: "stat-label", text: label }), h("dd", { class: "stat-num" + (String(n).length > 4 ? " long" : ""), text: String(n) }));
+const fact = (value, label, sub) => h("div", { class: "fact" }, h("dt", { class: "fact-label", text: label }), h("dd", { class: "fact-num", text: value }), sub ? h("dd", { class: "fact-sub", text: sub }) : null);
 const empty = (title, text) => h("div", { class: "empty" }, h("strong", { text: title }), text ? h("span", { text: text }) : null);
+function hero(value, rest) {      // a slate's headline figure; long amounts step down in size so they stay on one line
+  const text = String(value), n = text.length;
+  return h("p", { class: "slate-hero" }, h("span", { class: "week-num" + (n > 12 ? " tiny" : n > 9 ? " small" : n > 6 ? " mid" : ""), text: text }), rest || null);
+}
 function avatar(uid, size, urlOverride) {
   const cls = "avatar" + (size ? " " + size : ""), pic = pics.get(uid), url = urlOverride != null ? urlOverride : pic ? pic.url : "";
   if (url) return h("img", { class: cls, src: url, alt: "" });
-  let n = 0;
-  for (let i = 0; i < uid.length; i++) n = (n * 31 + uid.charCodeAt(i)) % 9973;
-  return h("span", { class: cls + " av-" + (n % 5), "aria-hidden": "true", text: (displayName(uid).trim()[0] || "?") });
+  return h("span", { class: cls, "aria-hidden": "true", text: (displayName(uid).trim()[0] || "?") });
 }
 function person(uid, size) {
   return h("div", { class: "person" + (size ? " big" : "") }, avatar(uid, size), h("span", { class: "person-name", text: displayName(uid) + (uid === state.me.id ? " (you)" : "") }));
 }
 function meter(n, target) {
-  const m = h("div", { class: "meter" + (n >= target ? " hit" : ""), role: "img", "aria-label": n + " of " + target + " submitted this week" }, h("i"));
+  const m = h("div", { class: "meter", role: "img", "aria-label": n + " of " + target + " submitted this week" }, h("i"));
   m.style.setProperty("--at", Math.min(100, Math.round((n / target) * 100)) + "%");
   return m;
 }
+function splitBar(on, late, max) {      // one thin bar: how many were on time, then how many were late
+  const total = on + late, lane = h("span", { class: "split-lane", role: "img", "aria-label": on + " on time, " + late + " late" });
+  if (!total) return lane;
+  const bar = h("span", { class: "split" });
+  bar.style.setProperty("--w", Math.max(3, Math.round((total / Math.max(max, total)) * 1000) / 10) + "%");
+  for (const part of [[on, "on"], [late, "late"]]) if (part[0]) { const seg = h("i", { class: part[1] }); seg.style.setProperty("--n", String(part[0])); bar.append(seg); }
+  lane.append(bar);
+  return lane;
+}
+const legend = () => h("div", { class: "legend" }, h("span", { class: "key", text: "On time" }), h("span", { class: "key late", text: "Late" }));
 function periodSeg() {
   const b = (id, label) => h("button", { type: "button", "aria-pressed": String(ui.period === id), dataset: { fk: "per:" + id }, onclick: () => { ui.period = id; ui.spark = null; schedule(); } }, label);
   return h("div", { class: "seg inline", role: "group", "aria-label": "Period" }, b("week", "This week"), b("month", "This month"));
@@ -422,7 +444,7 @@ function statusPills(x, forAdmin) {
 }
 function metaRow(x) {
   const p = x.p, f = x.f, items = [];
-  const it = (label, value) => h("span", null, label + " ", h("b", { text: value }));
+  const it = (label, value) => h("div", null, h("dt", { text: label }), h("dd", { text: value }));
   if (p.status === "active") {
     items.push(it("Started", stamp(p.startedAt)));
     items.push(it("Due", stamp(f.deadline)));
@@ -436,7 +458,7 @@ function metaRow(x) {
     items.push(it("Started", stamp(p.startedAt)));
     if (p.movedAt) items.push(it("Reassigned", stamp(p.movedAt)));
   }
-  return h("div", { class: "meta" }, items);
+  return h("dl", { class: "meta" }, items);
 }
 function parseLink(raw) {
   if (!raw) return null;
@@ -464,7 +486,7 @@ function linkLine(link, raw) {
   if (!link) return h("p", { class: "error", text: raw ? "The pasted link isn't a valid web address: " + raw : "No link was added." });
   return h("p", { class: "linkline" }, h("span", { text: link.host }), link.google ? null : pill("warn", "Not a Google Drive link"));
 }
-const openLink = (link, small, key) => h("a", { class: "btn" + (small ? " small" : " primary full"), href: link.href, target: "_blank", rel: "noopener noreferrer", dataset: { fk: "open:" + key } }, link.google ? "Open Drive link" : "Open link", iconOut());
+const openLink = (link, small, key) => h("a", { class: "btn" + (small ? " small" : " primary full"), href: link.href, target: "_blank", rel: "noopener noreferrer", dataset: { fk: "open:" + key } }, link.google ? "Open Drive link" : "Open link", icon("out", 16, 2.6));
 
 /* ---------- keeping the app on the phone ---------- */
 let installEvent = null;
@@ -480,14 +502,14 @@ function fillInstall(box) {
         installEvent = null;
         try { ev.prompt(); await ev.userChoice; } catch (e) { /* the browser decides whether to ask */ }
         refreshInstall();
-      } }, "Install Edit Room on this phone"),
+      } }, "Install " + APP + " on this phone"),
       h("span", { class: "hint", text: "It then opens from your home screen like any other app." }));
     return;
   }
   const ua = navigator.userAgent || "", apple = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
   box.replaceChildren(h("span", { class: "hint", text: apple
-    ? "To keep Edit Room on your iPhone: open this page in Safari, tap the Share button, then Add to Home Screen."
-    : "To keep Edit Room on your phone: open your browser's menu and choose Install app or Add to Home screen." }));
+    ? "To keep " + APP + " on your iPhone: open this page in Safari, tap the Share button, then Add to Home Screen."
+    : "To keep " + APP + " on your phone: open your browser's menu and choose Install app or Add to Home screen." }));
 }
 function installBox() {
   const box = h("div", { class: "install", dataset: { install: "1" } });
@@ -504,6 +526,7 @@ function authView() {
   if (authPanel && authPanel.phase === state.phase) return authPanel.node;
   const err = h("p", { class: "error", role: "alert", hidden: true });
   const fail = (ex) => { err.textContent = ex instanceof Oops ? ex.message : errText(ex); err.hidden = false; };
+  const head = (title, note) => h("div", { class: "slate" }, h("h2", { class: "slate-title", text: title }), h("p", { class: "slate-label", text: note }));
   let node;
   if (state.phase === "setup") {
     const code = h("input", { class: "input", id: "su-code", type: "text", autocomplete: "off", autocapitalize: "characters", spellcheck: "false" });
@@ -512,8 +535,7 @@ function authView() {
     const pass = h("input", { class: "input", id: "su-pass", type: "password", autocomplete: "new-password" });
     const go = h("button", { class: "btn primary", type: "submit" }, "Create my admin login");
     node = h("section", { class: "auth" },
-      h("h2", { class: "section-title", text: "Set up Edit Room" }),
-      h("p", { class: "section-note", text: "This creates the admin login for this app. It is done once." }),
+      head("Set up " + APP, "This creates the admin login for this app. It is done once."),
       h("div", { class: "panel" }, h("form", { class: "form", novalidate: true, oninput: () => { err.hidden = true; }, onsubmit: async (e) => {
         e.preventDefault();
         if (go.disabled) return;
@@ -537,8 +559,7 @@ function authView() {
     const pass = h("input", { class: "input", id: "li-pass", type: "password", autocomplete: "current-password" });
     const go = h("button", { class: "btn primary", type: "submit" }, "Sign in");
     node = h("section", { class: "auth" },
-      h("h2", { class: "section-title", text: "Sign in" }),
-      h("p", { class: "section-note", text: "Use the username and password your admin gave you." }),
+      head("Sign in", "Use the username and password your admin gave you."),
       h("div", { class: "panel" }, h("form", { class: "form", novalidate: true, oninput: () => { err.hidden = true; }, onsubmit: async (e) => {
         e.preventDefault();
         if (go.disabled) return;
@@ -564,26 +585,29 @@ function viewWork(all) {
   const moved = mine.filter((x) => x.p.status === "reassigned").sort((a, b) => (b.p.movedAt || 0) - (a.p.movedAt || 0));
 
   // deadline alerts start the moment the delivery time is up
-  const over = active.filter((x) => x.f.phase === "over"), late = active.filter((x) => x.f.phase === "late");
-  if (over.length) out.push(h("div", { class: "notice crit" },
+  const over = active.filter((x) => x.f.phase === "over"), late = active.filter((x) => x.f.phase === "late"), notices = [];
+  if (over.length) notices.push(h("div", { class: "notice crit" },
     h("strong", { text: over.length === 1 ? "Grace period over: " + over[0].p.name : "Grace period over on " + over.length + " projects" }),
     h("span", { text: "Your admin can now reassign " + (over.length === 1 ? "this script" : "these scripts") + " to another editor. Submit as soon as you can." })));
-  if (late.length) out.push(h("div", { class: "notice warn" },
+  if (late.length) notices.push(h("div", { class: "notice warn" },
     h("strong", { text: late.length === 1 ? "Deadline passed: " + late[0].p.name : "Deadline passed on " + late.length + " projects" }),
     h("span", { text: "Submit before the grace period ends, or your admin can reassign " + (late.length === 1 ? "it." : "them.") })));
-  for (const x of moved.filter((m) => !m.p.seenMoved).slice(0, 3)) out.push(h("div", { class: "notice" },
+  for (const x of moved.filter((m) => !m.p.seenMoved).slice(0, 3)) notices.push(h("div", { class: "notice" },
     h("strong", { text: "Reassigned: " + x.p.name }),
     h("span", { text: "Your admin moved this script to another editor." }),
     h("button", { class: "btn small", type: "button", dataset: { fk: "ack:" + x.p.id }, onclick: (e) => act(e.currentTarget, () => run("er_ack_moved", { p_project: x.p.id })) }, "Got it")));
+  if (notices.length) out.push(h("div", { class: "notices" }, notices));
 
   const wk = state.weeks[5], target = cfg.weeklyTarget;
-  const week = done.filter((x) => (x.p.submittedAt || 0) >= wk), onTime = week.filter((x) => x.f.onTime === true).length;
+  const week = done.filter((x) => (x.p.submittedAt || 0) >= wk), onTime = week.filter((x) => x.f.onTime === true).length, lateN = week.length - onTime;
   const waiting = done.filter((x) => !x.f.received).length;
-  out.push(h("section", { class: "panel week", "aria-label": "Your week" },
-    h("p", { class: "eyebrow", text: "This week · " + teamDay(wk) + " to " + teamDay(wk + 6.5 * DAY) }),
-    h("div", { class: "week-line" }, h("span", { class: "week-num", text: String(week.length) }), h("span", { class: "week-of", text: (target ? "of " + target + " " : "") + (week.length === 1 && !target ? "video submitted" : "videos submitted") })),
+  out.push(h("section", { class: "slate", "aria-label": "Your week" },
+    h("p", { class: "slate-label", text: "This week, " + teamDay(wk) + " to " + teamDay(wk + 6.5 * DAY) }),
+    hero(week.length, [
+      h("span", { class: "week-of", text: (target ? "of " + target + " " : "") + (week.length === 1 && !target ? "video submitted" : "videos submitted") }),
+      target && week.length >= target ? pill("gold", "Target hit") : null]),
     target ? meter(week.length, target) : null,
-    h("p", { class: "hint", text: onTime + " on time · " + (week.length - onTime) + " late · " + active.length + " in progress · " + waiting + " waiting for admin" }),
+    h("dl", { class: "fields four" }, stat(onTime, "On time"), stat(lateN, "Late", lateN ? "warn" : ""), stat(active.length, "In progress"), stat(waiting, "With admin")),
     h("button", { class: "btn primary", type: "button", dataset: { fk: "log" }, onclick: () => openBrief() }, "Log a new brief")));
 
   out.push(h("section", { class: "section" },
@@ -599,7 +623,7 @@ function viewWork(all) {
 
   if (moved.length) out.push(h("section", { class: "section" },
     h("h2", { class: "section-title", text: "Moved to another editor" }),
-    h("div", { class: "grid" }, moved.slice(0, 12).map((x) => h("article", { class: "clip" + catClass(catOf(x.p)) },
+    h("div", { class: "grid" }, moved.slice(0, 12).map((x) => h("article", { class: "clip" },
       h("div", { class: "clip-top" }, tape(catOf(x.p)), h("span", { class: "pills" }, statusPills(x, false))),
       h("h3", { class: "clip-title", text: x.p.name }),
       metaRow(x))))));
@@ -607,7 +631,7 @@ function viewWork(all) {
 }
 function editorCard(x) {
   const p = x.p, cat = catOf(p);
-  return h("article", { class: "clip" + catClass(cat) },
+  return h("article", { class: "clip" },
     h("div", { class: "clip-top" }, tape(cat), h("span", { class: "pills" }, statusPills(x, false))),
     h("h3", { class: "clip-title", text: p.name }),
     p.from ? h("p", { class: "hint", text: "Assigned to you by your admin." }) : null,
@@ -622,7 +646,7 @@ function editorCard(x) {
 function doneCard(x) {
   const p = x.p, f = x.f, cat = catOf(p), link = parseLink(p.link);
   const pay = f.received ? (f.amt != null ? "Earned " + money(f.amt) : "Received. Your admin hasn't set the amount yet.") : cat.rate != null ? money(cat.rate) + " once your admin marks it received" : null;
-  return h("article", { class: "clip" + catClass(cat) },
+  return h("article", { class: "clip" },
     h("div", { class: "clip-top" }, tape(cat), h("span", { class: "pills" }, statusPills(x, false))),
     h("h3", { class: "clip-title", text: p.name }),
     metaRow(x),
@@ -631,61 +655,66 @@ function doneCard(x) {
     link ? h("div", { class: "btn-row" }, openLink(link, true, "mine:" + p.id)) : null);
 }
 function viewBoard() {
-  const kind = ui.period, rows = state.board[kind], me = state.me.id, out = [];
+  const kind = ui.period, rows = state.board[kind], me = state.me.id, out = [], hours = state.config.deliveryHours;
   const start = kind === "week" ? state.weeks[5] : state.month;
-  const sec = [
-    h("div", { class: "section-head" }, h("h2", { class: "section-title", text: "Leaderboard" }), periodSeg()),
-    h("p", { class: "section-note", text: (kind === "week" ? "Week of " + teamDay(start) : teamMonth(start)) + ". Ranked by videos submitted within the " + state.config.deliveryHours + "-hour deadline." })];
-  if (!rows.length) sec.push(empty(kind === "week" ? "No on-time submissions yet this week." : "No on-time submissions yet this month.", "Submit within " + state.config.deliveryHours + " hours of logging a brief to get on the board."));
-  else {
-    const rank = (r) => 1 + rows.filter((o) => o.on > r.on).length;
-    const won = (u) => state.board.awards.some((x) => x.u === u && x.at >= start);
-    const name = (u) => displayName(u) + (u === me ? " (you)" : "");
-    const top = rows.slice(0, 3), rest = rows.slice(3);
-    sec.push(h("ol", { class: "podium n" + top.length }, top.map((r) => h("li", { class: "podium-cell" + (r.u === me ? " me" : "") },
-      h("span", { class: "rank", text: String(rank(r)) }), avatar(r.u, "xl"),
-      h("span", { class: "podium-name", text: name(r.u) }),
-      h("span", { class: "podium-count", text: r.on + " on time" }),
-      won(r.u) ? pill("good", "Bonus") : null))));
-    if (rest.length) sec.push(h("ol", { class: "rows" }, rest.map((r) => h("li", { class: "rank-row" + (r.u === me ? " me" : "") },
+  const rank = (r) => 1 + rows.filter((o) => o.on > r.on).length;
+  const won = (u) => state.board.awards.some((x) => x.u === u && x.at >= start);
+  const name = (u) => displayName(u) + (u === me ? " (you)" : "");
+  const top = rows.slice(0, 3), rest = rows.slice(3);
+  out.push(h("section", { class: "section" },
+    h("div", { class: "slate" },
+      h("div", { class: "slate-head" }, h("h2", { class: "slate-title", text: "Leaderboard" }), periodSeg()),
+      h("p", { class: "slate-label", text: (kind === "week" ? "Week of " + teamDay(start) : teamMonth(start)) + ". Ranked by videos submitted within the " + hours + "-hour deadline." }),
+      rows.length
+        ? h("ol", { class: "podium n" + top.length }, top.map((r) => h("li", { class: "podium-cell" + (rank(r) === 1 ? " first" : "") + (r.u === me ? " me" : "") },
+            h("span", { class: "podium-pic" }, avatar(r.u, "xl"), h("span", { class: "rank", text: String(rank(r)) })),
+            h("span", { class: "podium-name", text: name(r.u) }),
+            h("span", { class: "podium-count", text: r.on + " on time" }),
+            won(r.u) ? pill("gold", "Bonus") : null)))
+        : h("div", { class: "slate-empty" },
+            h("strong", { text: kind === "week" ? "No on-time submissions yet this week." : "No on-time submissions yet this month." }),
+            h("span", { text: "Submit within " + hours + " hours of logging a brief to get on the board." }))),
+    rest.length ? h("ol", { class: "rows" }, rest.map((r) => h("li", { class: "rank-row" + (r.u === me ? " me" : "") },
       h("span", { class: "rank", text: String(rank(r)) }), avatar(r.u),
       h("span", { class: "person-name", text: name(r.u) }),
       h("span", { class: "rank-count", text: r.on + " on time" }),
-      won(r.u) ? pill("good", "Bonus") : null))));
-    if (!state.isAdmin && !rows.some((r) => r.u === me)) sec.push(h("p", { class: "hint", text: "You're not on the board yet " + (kind === "week" ? "this week." : "this month.") }));
-  }
-  out.push(h("section", { class: "section" }, sec));
+      won(r.u) ? pill("gold", "Bonus") : null))) : null,
+    rows.length && !state.isAdmin && !rows.some((r) => r.u === me) ? h("p", { class: "hint", text: "You're not on the board yet " + (kind === "week" ? "this week." : "this month.") }) : null));
   const awards = state.board.awards.slice(0, 8);
   if (awards.length) out.push(h("section", { class: "section" },
     h("h2", { class: "section-title", text: "Bonuses awarded" }),
-    h("ul", { class: "rows" }, awards.map((x) => h("li", null, h("div", { class: "row-main" }, person(x.u), h("span", { class: "hint", text: (x.label || "Bonus") + " · " + shortDate(x.at) })))))));
+    h("ul", { class: "rows" }, awards.map((x) => h("li", null,
+      h("div", { class: "row-main" }, person(x.u), h("span", { class: "hint", text: x.label || "Bonus" })),
+      h("span", { class: "rank-count", text: shortDate(x.at) }))))));
   return out;
 }
 function viewEarn(all) {
   const uid = state.me.id, mine = all.filter((x) => x.uid === uid), lines = [], out = [];
   let pendSum = 0;
-  for (const x of mine) if (x.f.received) lines.push({ at: x.f.receivedAt, amt: x.f.amt, title: x.p.name, sub: catOf(x.p).name + " · Received " + shortDate(x.f.receivedAt) });
-  for (const b of state.bonuses.get(uid) || []) lines.push({ at: b.at, amt: b.amt, title: b.label || "Bonus", sub: "Bonus · " + shortDate(b.at) });
+  for (const x of mine) if (x.f.received) lines.push({ at: x.f.receivedAt, amt: x.f.amt, title: x.p.name, sub: catOf(x.p).name + ", received " + shortDate(x.f.receivedAt) });
+  for (const b of state.bonuses.get(uid) || []) lines.push({ at: b.at, amt: b.amt, title: b.label || "Bonus", bonus: true });
   lines.sort((a, b) => b.at - a.at);
   const pending = mine.filter(isWaiting).sort((a, b) => (b.p.submittedAt || 0) - (a.p.submittedAt || 0));
   for (const x of pending) pendSum += rateOf(x.p) || 0;
   const shown = ui.earnAll ? lines : lines.slice(0, 20);
-  out.push(h("section", { class: "panel week", "aria-label": "Your earnings" },
-    h("p", { class: "eyebrow", text: "Total earned" }),
-    h("div", { class: "week-line" }, h("span", { class: "week-num", text: money(state.totals.videos + state.totals.bonus) })),
-    h("div", { class: "facts three" }, fact(money(state.totals.month), "This month"), fact(money(state.totals.bonus), "From bonuses"), fact(money(pendSum), "Waiting for admin")),
+  const row = (label, value) => h("div", null, h("dt", { text: label }), h("dd", { text: value }));
+  out.push(h("section", { class: "slate", "aria-label": "Your earnings" },
+    h("p", { class: "slate-label", text: "Total earned" }),
+    hero(money(state.totals.videos + state.totals.bonus)),
+    h("dl", { class: "slate-rows" }, row("This month", money(state.totals.month)), row("From bonuses", money(state.totals.bonus)), row("Waiting for admin", money(pendSum))),
     h("p", { class: "hint", text: "A video is added to your earnings when your admin marks it received." })));
   out.push(h("section", { class: "section" },
     h("h2", { class: "section-title", text: "What you earned" }),
     shown.length ? h("ul", { class: "rows" }, shown.map((l) => h("li", null,
-      h("div", { class: "row-main" }, h("span", { class: "row-title", text: l.title }), h("span", { class: "hint", text: l.sub })),
+      h("div", { class: "row-main" }, h("span", { class: "row-title", text: l.title }),
+        l.bonus ? h("span", { class: "linkline" }, pill("gold", "Bonus"), shortDate(l.at)) : h("span", { class: "hint", text: l.sub })),
       h("span", { class: "amount", text: l.amt != null ? money(l.amt) : "Not set yet" }))))
       : empty("Nothing earned yet.", "Each video appears here with its amount once your admin marks it received."),
     lines.length > 20 ? h("div", { class: "btn-row" }, h("button", { class: "btn small", type: "button", dataset: { fk: "earnall" }, onclick: () => { ui.earnAll = !ui.earnAll; schedule(); } }, ui.earnAll ? "Show fewer" : "Show all " + lines.length)) : null));
   if (pending.length) out.push(h("section", { class: "section" },
     h("h2", { class: "section-title", text: "Waiting for your admin" }),
     h("ul", { class: "rows" }, pending.map((x) => { const r = rateOf(x.p); return h("li", null,
-      h("div", { class: "row-main" }, h("span", { class: "row-title", text: x.p.name }), h("span", { class: "hint", text: catOf(x.p).name + " · Submitted " + shortDate(x.p.submittedAt || x.p.updatedAt) })),
+      h("div", { class: "row-main" }, h("span", { class: "row-title", text: x.p.name }), h("span", { class: "hint", text: catOf(x.p).name + ", submitted " + shortDate(x.p.submittedAt || x.p.updatedAt) })),
       h("span", { class: "amount", text: r != null ? money(r) : "Rate not set" })); }))));
   return out;
 }
@@ -697,7 +726,7 @@ function setupCard() {
   const editors = Array.from(state.users.values()).filter((u) => u.role === "editor").length;
   if (hasCats && editors > 0) return null;
   return h("section", { class: "panel" },
-    h("h2", { class: "section-title", text: "Set up your room" }),
+    h("h2", { class: "section-title", text: "Get your team started" }),
     h("ol", { class: "steps" },
       h("li", { class: hasCats ? "done" : null }, h("div", { class: "step-body" },
         h("span", { class: "step-title", text: "Add your video categories and what each pays" }),
@@ -717,11 +746,12 @@ function viewInbox(all) {
   const active = all.filter((x) => x.p.status === "active");
   const past = active.filter((x) => x.f.phase !== "ontrack").sort((a, b) => a.f.deadline - b.f.deadline);
   const over = past.filter((x) => x.f.phase === "over").length;
+  out.push(h("section", { class: "slate", "aria-label": "At a glance" },
+    hero(waiting.length, h("span", { class: "week-of", text: waiting.length === 1 ? "video ready to download" : "videos ready to download" })),
+    h("dl", { class: "fields three" },
+      stat(active.length, "In progress"), stat(past.length, "Past deadline", past.length ? "warn" : ""), stat(over, "Grace over", over ? "crit" : ""))));
   const setup = setupCard();
   if (setup) out.push(setup);
-  out.push(h("section", { class: "stats", "aria-label": "At a glance" },
-    stat(waiting.length, "Waiting for you"), stat(active.length, "In progress"),
-    stat(past.length, "Past deadline", past.length ? "warn" : ""), stat(over, "Grace over", over ? "crit" : "")));
   out.push(h("section", { class: "section" },
     h("div", { class: "section-head" }, h("h2", { class: "section-title", text: "Ready to download" }), waiting.length > 1 ? h("p", { class: "section-note", text: "Oldest first" }) : null),
     waiting.length ? h("div", { class: "grid" }, waiting.map(inboxCard))
@@ -739,7 +769,7 @@ function receive(btn, uid, p) {
 }
 function inboxCard(x) {
   const uid = x.uid, p = x.p, cat = catOf(p), key = uid + ":" + p.id, link = parseLink(p.link);
-  return h("article", { class: "clip" + catClass(cat) },
+  return h("article", { class: "clip" },
     h("div", { class: "clip-top" }, tape(cat), h("span", { class: "pills" }, deadlinePill(x, false), pill("info", "Submitted " + ago(p.submittedAt || p.updatedAt)))),
     h("h3", { class: "clip-title", text: p.name }),
     person(uid),
@@ -754,7 +784,7 @@ function inboxCard(x) {
 }
 function pastCard(x) {
   const uid = x.uid, p = x.p, cat = catOf(p), key = uid + ":" + p.id;
-  return h("article", { class: "clip" + catClass(cat) },
+  return h("article", { class: "clip" },
     h("div", { class: "clip-top" }, tape(cat), h("span", { class: "pills" }, statusPills(x, true))),
     h("h3", { class: "clip-title", text: p.name }),
     person(uid),
@@ -771,7 +801,7 @@ function adminCard(x) {
   if (f.received) tools.push(h("button", { class: "btn small", type: "button", dataset: { fk: "amt:" + key }, onclick: () => openAmount(uid, p, f.amt) }, "Change amount"));
   if (f.received) tools.push(h("button", { class: "btn small", type: "button", dataset: { fk: "unrecv:" + key }, onclick: (e) => act(e.currentTarget, () => run("er_receive", { p_project: p.id, p_on: false }), "Moved back to the inbox") }, "Undo received"));
   tools.push(h("button", { class: "btn small", type: "button", dataset: { fk: "del:" + key }, onclick: () => openDelete(uid, p) }, "Delete"));
-  return h("article", { class: "clip" + catClass(cat) },
+  return h("article", { class: "clip" },
     h("div", { class: "clip-top" }, tape(cat), h("span", { class: "pills" }, statusPills(x, true))),
     h("h3", { class: "clip-title", text: p.name }),
     person(uid),
@@ -787,7 +817,7 @@ function adminCard(x) {
     h("div", { class: "btn-row" },
       p.status === "submitted" && link ? openLink(link, true, key) : null,
       isWaiting(x) ? h("button", { class: "btn small", type: "button", dataset: { fk: "recv:" + key }, onclick: (e) => receive(e.currentTarget, uid, p) }, "Mark received") : null,
-      h("button", { class: "btn small quiet", type: "button", "aria-expanded": String(open), dataset: { fk: "mg:" + key }, onclick: () => { ui.manage = open ? null : key; schedule(); } }, open ? "Hide options" : "Manage")),
+      h("button", { class: "btn small", type: "button", "aria-expanded": String(open), dataset: { fk: "mg:" + key }, onclick: () => { ui.manage = open ? null : key; schedule(); } }, open ? "Hide options" : "Manage")),
     open ? h("div", { class: "btn-row tools" }, tools) : null);
 }
 
@@ -799,17 +829,18 @@ function projectsPanel() {
     return { sel: sel, node: h("div", { class: "field" }, h("label", { for: id, text: label }), sel) };
   };
   const a = mk("f-status", "Status", "fStatus"), b = mk("f-editor", "Editor", "fEditor"), c = mk("f-cat", "Category", "fCat");
+  const head = h("section", { class: "slate", "aria-label": "Deadlines over the last 10 weeks" });
   const count = h("p", { class: "section-note" }), list = h("div", { class: "grid" }), more = h("div", { class: "btn-row" }), sum = h("ul", { class: "rows" });
   projPanel = {
     node: h("div", { class: "stack" },
+      head,
       h("section", { class: "section" },
-        h("h2", { class: "section-title", text: "Deadlines by category" }),
-        h("p", { class: "section-note", text: "How each category is doing against the deadline, over the last 10 weeks." }),
+        h("div", { class: "section-head" }, h("h2", { class: "section-title", text: "Deadlines by category" }), legend()),
         sum),
       h("section", { class: "section", id: "p-list" },
         h("div", { class: "section-head" }, h("h2", { class: "section-title", text: "Projects" }), count),
         h("div", { class: "filters" }, a.node, b.node, c.node), list, more)),
-    status: a.sel, editor: b.sel, cat: c.sel, count: count, list: list, more: more, sum: sum,
+    head: head, status: a.sel, editor: b.sel, cat: c.sel, count: count, list: list, more: more, sum: sum,
   };
   return projPanel;
 }
@@ -851,15 +882,30 @@ async function loadOlder() {
 }
 function fillProjects(all) {
   const P = projectsPanel(), groups = catSummary(all);
-  P.sum.replaceChildren.apply(P.sum, groups.length ? groups.map((g) => h("li", null,
-    h("div", { class: "row-main wide" },
-      h("span", { class: "tape" + (g.c >= 0 ? " cat-" + g.c : ""), text: g.name }),
-      h("div", { class: "facts three" },
-        fact(String(g.on), "On time"),
-        fact(String(g.late), g.late ? "Late, " + span(g.lateSum / g.late) + " on average" : "Late"),
-        fact(String(g.open), g.open ? "Past deadline now, up to " + span(g.openMax) : "Past deadline now"))),
-    h("button", { class: "btn small", type: "button", dataset: { fk: "cat:" + g.id }, onclick: () => { ui.fCat = g.id; ui.fStatus = "all"; ui.limit = 40; schedule(); const el = $("p-list"); if (el && el.scrollIntoView) el.scrollIntoView({ block: "start" }); } }, "View projects")))
-    : [h("li", { class: "rows-empty", text: "Add categories in Settings to see how each one is doing." })]);
+  const tot = { on: 0, late: 0, lateSum: 0, open: 0 };
+  let most = 1;
+  for (const g of groups) { tot.on += g.on; tot.late += g.late; tot.lateSum += g.lateSum; tot.open += g.open; most = Math.max(most, g.on + g.late); }
+  const sent = tot.on + tot.late;
+  P.head.replaceChildren(
+    h("p", { class: "slate-label", text: "Last 10 weeks, all categories" }),
+    hero(tot.on, h("span", { class: "week-of", text: (sent ? "of " + sent + " " : "") + (sent === 1 ? "video" : "videos") + " submitted on time" })),
+    sent ? splitBar(tot.on, tot.late, sent) : null,
+    h("dl", { class: "fields three" },
+      stat(tot.late, "Late", tot.late ? "warn" : ""), stat(tot.late ? span(tot.lateSum / tot.late) : "–", "Average delay"), stat(tot.open, "Past deadline", tot.open ? "warn" : "")));
+  // a small table: one row per category, its bar under the name, the three counts in columns
+  const num = (n, flag) => h("span", { class: "cat-n" + (n ? (flag ? " flag" : "") : " zero"), text: String(n) });
+  P.sum.replaceChildren.apply(P.sum, groups.length ? [h("li", { class: "cat-head", "aria-hidden": "true" },
+    h("span"), h("span", { text: "On time" }), h("span", { text: "Late" }), h("span", { text: "Past deadline" }), h("span"))].concat(groups.map((g) => {
+    const lateBy = g.late ? span(g.lateSum / g.late) : "", openBy = g.open ? span(g.openMax) : "", notes = [];
+    if (g.late) notes.push("Late by " + lateBy + " on average.");
+    if (g.open) notes.push("Up to " + openBy + " past the deadline now.");
+    return h("li", { class: "cat-row" }, h("button", { class: "cat-btn", type: "button", dataset: { fk: "cat:" + g.id },
+      "aria-label": g.name + ": " + g.on + " on time, " + g.late + " late" + (g.late ? " by " + lateBy + " on average" : "") + ", " + g.open + " past deadline" + (g.open ? " by up to " + openBy : "") + ". Show its projects.",
+      onclick: () => { ui.fCat = g.id; ui.fStatus = "all"; ui.limit = 40; schedule(); const el = $("p-list"); if (el && el.scrollIntoView) el.scrollIntoView({ block: "start" }); } },
+      h("span", { class: "cat-name", text: g.name }), num(g.on), num(g.late), num(g.open, true), icon("next", 16, 2.6),
+      g.on + g.late ? splitBar(g.on, g.late, most) : null,
+      notes.length ? h("span", { class: "cat-note", text: notes.join(" ") }) : null));
+  })) : [h("li", { class: "rows-empty", text: "Add categories in Settings to see how each one is doing." })]);
   const catItems = [["all", "All categories"]];
   for (const g of groups) catItems.push([g.id, g.name]);
   syncSelect(P.status, STATUS_FILTERS, ui.fStatus);
@@ -890,7 +936,7 @@ function fillProjects(all) {
   // keep one screenful ahead: fetch the next older page whenever the list on screen is not full
   if (hist.more && !hist.busy && !hist.failed && rows.length <= ui.limit) loadOlder();
   const open = hist.more || hist.busy;
-  P.count.textContent = (open ? rows.length + "+ projects" : plural(rows.length, "project", "projects")) + (order && rows.length > 1 ? " · " + order : "");
+  P.count.textContent = (open ? rows.length + "+ projects" : plural(rows.length, "project", "projects")) + (order && rows.length > 1 ? ", " + order : "");
   const shown = rows.slice(0, ui.limit);
   P.list.replaceChildren.apply(P.list, shown.length ? shown.map(adminCard)
     : [hist.busy ? empty("Looking through older projects…") : empty("No projects match these filters.", all.length ? "Try a different status, editor or category." : "Projects appear here as soon as an editor logs a brief.")]);
@@ -905,19 +951,29 @@ function fillProjects(all) {
 }
 
 function viewEditors() {
-  const ids = rosterIds(), target = state.config.weeklyTarget, win = windows(), per = ui.period;
+  const ids = rosterIds(), target = state.config.weeklyTarget, win = windows(), per = ui.period, hours = state.config.deliveryHours;
   if (!ids.length) return [h("section", { class: "section" }, h("h2", { class: "section-title", text: "Editors" }),
     empty("No editors yet.", "Create a login for each editor in Settings. They appear here as soon as they have one."))];
   const on = per === "week" ? "wkOn" : "moOn", late = per === "week" ? "wkLate" : "moLate";
   const rows = ids.map((uid) => editorStats(uid)).sort((a, b) => b[on] - a[on] || a[late] - b[late] || b.on4 - a.on4 || (a.uid < b.uid ? -1 : 1));
-  return [h("section", { class: "section" },
-    h("div", { class: "section-head" }, h("h2", { class: "section-title", text: "Editors" }), periodSeg()),
-    h("p", { class: "section-note", text: "Top performers first, ranked by videos submitted within the " + state.config.deliveryHours + "-hour deadline " + (per === "week" ? "this week." : "this month.") + " This is the order editors see on their leaderboard." }),
-    h("div", { class: "grid" }, rows.map((s) => rosterCard(s, win, target, s[on] > 0 ? 1 + rows.filter((o) => o[on] > s[on]).length : 0))))];
+  const sum = { on: 0, late: 0, active: 0, past: 0 };
+  let peak = 1;
+  for (const s of rows) {
+    sum.on += s[on]; sum.late += s[late]; sum.active += s.active; sum.past += s.lateOpen + s.overOpen;
+    for (const w of s.weeks) peak = Math.max(peak, w.on + w.late);
+  }
+  return [
+    h("section", { class: "slate", "aria-label": "The team" },
+      h("div", { class: "slate-head" }, h("p", { class: "slate-label", text: per === "week" ? "The team, week of " + teamDay(win.weeks[5]) : "The team, " + teamMonth(win.month) }), periodSeg()),
+      hero(sum.on, h("span", { class: "week-of", text: (sum.on === 1 ? "video" : "videos") + " submitted on time" })),
+      h("dl", { class: "fields three" },
+        stat(sum.late, "Late", sum.late ? "warn" : ""), stat(sum.active, "In progress"), stat(sum.past, "Past deadline", sum.past ? "warn" : ""))),
+    h("section", { class: "section" },
+      h("p", { class: "section-note", text: "Top performers first, ranked by videos submitted within the " + hours + "-hour deadline " + (per === "week" ? "this week." : "this month.") + " This is the order editors see on their leaderboard." }),
+      h("div", { class: "grid" }, rows.map((s) => rosterCard(s, win, target, s[on] > 0 ? 1 + rows.filter((o) => o[on] > s[on]).length : 0, peak))))];
 }
-function sparkNode(s, weekStartsList) {
+function sparkNode(s, weekStartsList, max) {      // max is the busiest week of anyone on the team
   const H = 50, sel = ui.spark && ui.spark.uid === s.uid ? ui.spark.i : -1;
-  const max = Math.max.apply(null, [1].concat(s.weeks.map((w) => w.on + w.late)));
   const box = h("div", { class: "spark" + (sel >= 0 ? " picked" : ""), role: "group", "aria-label": "Videos submitted per week, last 6 weeks" });
   s.weeks.forEach((w, i) => {
     const total = w.on + w.late;
@@ -933,16 +989,18 @@ function sparkNode(s, weekStartsList) {
   });
   const w = sel >= 0 ? s.weeks[sel] : null;
   return h("div", { class: "chart" },
-    h("div", { class: "legend" }, h("span", { class: "key", text: "On time" }), h("span", { class: "key late", text: "Late" })),
-    box,
+    h("div", { class: "plot" },
+      legend(),
+      box,
+      h("div", { class: "axis", "aria-hidden": "true" }, h("span", { text: "Week of " + teamDay(weekStartsList[0]) }), h("span", { text: "This week" }))),
     w ? h("p", { class: "readout" }, h("b", { text: plural(w.on + w.late, "video", "videos") }), " in the week of " + teamDay(weekStartsList[sel]) + ": " + w.on + " on time, " + w.late + " late.")
-      : h("p", { class: "readout", text: "Submitted per week for the last 6 weeks, this week on the right. Tap a bar for that week's numbers." }));
+      : h("p", { class: "readout", text: "Videos submitted each week, on the same scale for every editor. Tap a bar for that week's numbers." }));
 }
-function rosterCard(s, win, target, rank) {
+function rosterCard(s, win, target, rank, peak) {
   const per = ui.period, on = per === "week" ? s.wkOn : s.moOn, late = per === "week" ? s.wkLate : s.moLate;
   const since = per === "week" ? win.weeks[5] : win.month, bonuses = state.bonuses.get(s.uid) || [];
   const chips = [], quiet = s.last ? Math.floor((now() - s.last) / DAY) : null;
-  if (bonuses.some((b) => b.at >= since)) chips.push(pill("good", per === "week" ? "Bonus this week" : "Bonus this month"));
+  if (bonuses.some((b) => b.at >= since)) chips.push(pill("gold", per === "week" ? "Bonus this week" : "Bonus this month"));
   if (s.overOpen) chips.push(pill("crit", s.overOpen + " grace over"));
   if (s.lateOpen) chips.push(pill("warn", s.lateOpen + " past deadline"));
   if (quiet != null && quiet >= 7) chips.push(pill("", "Quiet for " + quiet + " days"));
@@ -950,15 +1008,15 @@ function rosterCard(s, win, target, rank) {
   if (s.moved) chips.push(pill("", s.moved + " reassigned away"));
   const week = s.wkOn + s.wkLate;
   return h("article", { class: "clip" },
-    h("div", { class: "clip-top" }, h("div", { class: "ranked" }, rank ? h("span", { class: "rank", text: String(rank) }) : null, person(s.uid, "lg")), chips.length ? h("span", { class: "pills" }, chips) : null),
+    h("div", { class: "clip-top" }, h("div", { class: "ranked" }, rank ? h("span", { class: "rank" + (rank === 1 ? " first" : ""), text: String(rank) }) : null, person(s.uid, "lg")), chips.length ? h("span", { class: "pills" }, chips) : null),
     h("div", { class: "week" },
-      h("div", { class: "week-line" }, h("span", { class: "fact-num", text: String(on) }), h("span", { class: "hint", text: "on time " + (per === "week" ? "this week" : "this month") + (late ? " · " + late + " late" : "") })),
+      h("p", { class: "week-line" }, h("span", { class: "fact-num", text: String(on) }), h("span", { class: "hint", text: "on time " + (per === "week" ? "this week" : "this month") + (late ? ", " + late + " late" : "") })),
       target && per === "week" ? meter(week, target) : null,
       target && per === "week" ? h("p", { class: "hint", text: week + " of " + target + " submitted against the weekly target." }) : null),
-    s.weeks.some((w) => w.on + w.late > 0) ? sparkNode(s, win.weeks) : h("p", { class: "hint", text: "Nothing submitted in the last 6 weeks." }),
-    h("div", { class: "facts" },
+    s.weeks.some((w) => w.on + w.late > 0) ? sparkNode(s, win.weeks, peak) : h("p", { class: "hint", text: "Nothing submitted in the last 6 weeks." }),
+    h("dl", { class: "facts" },
       fact(String(s.active), "In progress"), fact(s.rate != null ? Math.round(s.rate * 100) + "%" : "–", "On time, last 4 weeks"),
-      fact(s.avg != null ? span(s.avg) : "–", "Average turnaround"), fact(money(s.earned.total), s.earned.bonus ? "Earned, with " + money(s.earned.bonus) + " in bonuses" : "Earned in total")),
+      fact(s.avg != null ? span(s.avg) : "–", "Average turnaround"), fact(money(s.earned.total), "Earned in total", s.earned.bonus ? "includes " + money(s.earned.bonus) + " in bonuses" : null)),
     s.last ? h("p", { class: "hint", text: "Last active " + ago(s.last) + "." }) : null,
     h("div", { class: "btn-row" },
       h("button", { class: "btn small", type: "button", dataset: { fk: "view:" + s.uid }, onclick: () => { ui.fEditor = s.uid; ui.fStatus = "all"; ui.fCat = "all"; ui.limit = 40; setTab("projects"); } }, "View projects"),
@@ -985,7 +1043,7 @@ function settingsPanel() {
   const numField = (id, min, max) => h("input", { class: "input", id: id, type: "number", min: String(min), max: String(max), step: "1", inputmode: "numeric" });
   const delivery = numField("set-delivery", 1, 720), grace = numField("set-grace", 0, 720), target = numField("set-target", 1, 999);
   target.setAttribute("placeholder", "No target");
-  const currency = h("input", { class: "input", id: "set-currency", type: "text", maxlength: "6", autocomplete: "off", placeholder: "$" });
+  const currency = h("input", { class: "input", id: "set-currency", type: "text", maxlength: "6", autocomplete: "off", placeholder: "₦" });
   const bonus = h("input", { class: "input", id: "set-bonus", type: "text", inputmode: "decimal", autocomplete: "off", placeholder: "No default" });
   const save = async () => {
     const d = Math.round(Number(delivery.value)), g = Math.round(Number(grace.value)), t = target.value.trim() === "" ? null : Math.round(Number(target.value));
@@ -1038,30 +1096,18 @@ function teamRow(u) {
   const me = state.me, manage = u.id !== me.id && !u.owner && (u.role !== "admin" || me.owner);
   return h("li", null,
     h("div", { class: "row-main" },
-      person(u.id),
-      h("span", { class: "hint", text: "@" + u.username + (u.seen ? " · last seen " + ago(u.seen) : " · hasn't signed in yet") }),
-      h("span", { class: "pills" }, u.owner ? pill("info", "Owner") : u.role === "admin" ? pill("info", "Admin") : pill("", "Editor"), u.active ? null : pill("warn", "Switched off"))),
+      h("div", { class: "row-head" }, person(u.id), u.owner ? pill("info", "Owner") : u.role === "admin" ? pill("info", "Admin") : null, u.active ? null : pill("warn", "Switched off")),
+      h("span", { class: "hint", text: "@" + u.username + (u.seen ? ", last seen " + ago(u.seen) : ", hasn't signed in yet") })),
     manage ? h("div", { class: "row-actions" }, h("button", { class: "btn small", type: "button", dataset: { fk: "user:" + u.id }, onclick: () => openUser(u.id) }, "Manage")) : null);
 }
-function fillSettings(all) {
+function fillSettings() {
   const S = settingsPanel(), cfg = state.config, cats = cfg.categories;
   S.teamList.replaceChildren.apply(S.teamList, Array.from(state.users.values()).map(teamRow));
-  const used = new Map();
-  for (const x of all) if (x.p.catId) used.set(x.p.catId, (used.get(x.p.catId) || 0) + 1);
-  S.list.replaceChildren.apply(S.list, cats.length ? cats.map((c) => {
-    const n = used.get(c.id) || 0;
-    return h("li", null,
-      h("div", { class: "row-main" }, h("span", { class: "tape cat-" + c.c, text: c.name }),
-        h("span", { class: "hint", text: (c.rate != null ? money(c.rate) + " per video" : "No pay rate set") + " · " + (n ? "used by " + plural(n, "recent project", "recent projects") : "not used yet") })),
-      ui.catConfirm === c.id
-        ? h("div", { class: "row-actions" },
-            h("span", { class: "hint", text: n ? "Remove it? Projects already logged keep this name." : "Remove it?" }),
-            h("button", { class: "btn small danger", type: "button", dataset: { fk: "catyes:" + c.id }, onclick: (e) => act(e.currentTarget, async () => { await run("er_remove_category", { p_id: c.id }); ui.catConfirm = null; }, "Category removed") }, "Remove"),
-            h("button", { class: "btn small", type: "button", dataset: { fk: "catno:" + c.id }, onclick: () => { ui.catConfirm = null; schedule(); } }, "Keep"))
-        : h("div", { class: "row-actions" },
-            h("button", { class: "btn small", type: "button", dataset: { fk: "catedit:" + c.id }, onclick: () => openCat(c) }, "Edit"),
-            h("button", { class: "btn small", type: "button", dataset: { fk: "catdel:" + c.id }, onclick: () => { ui.catConfirm = c.id; schedule(); } }, "Remove")));
-  }) : [h("li", { class: "rows-empty", text: "No categories yet. Add your first one below." })]);
+  S.list.replaceChildren.apply(S.list, cats.length ? cats.map((c) => h("li", null,
+    h("div", { class: "row-main" }, h("span", { class: "tape", text: c.name }),
+      h("span", { class: "hint", text: c.rate != null ? money(c.rate) + " per video" : "No pay rate set" })),
+    h("div", { class: "row-actions" }, h("button", { class: "btn small", type: "button", dataset: { fk: "catedit:" + c.id }, onclick: () => openCat(c) }, "Edit"))))
+    : [h("li", { class: "rows-empty", text: "No categories yet. Add your first one below." })]);
   const put = (el, v) => { if (document.activeElement !== el) el.value = v; };
   put(S.delivery, String(cfg.deliveryHours)); put(S.grace, String(cfg.graceHours));
   put(S.target, cfg.weeklyTarget == null ? "" : String(cfg.weeklyTarget));
@@ -1183,6 +1229,7 @@ function openCat(c) {
     body: [
       field("Category name", input, "Projects already logged under it show the new name."),
       field(moneyLabel("Pay per video"), rate, "Used from now on. Videos you already marked received keep the amount they were given.")],
+    foot: h("div", { class: "btn-row tools" }, h("button", { class: "btn small", type: "button", onclick: () => openRemoveCat(c) }, "Remove category")),
     run: async () => {
       const v = tidy(input.value), raw = rate.value.trim(), pay = raw ? parseAmount(raw) : null;
       if (!v) throw new Oops("Enter a name.");
@@ -1191,6 +1238,15 @@ function openCat(c) {
       catch (ex) { if (ex.code === "taken") throw new Oops("Another category already has that name."); throw ex; }
       return "Category saved";
     },
+  });
+}
+function openRemoveCat(c) {
+  let n = 0;
+  for (const x of collect()) if (x.p.catId === c.id) n++;
+  formSheet({
+    title: "Remove category", submit: "Remove category", danger: true,
+    body: [h("p", null, "Remove ", h("strong", { text: c.name }), " from the list editors pick from? " + (n ? plural(n, "recent project uses", "recent projects use") + " it. Projects already logged keep the name." : "No recent project uses it."))],
+    run: async () => { await run("er_remove_category", { p_id: c.id }); return "Category removed"; },
   });
 }
 function openReassign(uid, p) {
@@ -1203,7 +1259,7 @@ function openReassign(uid, p) {
     h("input", { type: "radio", name: "r-to", id: "r-to-" + i, value: s.uid }),
     h("span", { class: "option-main" },
       h("span", { class: "option-name", text: displayName(s.uid) }),
-      h("span", { class: "hint", text: s.wkOn + " on time this week · " + s.active + " in progress" + (s.lateOpen + s.overOpen ? " · " + (s.lateOpen + s.overOpen) + " past deadline" : "") }))));
+      h("span", { class: "hint", text: s.wkOn + " on time this week, " + s.active + " in progress" + (s.lateOpen + s.overOpen ? ", " + (s.lateOpen + s.overOpen) + " past deadline" : "") }))));
   formSheet({
     title: "Reassign project", submit: "Reassign",
     body: [
@@ -1254,7 +1310,7 @@ function openBonuses(uid) {
     body: [
       h("p", null, "For ", h("strong", { text: displayName(uid) }), ". A bonus is added to their earnings and shown on the leaderboard every editor sees. The amount stays between you and them."),
       list.length ? h("ul", { class: "rows" }, list.map((b) => h("li", null,
-        h("div", { class: "row-main" }, h("span", { class: "row-title", text: b.label || "Bonus" }), h("span", { class: "hint", text: shortDate(b.at) + " · " + money(b.amt) })),
+        h("div", { class: "row-main" }, h("span", { class: "row-title", text: b.label || "Bonus" }), h("span", { class: "hint", text: money(b.amt) + ", awarded " + shortDate(b.at) })),
         h("button", { class: "btn small", type: "button", onclick: (e) => act(e.currentTarget, async () => { await run("er_remove_bonus", { p_bonus: b.id }); closeSheet(); }, "Bonus removed") }, "Remove")))) : null,
       field(moneyLabel("Bonus amount"), amt),
       field("What it's for", label, "Editors see this line on the leaderboard.")],
@@ -1283,7 +1339,7 @@ function newPassword() {
   return s;
 }
 function openCreds(title, name, username, password) {
-  const text = "Edit Room login for " + name + "\nOpen: " + location.origin + location.pathname + "\nUsername: " + username + "\nPassword: " + password;
+  const text = APP + " login for " + name + "\nOpen: " + location.origin + location.pathname + "\nUsername: " + username + "\nPassword: " + password;
   const pre = h("pre", { class: "cred", id: "cred-text", text: text });
   const copy = h("button", { class: "btn primary grow", type: "button", onclick: async () => {
     try { await navigator.clipboard.writeText(text); copy.textContent = "Copied"; }
@@ -1331,7 +1387,8 @@ function openUser(id) {
     body: [
       h("div", { class: "pic-row" }, avatar(u.id, "lg"), h("div", { class: "row-main" },
         h("span", { class: "row-title", text: "@" + u.username }),
-        h("span", { class: "hint", text: (u.active ? "" : "Switched off · ") + (u.seen ? "Last seen " + ago(u.seen) : "Hasn't signed in yet") }))),
+        h("span", { class: "hint", text: u.seen ? "Last seen " + ago(u.seen) : "Hasn't signed in yet" }),
+        u.active ? null : pill("warn", "Switched off"))),
       field("Name", name, "Shown on their work, their pay and the leaderboard."),
       me.owner ? field("Role", role) : null],
     foot: h("div", { class: "btn-row tools" },
@@ -1469,7 +1526,7 @@ function toast(msg, bad) {
 function setTab(id) {
   const admin = ui.view === "admin";
   if (admin) ui.tab = id; else ui.etab = id;
-  ui.manage = null; ui.catConfirm = null;
+  ui.manage = null;
   try { localStorage.setItem(admin ? "editroom.tab" : "editroom.etab", id); } catch (e) { /* remembering the tab is optional */ }
   window.scrollTo(0, 0);
   schedule();
@@ -1494,7 +1551,9 @@ function renderTabs(all) {
   const admin = ui.view === "admin", defs = admin ? ADMIN_TABS : EDITOR_TABS, cur = admin ? ui.tab : ui.etab;
   if (nav.dataset.kind !== ui.view) {
     nav.dataset.kind = ui.view;
-    nav.replaceChildren.apply(nav, defs.map((d, i) => h("button", { class: "tab", type: "button", dataset: { tab: d[0] }, onclick: () => setTab(d[0]) }, d[1], i === 0 ? h("span", { class: "count" + (admin ? "" : " alert"), hidden: true }) : null)));
+    nav.replaceChildren.apply(nav, defs.map((d, i) => h("button", { class: "tab", type: "button", dataset: { tab: d[0] }, onclick: () => setTab(d[0]) },
+      h("span", { class: "tab-ic" }, icon(d[0])), h("span", { class: "tab-label", text: d[1] }),
+      i === 0 ? h("span", { class: "count" + (admin ? "" : " alert"), hidden: true }) : null)));
   }
   const n = admin ? all.filter(isWaiting).length : all.filter((x) => x.uid === state.me.id && x.p.status === "active" && x.f.phase !== "ontrack").length;
   for (const b of nav.children) {
@@ -1526,7 +1585,7 @@ function render() {
   if (state.phase === "down") {
     if (view.dataset.down !== "1") {
       view.dataset.down = "1";
-      view.replaceChildren(h("div", { class: "notice" }, h("strong", { text: "Can't reach Edit Room right now" }), h("span", { text: "Check your connection, then try again." }), h("button", { class: "btn small", type: "button", onclick: (e) => { e.currentTarget.disabled = true; e.currentTarget.textContent = "Trying…"; view.dataset.down = ""; boot(); } }, "Try again")));
+      view.replaceChildren(h("div", { class: "notice" }, h("strong", { text: "Can't reach " + APP + " right now" }), h("span", { text: "Check your connection, then try again." }), h("button", { class: "btn small", type: "button", onclick: (e) => { e.currentTarget.disabled = true; e.currentTarget.textContent = "Trying…"; view.dataset.down = ""; boot(); } }, "Try again")));
     }
     return;
   }
@@ -1534,7 +1593,7 @@ function render() {
   if (!ready) { pin(view, authView()); return; }
   if (ui.view === "admin" && !state.isAdmin) ui.view = "editor";
   if (ui.view === "admin" && ui.tab === "projects") { pin(view, projectsPanel().node); fillProjects(all); }
-  else if (ui.view === "admin" && ui.tab === "settings") { pin(view, settingsPanel().node); fillSettings(all); }
+  else if (ui.view === "admin" && ui.tab === "settings") { pin(view, settingsPanel().node); fillSettings(); }
   else if (ui.view === "admin" && ui.tab === "editors") view.replaceChildren.apply(view, viewEditors());
   else if (ui.view === "admin") view.replaceChildren.apply(view, viewInbox(all));
   else if (ui.etab === "board") view.replaceChildren.apply(view, viewBoard());
