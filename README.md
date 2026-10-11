@@ -70,4 +70,5 @@ ER_BACKEND=real POSTGREST=/path/to/postgrest node deploy-shape.mjs   # pages in 
 - **Supabase's advisor** lists the `er_*` functions as callable without a Supabase sign-in. That is how the app works: it has its own logins, and each function checks them.
 - **Supabase's free plan** pauses a project after about a week with no use. Open the project in the Supabase dashboard and restore it; nothing is lost.
 - `app.login_log` is an empty table left over from the first version of the sign-in code. It is not used and can be dropped.
+- The `pg_net` extension is switched on in the Supabase project. It lets the database make web requests: it was used to check the live web API from the inside, and deadline notifications will need it.
 - The fonts (Barlow, Barlow Condensed, DM Mono) are served from `fonts/` under the SIL Open Font License; the licence texts are in that folder.
