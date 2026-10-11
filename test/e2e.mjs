@@ -231,6 +231,27 @@ try {
   ok(href === "https://drive.google.com/file/d/abc123/view?usp=sharing" && (await inbox.getByRole("link", { name: "Open Drive link" }).getAttribute("target")) === "_blank", "the Drive link opens in one tap, in a new tab", href);
   ok(/Final cut, captions burned in/.test(await inbox.innerText()) && (await admin.locator('#tabs button[data-tab="inbox"] .count').innerText()) === "1", "the inbox shows the editor's note and counts what is waiting");
   await look(admin, "13-inbox-waiting", "inbox with a submission");
+
+  /* ------------------------------------------------------------ video of the moment */
+  ok((await admin.locator(".reel").count()) === 0 && /Nothing is showing yet\./.test(await admin.locator("#view").innerText()), "the admin's home screen has a Video of the moment panel, empty to begin with");
+  await tab(ada, "work");
+  await sync(ada);
+  await ada.locator("article.clip", { hasText: "Night market short" }).waitFor();
+  ok((await ada.getByText("Video of the moment").count()) === 0, "with nothing featured, editors see no panel at all");
+  await inbox.getByRole("button", { name: "Make video of the moment" }).click();
+  await toast(admin, "Now showing on everyone's home screen");
+  const tile = admin.locator(".reel .shot", { hasText: "Night market short" });
+  await tile.waitFor();
+  ok((await tile.getAttribute("href")) === href && (await tile.getAttribute("target")) === "_blank" && /Ada Obi/.test(await tile.innerText()) && /Shorts/.test(await tile.innerText()), "one click puts the video on the admin's home screen, linked to the Drive file", (await tile.innerText()).replace(/\n/g, " | "));
+  ok(/Video of the moment/.test(await inbox.locator(".pills").innerText()) && (await inbox.getByRole("button", { name: "Take down from home screen" }).count()) === 1, "the video's card says it is showing, and offers to take it down");
+  await look(admin, "13b-inbox-moment", "inbox with a video of the moment");
+  await sync(ada);
+  const mine = ada.locator(".reel .shot", { hasText: "Night market short" });
+  await mine.waitFor();
+  ok(/Ada Obi \(you\)/.test(await mine.innerText()) && (await mine.getAttribute("href")) === href && (await ada.locator(".reel-item button").count()) === 0 && (await ada.getByRole("button", { name: "Add a video" }).count()) === 0, "every editor sees it on their home screen, and has no way to change it");
+  ok(/Video of the moment/.test(await ada.locator("article.clip", { hasText: "Night market short" }).locator(".pills").innerText()), "the editor's own card carries the Video of the moment mark");
+  await look(ada, "13c-editor-moment", "editor home screen with a video of the moment");
+  await tab(ada, "earn");
   await inbox.getByRole("button", { name: "Mark received" }).click();
   await toast(admin, "$15 added to Ada Obi's earnings");
   await see(admin, "Nothing waiting.", "a received project leaves the inbox");
@@ -287,6 +308,9 @@ try {
   const tCard = tunde.locator("article.clip", { hasText: "Fuel prices explained" });
   await tCard.waitFor();
   ok(/Assigned to you by your admin/.test(await tCard.innerText()) && /Due in (23h 5\dm|24h)/.test(await tCard.innerText()), "the new editor gets it as a fresh brief with a fresh 24 hours");
+  const seen = tunde.locator(".reel .shot", { hasText: "Night market short" });
+  await seen.waitFor();
+  ok(/Ada Obi/.test(await seen.innerText()) && !/\(you\)/.test(await seen.innerText()) && (await seen.getAttribute("href")) === href, "another editor sees the video of the moment, whose it is, and can open it");
 
   /* ------------------------------------------------------------ send back, submit again */
   await tCard.getByRole("button", { name: "Submit with Drive link" }).click();
@@ -313,6 +337,27 @@ try {
   await sync(admin);
   await admin.locator("article.clip", { hasText: "Fuel prices explained" }).getByRole("button", { name: "Mark received" }).click();
   await toast(admin, "$60 added to Tunde Bello's earnings");
+  await admin.getByRole("button", { name: "Add a video" }).click();
+  await sheet(admin).getByText("Add a video of the moment").waitFor();
+  ok((await sheet(admin).locator(".option-name").allInnerTexts()).join("|") === "Fuel prices explained", "Add a video lists the finished videos that are not showing yet", (await sheet(admin).locator(".option-name").allInnerTexts()).join("|"));
+  await sheet(admin).getByRole("button", { name: "Make video of the moment" }).click();
+  await see(admin, "Pick a video.", "adding needs a choice");
+  await sheet(admin).locator(".option", { hasText: "Fuel prices explained" }).click();
+  await look(admin, "20b-add-moment", "add a video of the moment sheet");
+  await sheet(admin).getByRole("button", { name: "Make video of the moment" }).click();
+  await toast(admin, "Now showing on everyone's home screen");
+  await closed(admin);
+  ok((await admin.locator(".reel .shot-title").allInnerTexts()).join("|") === "Fuel prices explained|Night market short", "the newest pick comes first in the panel", (await admin.locator(".reel .shot-title").allInnerTexts()).join("|"));
+  await look(admin, "20c-moment-two", "two videos of the moment");
+  await sync(tunde);
+  await tunde.locator(".reel .shot", { hasText: "Fuel prices explained" }).waitFor();
+  ok(/Tunde Bello \(you\)/.test(await tunde.locator(".reel .shot", { hasText: "Fuel prices explained" }).innerText()), "the editor whose video was picked sees it marked as theirs");
+  await admin.locator(".reel-item", { hasText: "Night market short" }).getByRole("button", { name: "Take down" }).click();
+  await toast(admin, "Taken down from the home screen");
+  await admin.locator(".reel .shot", { hasText: "Night market short" }).waitFor({ state: "hidden" });
+  await sync(tunde);
+  await tunde.locator(".reel .shot", { hasText: "Night market short" }).waitFor({ state: "hidden" });
+  ok((await tunde.locator(".reel .shot").count()) === 1, "taking a video down removes it from everyone's home screen");
 
   /* ------------------------------------------------------------ projects: by category, filters, amounts, delete */
   await tab(admin, "projects");
@@ -332,6 +377,12 @@ try {
   ok((await admin.locator("#p-list article.clip").count()) === 1 && /Now with Tunde Bello/.test(await admin.locator("#p-list").innerText()), "the admin can list what was reassigned and to whom");
   await pick(admin, "#f-status", "received");
   const paid = admin.locator("#p-list article.clip", { hasText: "Fuel prices explained" });
+  await paid.getByRole("button", { name: "Manage" }).click();
+  await paid.getByRole("button", { name: "Take down from home screen" }).waitFor();
+  const other = admin.locator("#p-list article.clip", { hasText: "Night market short" });
+  await other.getByRole("button", { name: "Manage" }).click();
+  await other.getByRole("button", { name: "Make video of the moment" }).waitFor();
+  ok(true, "a finished video can be featured or taken down from the Projects list too");
   await paid.getByRole("button", { name: "Manage" }).click();
   await paid.getByRole("button", { name: "Change amount" }).click();
   await admin.fill("#am-amt", "72.50");

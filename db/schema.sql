@@ -1,4 +1,4 @@
--- Edit Room database.
+-- The DN Studios team app's database (the app was first called Edit Room, which is where "er_" comes from).
 -- Every table lives in the private "app" schema, which the web API does not expose. The app reaches the data
 -- only through the er_* functions in "public". Each one checks the caller's session token first and then
 -- decides what that person may see or change. Times always come from the database clock.
@@ -117,12 +117,25 @@ create table if not exists app.bonuses (
 );
 create index if not exists bonuses_editor on app.bonuses(editor_id);
 
+-- Videos an admin has put on everyone's home screen ("Video of the moment"). A pick is never deleted:
+-- taking it down, or newer picks pushing it out, stamps taken_at.
+create table if not exists app.featured (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references app.projects(id),
+  picked_by uuid not null references app.users(id),
+  picked_at timestamptz not null default now(),
+  taken_at timestamptz
+);
+create unique index if not exists featured_live on app.featured(project_id) where taken_at is null;
+create index if not exists featured_project on app.featured(project_id);
+create index if not exists featured_picked_by on app.featured(picked_by);
+
 -- Row level security is on for every table, with a single rule that lets nobody through. The er_* functions
 -- run as the tables' owner, which the rule does not apply to; any other route to the data is refused.
 do $$
 declare t text;
 begin
-  foreach t in array array['meta', 'users', 'sessions', 'categories', 'projects', 'bonuses'] loop
+  foreach t in array array['meta', 'users', 'sessions', 'categories', 'projects', 'bonuses', 'featured'] loop
     execute format('alter table app.%I enable row level security', t);
     if not exists (select 1 from pg_policies where schemaname = 'app' and tablename = t and policyname = 'no_direct_access') then
       execute format('create policy no_direct_access on app.%I for all to public using (false) with check (false)', t);
@@ -239,6 +252,19 @@ create or replace function app.board(p_from timestamptz) returns json language s
     having count(*) filter (where p.submitted_at <= p.due_at) > 0
      order by 2 desc, 3, 1
      limit 10) t
+$$;
+
+-- What is on everyone's home screen right now: the newest five picks whose video is still a finished one.
+-- Everyone on the team gets the video's name, who made it and its link, because the admin chose to show it.
+create or replace function app.featured_now() returns json language sql stable set search_path = '' as $$
+  select coalesce(json_agg(json_build_object('id', t.project_id, 'u', t.editor_id, 'name', t.name, 'cat', t.category_id, 'link', t.link, 'at', app.ms(t.picked_at))
+                           order by t.picked_at desc, t.id desc), '[]'::json)
+  from (
+    select f.id, f.project_id, f.picked_at, p.editor_id, p.name, p.category_id, p.link
+      from app.featured f join app.projects p on p.id = f.project_id
+     where f.taken_at is null and p.status = 'submitted' and not p.deleted and p.link is not null
+     order by f.picked_at desc, f.id desc
+     limit 5) t
 $$;
 
 -- ---------------------------------------------------------------- sign-in
@@ -360,7 +386,7 @@ language plpgsql security definer set search_path = '' as $$
 declare
   u app.users; m app.meta; adm boolean; t0 timestamptz := clock_timestamp(); since timestamptz;
   ws timestamp; w0 timestamptz; cut4 timestamptz; mo timestamptz; horizon timestamptz; edge timestamptz; n int;
-  j_weeks json; j_bw json; j_bm json; j_aw json; j_users json; j_cats json; j_bonuses json; j_totals json; j_projects json; j_stats json;
+  j_weeks json; j_bw json; j_bm json; j_aw json; j_users json; j_cats json; j_bonuses json; j_totals json; j_projects json; j_stats json; j_feat json;
 begin
   u := app.who(p_token);
   adm := u.role = 'admin';
@@ -380,6 +406,7 @@ begin
   j_bm := app.board(mo);
   select coalesce(json_agg(json_build_object('u', b.editor_id, 'at', app.ms(b.awarded_at), 'label', b.label) order by b.awarded_at desc), '[]'::json) into j_aw
     from (select * from app.bonuses where not removed and awarded_at > t0 - interval '62 days' order by awarded_at desc limit 30) b;
+  j_feat := app.featured_now();
 
   select coalesce(json_agg(json_build_object('id', c.id, 'name', c.name, 'c', c.color, 'rate', c.rate, 'archived', c.archived) order by c.created_at), '[]'::json) into j_cats from app.categories c;
 
@@ -452,11 +479,12 @@ begin
   else
     if since is not null and (select count(*) from (select 1 from app.projects p where p.editor_id = u.id and p.changed_at > since limit 301) c) > 300 then since := null; end if;
 
-    -- an editor gets their own work, plus only the names needed to draw the leaderboard
+    -- an editor gets their own work, plus only the names needed to draw the leaderboard and the featured videos
     select coalesce(json_agg(json_build_object('id', x.id, 'name', x.name, 'av', x.avatar_ver, 'has', x.avatar is not null)), '[]'::json) into j_users
       from app.users x
      where x.id = u.id
-        or x.id::text in (select e ->> 'u' from json_array_elements(j_bw) e union select e ->> 'u' from json_array_elements(j_bm) e union select e ->> 'u' from json_array_elements(j_aw) e);
+        or x.id::text in (select e ->> 'u' from json_array_elements(j_bw) e union select e ->> 'u' from json_array_elements(j_bm) e union select e ->> 'u' from json_array_elements(j_aw) e
+                          union select e ->> 'u' from json_array_elements(j_feat) e);
     select coalesce(json_agg(json_build_object('id', b.id, 'u', b.editor_id, 'amt', b.amount, 'label', b.label, 'at', app.ms(b.awarded_at)) order by b.awarded_at desc), '[]'::json)
       into j_bonuses from (select * from app.bonuses where editor_id = u.id and not removed order by awarded_at desc limit 300) b;
     if since is null then
@@ -478,7 +506,7 @@ begin
     'me', json_build_object('id', u.id, 'name', u.name, 'username', u.username, 'role', u.role, 'owner', u.owner, 'av', u.avatar_ver, 'has', u.avatar is not null),
     'settings', json_build_object('delivery', m.delivery_hours, 'grace', m.grace_hours, 'target', m.weekly_target, 'currency', m.currency, 'tz', m.tz, 'bonus', case when adm then m.bonus_default end),
     'cats', j_cats, 'users', j_users, 'weeks', j_weeks, 'month', app.ms(mo),
-    'board', json_build_object('week', j_bw, 'month', j_bm, 'awards', j_aw),
+    'board', json_build_object('week', j_bw, 'month', j_bm, 'awards', j_aw), 'featured', j_feat,
     'bonuses', j_bonuses, 'totals', j_totals, 'stats', j_stats, 'horizon', case when adm and since is null then horizon end,
     'projects', j_projects);
 end $$;
@@ -618,6 +646,7 @@ begin
          submitted_at = null, link = null, note = '', back_at = now(), back_note = left(btrim(coalesce(p_note, '')), 300)
    where id = p_project and status = 'submitted' and received_at is null and not deleted;
   if not found then raise exception 'not_found'; end if;
+  update app.featured set taken_at = now() where project_id = p_project and taken_at is null;      -- it is no longer a finished video
   return json_build_object('ok', true);
 end $$;
 
@@ -643,7 +672,30 @@ begin
   u := app.admin(p_token);
   update app.projects set deleted = true where id = p_project and not deleted;
   if not found then raise exception 'not_found'; end if;
+  update app.featured set taken_at = now() where project_id = p_project and taken_at is null;
   return json_build_object('ok', true);
+end $$;
+
+-- Puts a finished video on everyone's home screen ("Video of the moment"), or takes it down again.
+-- At most five show at once: adding a sixth takes the oldest one down.
+create or replace function public.er_feature(p_token text, p_project uuid, p_on boolean default true) returns json
+language plpgsql security definer set search_path = '' as $$
+declare u app.users; n int := 0;
+begin
+  u := app.admin(p_token);
+  if not coalesce(p_on, true) then
+    update app.featured set taken_at = now() where project_id = p_project and taken_at is null;
+    return json_build_object('ok', true);
+  end if;
+  if not exists (select 1 from app.projects p where p.id = p_project and p.status = 'submitted' and not p.deleted and p.link is not null) then raise exception 'not_found'; end if;
+  insert into app.featured(project_id, picked_by) values (p_project, u.id) on conflict (project_id) where taken_at is null do nothing;
+  update app.featured f set taken_at = now()
+   where f.taken_at is null
+     and f.id not in (select k.id from app.featured k join app.projects q on q.id = k.project_id
+                       where k.taken_at is null and q.status = 'submitted' and not q.deleted and q.link is not null
+                       order by k.picked_at desc, k.id desc limit 5);
+  get diagnostics n = row_count;
+  return json_build_object('ok', true, 'dropped', n);
 end $$;
 
 -- The same bonus sent twice within two minutes (a retry on a bad connection) is awarded once.

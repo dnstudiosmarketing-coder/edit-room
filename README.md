@@ -4,6 +4,7 @@ A small web app for DN Studios' video editors and the people who run the team. (
 
 - **Editors** log each brief the moment they get it, move it through three stages, and submit it with a Google Drive link. A brief's name, category and deadline are fixed once it is logged.
 - **Admins** see what is waiting to download, what is past its deadline and by how long, how each editor and each video category is doing, and can reassign a script, send work back, set what each category pays, and award bonuses.
+- An admin can make any finished video a **Video of the moment**: it then shows at the top of everyone's home screen with the editor's name and a link to watch it. Up to five show at once.
 - Everyone on the team sees a leaderboard of on-time submissions; each editor sees what they have earned.
 
 It opens from a link on any phone or computer and can be added to the home screen like an app.

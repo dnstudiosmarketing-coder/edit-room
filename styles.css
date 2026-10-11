@@ -327,6 +327,25 @@ select.input { appearance: none; -webkit-appearance: none; padding-right: 42px; 
 @media (min-width: 760px) { .cat-btn > .split-lane { max-width: 620px; } }
 @media (hover: hover) { .cat-btn:hover { background: var(--inset); } }
 
+/* video of the moment: a short reel of black screens, each one a link to a finished video */
+.reel { display: grid; grid-auto-flow: column; grid-auto-columns: min(80%, 300px); gap: 10px; margin-inline: -16px; padding-inline: 16px; overflow-x: auto; scroll-snap-type: x mandatory; scroll-padding-inline: 16px; scrollbar-width: none; overscroll-behavior-x: contain; }
+.reel::-webkit-scrollbar { display: none; }
+.reel.solo { grid-auto-columns: 100%; }
+.reel-item { display: grid; gap: 8px; align-content: start; justify-items: start; min-width: 0; scroll-snap-align: start; }
+.shot { justify-self: stretch; display: grid; grid-template-rows: auto 1fr auto auto; gap: 6px; min-width: 0; min-height: 192px; padding: 14px; border-radius: 18px; background: var(--slate); color: var(--on-slate); text-decoration: none; }
+.shot:focus-visible { outline-color: var(--yellow); outline-offset: -4px; }
+.shot-cat { justify-self: start; max-width: 100%; overflow: hidden; padding: 3px 9px; border-radius: 7px; background: var(--slate-chip); color: var(--on-slate-2); font: 600 13px/1.35 var(--font); text-overflow: ellipsis; white-space: nowrap; }
+.shot-play { align-self: center; justify-self: center; display: grid; place-items: center; width: 54px; height: 54px; border-radius: 50%; background: var(--yellow); color: var(--on-yellow); }
+.shot-play svg { margin-left: 2px; }
+.shot-title { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; font: 600 17px/1.25 var(--font); letter-spacing: -0.005em; overflow-wrap: anywhere; }
+.shot-by { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 14px; line-height: 1.3; color: var(--on-slate-2); }
+.shot-by > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shot .avatar { background: var(--slate-chip); color: var(--on-slate); }
+@media (min-width: 760px) {
+  .reel, .reel.solo { grid-auto-flow: row; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); grid-auto-columns: auto; margin-inline: 0; padding-inline: 0; overflow: visible; }
+}
+@media (prefers-reduced-motion: no-preference) { .reel { scroll-behavior: smooth; } }
+
 /* leaderboard: the top three stand on the slate */
 .podium { display: grid; gap: 6px; align-items: end; }
 .podium.n1 { grid-template-columns: minmax(0, 220px); justify-content: center; }

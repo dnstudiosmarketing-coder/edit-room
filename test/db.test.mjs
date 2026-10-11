@@ -173,6 +173,56 @@ const g1 = await rpc("er_award_bonus", { p_token: A, p_editor: chidi, p_amount: 
 const g2 = await rpc("er_award_bonus", { p_token: A, p_editor: chidi, p_amount: 10.0, p_label: " Thanks " });
 const g3 = await rpc("er_award_bonus", { p_token: A, p_editor: chidi, p_amount: 10, p_label: "Thanks again" });
 ok(g1.id === g2.id && g2.again === true && g3.id !== g1.id && (await rpc("er_state", { p_token: TC })).totals.bonus === 20, "the same bonus sent twice in a row is awarded once");
+
+// ---- video of the moment: the admin puts finished videos on everyone's home screen, five at most
+ok((await rpc("er_state", { p_token: TT })).featured.length === 0 && (await rpc("er_state", { p_token: A })).featured.length === 0, "nothing is featured to begin with");
+await fails(rpc("er_feature", { p_token: TA, p_project: a1, p_on: true }), "forbidden", "an editor cannot feature a video");
+await fails(rpc("er_feature", { p_token: TA, p_project: a1, p_on: false }), "forbidden", "or take one down");
+await fails(rpc("er_feature", { p_token: A, p_project: moved, p_on: true }), "not_found", "a video still in progress cannot be featured");
+await fails(rpc("er_feature", { p_token: A, p_project: p2, p_on: true }), "not_found", "nor can a reassigned one");
+await fails(rpc("er_feature", { p_token: A, p_project: quick, p_on: true }), "not_found", "nor a deleted one");
+const f1 = await rpc("er_feature", { p_token: A, p_project: a1 });
+ok(f1.ok === true && f1.dropped === 0, "the admin features a submitted video");
+await rpc("er_feature", { p_token: A, p_project: a1, p_on: true });
+st = await rpc("er_state", { p_token: TT });
+ok(st.featured.length === 1 && st.featured[0].id === a1 && st.featured[0].u === ada && st.featured[0].name === "Ada one" && st.featured[0].cat === shorts && st.featured[0].link === "https://drive.google.com/file/d/" + a1 + "/view" && Math.abs(st.featured[0].at - st.now) < 5000,
+  "every editor is told the featured video, who made it and its link; featuring it twice shows it once", JSON.stringify(st.featured));
+ok((await rpc("er_state", { p_token: TT, p_since: st.cursor })).featured.length === 1, "it also comes with the small updates the app asks for between full loads");
+// a video by someone who is on no leaderboard: editors still get the name to show with it
+const samLate = await mk(A, "Sam demo cut", shorts, 24 + 30 + recent, 30);
+const adminId = (await rpc("er_state", { p_token: A })).me.id;
+ok(!(await rpc("er_state", { p_token: TT })).users.some((x) => x.id === adminId), "an editor is not told about someone who is on no board and has nothing featured");
+await rpc("er_feature", { p_token: A, p_project: samLate });
+st = await rpc("er_state", { p_token: TT });
+ok(st.featured.length === 2 && st.featured[0].id === samLate && st.featured[1].id === a1, "the newest pick comes first");
+const shown = st.users.find((x) => x.id === adminId);
+ok(shown && shown.name === "Sam Okafor" && !("username" in shown) && !("role" in shown), "editors get the maker's name for a featured video, and nothing more about them", JSON.stringify(shown));
+// five at most: a sixth takes the oldest down
+const extra = [];
+for (let i = 1; i <= 4; i++) extra.push(await mk(TC, "Feature me " + i, ads, recent, 0.4));
+for (const id of extra.slice(0, 3)) ok((await rpc("er_feature", { p_token: A, p_project: id })).dropped === 0, "a pick within the five drops nothing");
+ok((await rpc("er_state", { p_token: TA })).featured.length === 5, "five videos can show at once");
+const sixth = await rpc("er_feature", { p_token: A, p_project: extra[3] });
+st = await rpc("er_state", { p_token: TA });
+ok(sixth.dropped === 1 && st.featured.length === 5 && st.featured[0].id === extra[3] && !st.featured.some((x) => x.id === a1) && st.featured[4].id === samLate, "a sixth pick takes the oldest one down", st.featured.map((x) => x.name).join(" | "));
+// taking down, sending back and deleting
+await rpc("er_feature", { p_token: A, p_project: extra[3], p_on: false });
+ok((await rpc("er_state", { p_token: TT })).featured.length === 4 && !(await rpc("er_state", { p_token: TT })).featured.some((x) => x.id === extra[3]), "the admin can take a video down");
+await rpc("er_feature", { p_token: A, p_project: extra[3], p_on: false });
+ok((await rpc("er_state", { p_token: TT })).featured.length === 4, "taking down something that is not up changes nothing");
+await rpc("er_send_back", { p_token: A, p_project: extra[2], p_note: "Wrong cut" });
+ok(!(await rpc("er_state", { p_token: TT })).featured.some((x) => x.id === extra[2]), "a video sent back to its editor comes off the home screen");
+await rpc("er_delete_project", { p_token: A, p_project: extra[1] });
+ok(!(await rpc("er_state", { p_token: TT })).featured.some((x) => x.id === extra[1]) && (await rpc("er_state", { p_token: TT })).featured.length === 2, "so does a deleted one");
+await rpc("er_feature", { p_token: A, p_project: a1 });
+st = await rpc("er_state", { p_token: TT });
+ok(st.featured.length === 3 && st.featured[0].id === a1, "a video taken down earlier can be featured again, as the newest");
+const picks = (await sql("select count(*)::int as n, count(*) filter (where taken_at is null)::int as live, count(distinct project_id) filter (where taken_at is null)::int as distinct_live from app.featured")).rows[0];
+ok(picks.n === 7 && picks.live === 3 && picks.distinct_live === 3, "every pick stays on record: taking one down marks it, it is not removed", JSON.stringify(picks));
+// leave things as they were for the checks that follow
+for (const id of [a1, samLate, extra[0]]) await rpc("er_feature", { p_token: A, p_project: id, p_on: false });
+for (const id of [samLate, extra[0], extra[2], extra[3]]) await rpc("er_delete_project", { p_token: A, p_project: id });
+ok((await rpc("er_state", { p_token: A })).featured.length === 0, "and the home screen is clear again");
 await rpc("er_remove_bonus", { p_token: A, p_bonus: g1.id });
 const g4 = await rpc("er_award_bonus", { p_token: A, p_editor: chidi, p_amount: 10, p_label: "Thanks" });
 ok(g4.id !== g1.id && !g4.again, "a removed bonus can be awarded again straight away");
@@ -317,7 +367,7 @@ await rpc("er_logout", { p_token: A });
 await fails(rpc("er_state", { p_token: A }), "auth", "signing out ends the session");
 
 // ---- the tables themselves cannot be reached
-for (const q of ["select * from app.users", "select * from app.projects", "update app.meta set delivery_hours = 1", "select app.who('x')", "select app.password('aaaaaaaa')"]) {
+for (const q of ["select * from app.users", "select * from app.projects", "select * from app.featured", "update app.meta set delivery_hours = 1", "select app.who('x')", "select app.password('aaaaaaaa')", "select app.featured_now()"]) {
   await fails(asAnon(q), "permission denied", "direct access is refused: " + q);
 }
 const pub = await sql("select count(*)::int as n from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname like 'er\\_%' and has_function_privilege('anon', p.oid, 'execute')");

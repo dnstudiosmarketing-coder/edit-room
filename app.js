@@ -31,6 +31,7 @@ const state = {
   prefs: { bonusAmount: null },
   cats: new Map(), users: new Map(), projects: new Map(), bonuses: new Map(),
   board: { week: [], month: [], awards: [] }, weeks: [0, 0, 0, 0, 0, 0], month: 0, totals: { videos: 0, bonus: 0, month: 0 },
+  featured: [],                                       // "Video of the moment": up to five finished videos the admin put on everyone's home screen
   stats: { editors: new Map(), cats: new Map() },     // admin only: figures worked out by the server
   horizon: null,                                      // admin only: where history older than the loaded projects starts
 };
@@ -71,11 +72,14 @@ const ICONS = {       // line drawings on a 24-unit square
   work: "M4 10.5h16v7.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18v-7.5zM4 10.5l-.7-3.4 15.1-3.2.7 3.4L4 10.5zM8 6.1l2.6 3M12.9 5.1l2.6 3",
   board: "M8 4.5h8v4.7a4 4 0 0 1-8 0V4.5zM8 6.3H5.2v.7A2.8 2.8 0 0 0 8 9.8M16 6.3h2.8v.7A2.8 2.8 0 0 1 16 9.8M12 13.2v3.3M8.5 19.5h7M10 16.5h4v3h-4z",
   earn: "M17.5 8.5V7a1.5 1.5 0 0 0-1.5-1.5H6A2 2 0 0 0 4 7.5V17a2 2 0 0 0 2 2h12.5a1.5 1.5 0 0 0 1.5-1.5V10a1.5 1.5 0 0 0-1.5-1.5H6a2 2 0 0 1-2-1.5M16 13.8h.2",
+  star: "M12 4.2l2.3 4.8 5.2.7-3.8 3.7.9 5.2L12 16.1l-4.6 2.5.9-5.2-3.8-3.7 5.2-.7L12 4.2z",
+  play: "M9 6.5v11l9-5.5-9-5.5z",
 };
+const SOLID = { play: true };      // drawn filled in
 function icon(name, size, weight) {
   const NS = "http://www.w3.org/2000/svg", s = document.createElementNS(NS, "svg"), p = document.createElementNS(NS, "path");
   s.setAttribute("viewBox", "0 0 24 24"); s.setAttribute("width", String(size || 22)); s.setAttribute("height", String(size || 22)); s.setAttribute("aria-hidden", "true");
-  p.setAttribute("d", ICONS[name]); p.setAttribute("fill", "none"); p.setAttribute("stroke", "currentColor");
+  p.setAttribute("d", ICONS[name]); p.setAttribute("fill", SOLID[name] ? "currentColor" : "none"); p.setAttribute("stroke", "currentColor");
   p.setAttribute("stroke-width", String(weight || 2)); p.setAttribute("stroke-linecap", "round"); p.setAttribute("stroke-linejoin", "round");
   s.append(p);
   return s;
@@ -230,6 +234,7 @@ function applyState(d) {
     list.push({ id: String(x.id), at: num(x.at) || 0, amt: amount(x.amt) || 0, label: str(x.label, 80) });
     state.bonuses.set(uid, list);
   }
+  state.featured = (Array.isArray(d.featured) ? d.featured : []).slice(0, 5).map((x) => ({ id: String(x.id), uid: String(x.u), name: str(x.name, 140) || "Untitled project", catId: x.cat ? String(x.cat) : null, link: str(x.link, 600) || null, at: num(x.at) || 0 }));
   const t = d.totals || {};
   state.totals = { videos: amount(t.videos) || 0, bonus: amount(t.bonus) || 0, month: amount(t.month) || 0 };
   const st = d.stats || {}, ed = new Map(), ct = new Map();
@@ -298,7 +303,7 @@ async function enter(token) {
 function leave(msg) {
   saveToken(null);
   clearTimeout(syncTimer);
-  state.phase = "login"; state.cursor = null; state.projects = new Map(); state.users = new Map();
+  state.phase = "login"; state.cursor = null; state.projects = new Map(); state.users = new Map(); state.featured = [];
   state.stats = { editors: new Map(), cats: new Map() }; state.horizon = null; resetHist();
   closeSheet(); render();
   if (msg) toast(msg, true);
@@ -488,6 +493,40 @@ function linkLine(link, raw) {      // a Drive link needs no caption; anything e
 }
 const openLink = (link, small, key) => h("a", { class: "btn" + (small ? " small" : " primary full"), href: link.href, target: "_blank", rel: "noopener noreferrer", dataset: { fk: "open:" + key } }, link.google ? "Open Drive link" : "Open link", icon("out", 16, 2.6));
 
+/* ---------- video of the moment ---------- */
+const isFeatured = (id) => state.featured.some((x) => x.id === id);
+const momentPill = (p) => (isFeatured(p.id) ? pill("gold", "Video of the moment") : null);
+function feature(btn, id, on) {
+  return act(btn, async () => {
+    const r = await run("er_feature", { p_project: id, p_on: on });
+    toast(!on ? "Taken down from the home screen." : r && r.dropped ? "Added. The oldest video came down to keep it to five." : "Now showing on everyone's home screen.");
+  });
+}
+function featureBtn(p, key) {      // on a finished video's card, for an admin
+  const up = isFeatured(p.id);
+  return h("button", { class: "btn small", type: "button", dataset: { fk: "feat:" + key }, onclick: (e) => feature(e.currentTarget, p.id, !up) }, up ? null : icon("star", 18), up ? "Take down from home screen" : "Make video of the moment");
+}
+function shot(x) {      // one featured video: a black screen that opens the video
+  const link = parseLink(x.link), cat = x.catId ? state.cats.get(x.catId) : null, mine = x.uid === state.me.id;
+  const kids = [
+    cat ? h("span", { class: "shot-cat", text: cat.name }) : h("span"),
+    h("span", { class: "shot-play", "aria-hidden": "true" }, icon("play", 26)),
+    h("span", { class: "shot-title", text: x.name }),
+    h("span", { class: "shot-by" }, avatar(x.uid), h("span", { text: displayName(x.uid) + (mine ? " (you)" : "") }))];
+  return link ? h("a", { class: "shot", href: link.href, target: "_blank", rel: "noopener noreferrer", dataset: { fk: "shot:" + x.id }, "aria-label": "Watch " + x.name + ", by " + displayName(x.uid) }, kids)
+    : h("div", { class: "shot" }, kids);
+}
+function momentPanel() {      // on everyone's home screen; an admin also gets the controls
+  const list = state.featured, admin = ui.view === "admin";
+  if (!list.length && !admin) return null;
+  const head = h("div", { class: "section-head" }, h("h2", { class: "section-title", text: "Video of the moment" }),
+    admin ? h("button", { class: "btn small", type: "button", dataset: { fk: "moment-add" }, onclick: () => openMoment() }, "Add a video") : null);
+  if (!list.length) return h("section", { class: "section" }, head, empty("Nothing is showing yet.", "Pick a submitted video and it appears here, on every editor's home screen."));
+  return h("section", { class: "section" }, head,
+    h("ul", { class: "reel" + (list.length === 1 ? " solo" : "") }, list.map((x) => h("li", { class: "reel-item" }, shot(x),
+      admin ? h("button", { class: "btn small", type: "button", dataset: { fk: "down:" + x.id }, onclick: (e) => feature(e.currentTarget, x.id, false) }, "Take down") : null))));
+}
+
 /* ---------- keeping the app on the phone ---------- */
 let installEvent = null;
 const isInstalled = () => navigator.standalone === true || (typeof matchMedia === "function" && matchMedia("(display-mode: standalone)").matches);
@@ -609,6 +648,8 @@ function viewWork(all) {
     target ? meter(week.length, target) : null,
     h("dl", { class: "fields four" }, stat(onTime, "On time"), stat(lateN, "Late", lateN ? "warn" : ""), stat(active.length, "In progress"), stat(waiting, "With admin")),
     h("button", { class: "btn primary", type: "button", dataset: { fk: "log" }, onclick: () => openBrief() }, "Log a new brief")));
+  const moment = momentPanel();
+  if (moment) out.push(moment);
 
   out.push(h("section", { class: "section" },
     h("h2", { class: "section-title", text: "In progress" }),
@@ -647,7 +688,7 @@ function doneCard(x) {
   const p = x.p, f = x.f, cat = catOf(p), link = parseLink(p.link);
   const pay = f.received ? (f.amt != null ? "Earned " + money(f.amt) : "Received. Your admin hasn't set the amount yet.") : cat.rate != null ? money(cat.rate) + " once your admin marks it received" : null;
   return h("article", { class: "clip" },
-    h("div", { class: "clip-top" }, tape(cat), h("span", { class: "pills" }, statusPills(x, false))),
+    h("div", { class: "clip-top" }, tape(cat), h("span", { class: "pills" }, statusPills(x, false), momentPill(p))),
     h("h3", { class: "clip-title", text: p.name }),
     metaRow(x, true),
     pay ? h("p", { class: "payline", text: pay }) : null,
@@ -752,6 +793,8 @@ function viewInbox(all) {
       stat(active.length, "In progress"), stat(past.length, "Past deadline", past.length ? "warn" : ""), stat(over, "Grace over", over ? "crit" : ""))));
   const setup = setupCard();
   if (setup) out.push(setup);
+  const moment = momentPanel();
+  if (moment) out.push(moment);
   out.push(h("section", { class: "section" },
     h("div", { class: "section-head" }, h("h2", { class: "section-title", text: "Ready to download" }), waiting.length > 1 ? h("p", { class: "section-note", text: "Oldest first" }) : null),
     waiting.length ? h("div", { class: "grid" }, waiting.map(inboxCard))
@@ -770,7 +813,7 @@ function receive(btn, uid, p) {
 function inboxCard(x) {
   const uid = x.uid, p = x.p, cat = catOf(p), key = uid + ":" + p.id, link = parseLink(p.link);
   return h("article", { class: "clip" },
-    h("div", { class: "clip-top" }, tape(cat), h("span", { class: "pills" }, deadlinePill(x, false), pill("info", "Submitted " + ago(p.submittedAt || p.updatedAt)))),
+    h("div", { class: "clip-top" }, tape(cat), h("span", { class: "pills" }, deadlinePill(x, false), pill("info", "Submitted " + ago(p.submittedAt || p.updatedAt)), momentPill(p))),
     h("h3", { class: "clip-title", text: p.name }),
     person(uid),
     p.note ? quote("Note from the editor", p.note) : null,
@@ -780,7 +823,8 @@ function inboxCard(x) {
     h("div", { class: "btn-row" },
       link ? openLink(link, false, key) : null,
       h("button", { class: "btn grow", type: "button", dataset: { fk: "recv:" + key }, onclick: (e) => receive(e.currentTarget, uid, p) }, "Mark received"),
-      h("button", { class: "btn grow", type: "button", dataset: { fk: "back:" + key }, onclick: () => openSendBack(uid, p) }, "Send back")));
+      h("button", { class: "btn grow", type: "button", dataset: { fk: "back:" + key }, onclick: () => openSendBack(uid, p) }, "Send back")),
+    link ? h("div", { class: "btn-row" }, featureBtn(p, key)) : null);
 }
 function pastCard(x) {
   const uid = x.uid, p = x.p, cat = catOf(p), key = uid + ":" + p.id;
@@ -800,9 +844,10 @@ function adminCard(x) {
   if (isWaiting(x)) tools.push(h("button", { class: "btn small", type: "button", dataset: { fk: "back:" + key }, onclick: () => openSendBack(uid, p) }, "Send back"));
   if (f.received) tools.push(h("button", { class: "btn small", type: "button", dataset: { fk: "amt:" + key }, onclick: () => openAmount(uid, p, f.amt) }, "Change amount"));
   if (f.received) tools.push(h("button", { class: "btn small", type: "button", dataset: { fk: "unrecv:" + key }, onclick: (e) => act(e.currentTarget, () => run("er_receive", { p_project: p.id, p_on: false }), "Moved back to the inbox") }, "Undo received"));
+  if (p.status === "submitted" && link) tools.push(featureBtn(p, key));
   tools.push(h("button", { class: "btn small", type: "button", dataset: { fk: "del:" + key }, onclick: () => openDelete(uid, p) }, "Delete"));
   return h("article", { class: "clip" },
-    h("div", { class: "clip-top" }, tape(cat), h("span", { class: "pills" }, statusPills(x, true))),
+    h("div", { class: "clip-top" }, tape(cat), h("span", { class: "pills" }, statusPills(x, true), momentPill(p))),
     h("h3", { class: "clip-title", text: p.name }),
     person(uid),
     p.from ? h("p", { class: "hint", text: "Reassigned from " + displayName(p.from) }) : null,
@@ -1320,6 +1365,33 @@ function openBonuses(uid) {
       if (v == null || v <= 0) throw new Oops("Enter the bonus amount.");
       await run("er_award_bonus", { p_editor: uid, p_amount: v, p_label: tidy(label.value) });
       return "Bonus of " + money(v) + " awarded to " + displayName(uid);
+    },
+  });
+}
+function openMoment() {
+  const rows = collect().filter((x) => x.p.status === "submitted" && parseLink(x.p.link) && !isFeatured(x.p.id)).sort((a, b) => (b.p.submittedAt || 0) - (a.p.submittedAt || 0));
+  const title = "Add a video of the moment";
+  if (!rows.length) {
+    formSheet({ title: title, submit: null, body: [h("p", { text: state.featured.length ? "Every recent finished video is already showing. Older ones can be added from Projects." : "No editor has submitted a video yet. Once one does, you can add it here." })] });
+    return;
+  }
+  const shown = rows.slice(0, 12);
+  const opts = shown.map((x, i) => h("label", { class: "option" },
+    h("input", { type: "radio", name: "m-pick", id: "m-pick-" + i, value: x.p.id }),
+    h("span", { class: "option-main" },
+      h("span", { class: "option-name", text: x.p.name }),
+      h("span", { class: "hint", text: displayName(x.uid) + ", submitted " + shortDate(x.p.submittedAt || x.p.updatedAt) }))));
+  formSheet({
+    title: title, submit: "Make video of the moment",
+    body: [
+      h("p", { text: "It shows on everyone's home screen, with the editor's name and a link to watch it, until you take it down. Five show at most: a sixth takes the oldest one down." }),
+      h("div", { class: "options", role: "radiogroup", "aria-label": "Finished videos" }, opts),
+      rows.length > shown.length ? h("p", { class: "hint", text: "These are the " + shown.length + " most recent. Any other finished video can be added from Projects." }) : null],
+    run: async () => {
+      const pick = sheet.querySelector('input[name="m-pick"]:checked');
+      if (!pick) throw new Oops("Pick a video.");
+      const r = await run("er_feature", { p_project: pick.value, p_on: true });
+      return r && r.dropped ? "Added. The oldest video came down to keep it to five." : "Now showing on everyone's home screen.";
     },
   });
 }
