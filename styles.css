@@ -93,7 +93,7 @@ button { cursor: pointer; touch-action: manipulation; }
 #banners:empty { display: none; }
 .section { display: grid; gap: 12px; min-width: 0; }
 .section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
-.section-title { font: 600 21px/1.2 var(--font); letter-spacing: -0.01em; }
+.section-title { font: 600 22px/1.2 var(--font); letter-spacing: -0.012em; }
 .section-note, .hint { font-size: 14px; line-height: 1.4; color: var(--ink-3); }
 .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 330px), 1fr)); align-items: start; }
 .grid > .empty { grid-column: 1 / -1; }
@@ -168,7 +168,8 @@ button { cursor: pointer; touch-action: manipulation; }
 .stage-labels .now { color: var(--ink); font-weight: 600; }
 .seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 3px; padding: 3px; border-radius: 13px; background: var(--inset); }
 .seg.inline { display: inline-grid; background: var(--well); }
-.seg > button { min-height: 38px; padding: 6px 12px; border: 0; border-radius: 10px; background: none; font-size: 14px; font-weight: 500; color: var(--ink-2); }
+.seg > button { min-height: 38px; padding: 6px; border: 0; border-radius: 10px; background: none; font-size: 14px; font-weight: 500; color: var(--ink-2); }
+.seg.inline > button { padding-inline: 14px; }
 .seg > button[aria-pressed="true"] { background: var(--ink); color: var(--card); font-weight: 600; }
 .slate .seg { background: var(--slate-chip); }
 .slate .seg > button { color: var(--on-slate-2); }
@@ -297,6 +298,7 @@ select.input { appearance: none; -webkit-appearance: none; padding-right: 42px; 
 .rows > li { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; min-width: 0; padding: 12px 16px; }
 .rows > li + li { border-top: 1px solid var(--line); }
 .row-main { display: grid; gap: 4px; justify-items: start; min-width: 0; flex: 1 1 180px; }
+.row-main > * { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .row-title { font-weight: 600; overflow-wrap: anywhere; }
 .row-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; min-width: 0; }
 .row-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
@@ -322,6 +324,7 @@ select.input { appearance: none; -webkit-appearance: none; padding-right: 42px; 
 .cat-note { font-size: 13.5px; line-height: 1.4; color: var(--ink-3); }
 @media (max-width: 359px) { .rows > li.cat-head, .cat-btn { grid-template-columns: minmax(0, 1fr) 38px 34px 52px 14px; column-gap: 6px; } }
 @media (min-width: 560px) { .rows > li.cat-head, .cat-btn { grid-template-columns: minmax(0, 1fr) 80px 80px 110px 16px; } }
+@media (min-width: 760px) { .cat-btn > .split-lane { max-width: 620px; } }
 @media (hover: hover) { .cat-btn:hover { background: var(--inset); } }
 
 /* leaderboard: the top three stand on the slate */
@@ -332,7 +335,7 @@ select.input { appearance: none; -webkit-appearance: none; padding-right: 42px; 
 .podium.n3 > :nth-child(1) { order: 2; padding-bottom: 26px; }
 .podium.n3 > :nth-child(2) { order: 1; }
 .podium.n3 > :nth-child(3) { order: 3; }
-.podium-cell { display: grid; justify-items: center; align-content: start; gap: 4px; min-width: 0; padding: 12px 4px 14px; border-radius: 16px; text-align: center; }
+.podium-cell { display: grid; justify-items: center; align-content: start; gap: 4px; min-width: 0; padding: 12px 2px 14px; border-radius: 16px; text-align: center; }
 .podium-cell.me { background: #1C1C1C; }
 .podium-pic { position: relative; display: grid; margin-bottom: 12px; }
 .podium-pic .rank { position: absolute; left: 50%; bottom: -10px; transform: translateX(-50%); background: var(--slate-chip); color: var(--on-slate); box-shadow: 0 0 0 3px var(--slate); }
@@ -341,7 +344,7 @@ select.input { appearance: none; -webkit-appearance: none; padding-right: 42px; 
 .podium-cell.first .avatar { box-shadow: 0 0 0 3px var(--slate), 0 0 0 6px var(--yellow); }
 .podium-cell.first.me .avatar { box-shadow: 0 0 0 3px #1C1C1C, 0 0 0 6px var(--yellow); }
 .podium.n3 > :nth-child(1) .avatar, .podium.n1 .avatar { width: 76px; height: 76px; font-size: 31px; }
-.podium-name { font-weight: 600; font-size: 15px; line-height: 1.25; overflow-wrap: anywhere; }
+.podium-name { max-width: 100%; font-weight: 600; font-size: 14.5px; line-height: 1.25; overflow-wrap: anywhere; }
 .podium-count { font-size: 13.5px; color: var(--on-slate-2); }
 .podium-cell .pill { margin-top: 4px; }
 

@@ -886,12 +886,13 @@ function fillProjects(all) {
   let most = 1;
   for (const g of groups) { tot.on += g.on; tot.late += g.late; tot.lateSum += g.lateSum; tot.open += g.open; most = Math.max(most, g.on + g.late); }
   const sent = tot.on + tot.late;
-  P.head.replaceChildren(
+  const headline = [
     h("p", { class: "slate-label", text: "Last 10 weeks, all categories" }),
-    hero(tot.on, h("span", { class: "week-of", text: (sent ? "of " + sent + " " : "") + (sent === 1 ? "video" : "videos") + " submitted on time" })),
-    sent ? splitBar(tot.on, tot.late, sent) : null,
-    h("dl", { class: "fields three" },
-      stat(tot.late, "Late", tot.late ? "warn" : ""), stat(tot.late ? span(tot.lateSum / tot.late) : "–", "Average delay"), stat(tot.open, "Past deadline", tot.open ? "warn" : "")));
+    hero(tot.on, h("span", { class: "week-of", text: (sent ? "of " + sent + " " : "") + (sent === 1 ? "video" : "videos") + " submitted on time" }))];
+  if (sent) headline.push(splitBar(tot.on, tot.late, sent));
+  headline.push(h("dl", { class: "fields three" },
+    stat(tot.late, "Late", tot.late ? "warn" : ""), stat(tot.late ? span(tot.lateSum / tot.late) : "–", "Average delay"), stat(tot.open, "Past deadline", tot.open ? "warn" : "")));
+  P.head.replaceChildren.apply(P.head, headline);
   // a small table: one row per category, its bar under the name, the three counts in columns
   const num = (n, flag) => h("span", { class: "cat-n" + (n ? (flag ? " flag" : "") : " zero"), text: String(n) });
   P.sum.replaceChildren.apply(P.sum, groups.length ? [h("li", { class: "cat-head", "aria-hidden": "true" },

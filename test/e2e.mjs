@@ -55,8 +55,11 @@ async function look(page, name, label) {
     const d = document.documentElement, wide = d.scrollWidth - d.clientWidth;
     const unlabeled = Array.from(document.querySelectorAll("input, select, textarea")).filter((el) => el.type !== "hidden" && !(el.labels && el.labels.length) && !el.getAttribute("aria-label")).map((el) => el.id || el.name || el.type);
     const small = Array.from(document.querySelectorAll("button, a.btn, select, input:not([type=file]):not([type=radio])")).filter((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && (r.height < 36 || r.width < 36) && !el.closest(".spark"); }).map((el) => (el.textContent || el.id || el.tagName).trim().slice(0, 24) + " " + Math.round(el.getBoundingClientRect().width) + "x" + Math.round(el.getBoundingClientRect().height));
-    return { wide, unlabeled, small };
+    // a value that was never filled in shows up as one of these words
+    const stray = ((document.body.innerText + " " + Array.from(document.querySelectorAll("[aria-label], [title], [placeholder]")).map((el) => [el.getAttribute("aria-label"), el.getAttribute("title"), el.getAttribute("placeholder")].join(" ")).join(" ")).match(/\b(null|undefined|NaN|Infinity)\b|\[object /g) || []).join(", ");
+    return { wide, unlabeled, small, stray };
   });
+  ok(!m.stray, (label || name) + ": no unfilled values on screen", m.stray);
   ok(m.wide <= 1, (label || name) + ": no sideways scroll", m.wide + "px too wide");
   ok(!m.unlabeled.length, (label || name) + ": every field has a label", m.unlabeled.join(", "));
   ok(!m.small.length, (label || name) + ": touch targets are big enough", m.small.join(" | "));
