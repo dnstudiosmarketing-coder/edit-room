@@ -332,10 +332,10 @@ select.input { appearance: none; -webkit-appearance: none; padding-right: 42px; 
 .reel::-webkit-scrollbar { display: none; }
 .reel.solo { grid-auto-columns: 100%; }
 .reel-item { display: grid; gap: 8px; align-content: start; justify-items: start; min-width: 0; scroll-snap-align: start; }
-.shot { justify-self: stretch; display: grid; grid-template-rows: auto 1fr auto auto; gap: 6px; min-width: 0; min-height: 192px; padding: 14px; border-radius: 18px; background: var(--slate); color: var(--on-slate); text-decoration: none; }
+.shot { justify-self: stretch; display: grid; grid-template-rows: auto 1fr auto auto; gap: 6px; min-width: 0; min-height: 168px; padding: 14px; border-radius: 18px; background: var(--slate); color: var(--on-slate); text-decoration: none; }
 .shot:focus-visible { outline-color: var(--yellow); outline-offset: -4px; }
 .shot-cat { justify-self: start; max-width: 100%; overflow: hidden; padding: 3px 9px; border-radius: 7px; background: var(--slate-chip); color: var(--on-slate-2); font: 600 13px/1.35 var(--font); text-overflow: ellipsis; white-space: nowrap; }
-.shot-play { align-self: center; justify-self: center; display: grid; place-items: center; width: 54px; height: 54px; border-radius: 50%; background: var(--yellow); color: var(--on-yellow); }
+.shot-play { align-self: center; justify-self: center; display: grid; place-items: center; width: 50px; height: 50px; border-radius: 50%; background: var(--yellow); color: var(--on-yellow); }
 .shot-play svg { margin-left: 2px; }
 .shot-title { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; font: 600 17px/1.25 var(--font); letter-spacing: -0.005em; overflow-wrap: anywhere; }
 .shot-by { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 14px; line-height: 1.3; color: var(--on-slate-2); }

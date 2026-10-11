@@ -523,6 +523,7 @@ function momentPanel() {      // on everyone's home screen; an admin also gets t
     admin ? h("button", { class: "btn small", type: "button", dataset: { fk: "moment-add" }, onclick: () => openMoment() }, "Add a video") : null);
   if (!list.length) return h("section", { class: "section" }, head, empty("Nothing is showing yet.", "Pick a submitted video and it appears here, on every editor's home screen."));
   return h("section", { class: "section" }, head,
+    admin ? h("p", { class: "section-note", text: "Everyone on the team sees these. A video opens for them only if its Drive file is shared with them." }) : null,
     h("ul", { class: "reel" + (list.length === 1 ? " solo" : "") }, list.map((x) => h("li", { class: "reel-item" }, shot(x),
       admin ? h("button", { class: "btn small", type: "button", dataset: { fk: "down:" + x.id }, onclick: (e) => feature(e.currentTarget, x.id, false) }, "Take down") : null))));
 }
@@ -1375,18 +1376,19 @@ function openMoment() {
     formSheet({ title: title, submit: null, body: [h("p", { text: state.featured.length ? "Every recent finished video is already showing. Older ones can be added from Projects." : "No editor has submitted a video yet. Once one does, you can add it here." })] });
     return;
   }
-  const shown = rows.slice(0, 12);
+  const shown = rows.slice(0, 6);
   const opts = shown.map((x, i) => h("label", { class: "option" },
     h("input", { type: "radio", name: "m-pick", id: "m-pick-" + i, value: x.p.id }),
     h("span", { class: "option-main" },
       h("span", { class: "option-name", text: x.p.name }),
       h("span", { class: "hint", text: displayName(x.uid) + ", submitted " + shortDate(x.p.submittedAt || x.p.updatedAt) }))));
   formSheet({
-    title: title, submit: "Make video of the moment",
+    title: title, submit: "Add this video",
     body: [
       h("p", { text: "It shows on everyone's home screen, with the editor's name and a link to watch it, until you take it down. Five show at most: a sixth takes the oldest one down." }),
       h("div", { class: "options", role: "radiogroup", "aria-label": "Finished videos" }, opts),
-      rows.length > shown.length ? h("p", { class: "hint", text: "These are the " + shown.length + " most recent. Any other finished video can be added from Projects." }) : null],
+      rows.length > shown.length ? h("p", { class: "hint", text: "These are the " + shown.length + " most recent. Any other finished video can be added from Projects." }) : null,
+      h("p", { class: "hint", text: "Check that the Drive file is shared with your team, or they won't be able to open it." })],
     run: async () => {
       const pick = sheet.querySelector('input[name="m-pick"]:checked');
       if (!pick) throw new Oops("Pick a video.");

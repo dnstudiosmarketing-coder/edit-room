@@ -340,11 +340,11 @@ try {
   await admin.getByRole("button", { name: "Add a video" }).click();
   await sheet(admin).getByText("Add a video of the moment").waitFor();
   ok((await sheet(admin).locator(".option-name").allInnerTexts()).join("|") === "Fuel prices explained", "Add a video lists the finished videos that are not showing yet", (await sheet(admin).locator(".option-name").allInnerTexts()).join("|"));
-  await sheet(admin).getByRole("button", { name: "Make video of the moment" }).click();
+  await sheet(admin).getByRole("button", { name: "Add this video" }).click();
   await see(admin, "Pick a video.", "adding needs a choice");
   await sheet(admin).locator(".option", { hasText: "Fuel prices explained" }).click();
   await look(admin, "20b-add-moment", "add a video of the moment sheet");
-  await sheet(admin).getByRole("button", { name: "Make video of the moment" }).click();
+  await sheet(admin).getByRole("button", { name: "Add this video" }).click();
   await toast(admin, "Now showing on everyone's home screen");
   await closed(admin);
   ok((await admin.locator(".reel .shot-title").allInnerTexts()).join("|") === "Fuel prices explained|Night market short", "the newest pick comes first in the panel", (await admin.locator(".reel .shot-title").allInnerTexts()).join("|"));
