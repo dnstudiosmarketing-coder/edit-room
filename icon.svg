@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#0E1417"/>
+  <g transform="translate(0 6)">
+    <g transform="rotate(-11 124 214)">
+      <clipPath id="arm"><rect x="112" y="150" width="288" height="56" rx="10"/></clipPath>
+      <rect x="112" y="150" width="288" height="56" rx="10" fill="#E7EDF0"/>
+      <g clip-path="url(#arm)" fill="#0E1417"><polygon points="86,150 114,150 84,206 56,206"/><polygon points="142,150 170,150 140,206 112,206"/><polygon points="198,150 226,150 196,206 168,206"/><polygon points="254,150 282,150 252,206 224,206"/><polygon points="310,150 338,150 308,206 280,206"/><polygon points="366,150 394,150 364,206 336,206"/><polygon points="422,150 450,150 420,206 392,206"/><polygon points="478,150 506,150 476,206 448,206"/></g>
+    </g>
+    <rect x="112" y="222" width="288" height="164" rx="18" fill="#E7EDF0"/>
+    <rect x="144" y="288" width="224" height="32" rx="6" fill="#AEBAC1"/>
+    <rect x="144" y="288" width="142" height="32" rx="6" fill="#0A6A8A"/>
+    <rect x="278" y="266" width="16" height="76" rx="8" fill="#0E1417"/>
+  </g>
+</svg>

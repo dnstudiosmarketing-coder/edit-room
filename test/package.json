@@ -1,0 +1,14 @@
+{
+  "name": "edit-room-checks",
+  "private": true,
+  "type": "module",
+  "description": "Checks for the Edit Room database rules and screens.",
+  "scripts": {
+    "check": "node check-api.mjs && node db.test.mjs",
+    "check:browser": "node e2e.mjs"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "pg": "^8.23.1"
+  }
+}

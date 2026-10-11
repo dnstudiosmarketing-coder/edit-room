@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self' https://nzrsxjmkucceqakusjyw.supabase.co; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<meta name="description" content="Edit Room: log briefs, keep to the deadline and submit finished videos.">
+<meta name="theme-color" content="#EDF0F2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0E1417" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Edit Room">
+<title>Edit Room</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="fonts.css?v=1">
+<link rel="stylesheet" href="styles.css?v=1">
+</head>
+<body>
+<div class="clapper" aria-hidden="true"></div>
+<header class="slate">
+  <div class="wrap slate-row">
+    <h1 class="brand">Edit Room</h1>
+    <button class="who" id="who" type="button" aria-label="Your account" hidden></button>
+  </div>
+  <nav class="wrap tabs" id="tabs" aria-label="Sections" hidden></nav>
+</header>
+
+<main class="wrap main" id="main">
+  <div class="stack" id="banners"></div>
+  <div class="stack" id="view">
+    <section class="section" aria-busy="true">
+      <div class="empty">
+        <strong>Opening the room…</strong>
+        <span>Editors log each brief here the moment they get it, update it as they go, and submit with a Drive link before the deadline.</span>
+      </div>
+    </section>
+  </div>
+</main>
+
+<dialog class="sheet" id="sheet" aria-labelledby="sheet-title">
+  <div class="sheet-body">
+    <h2 class="sheet-title" id="sheet-title"></h2>
+    <div id="sheet-content"></div>
+  </div>
+</dialog>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<noscript><p class="wrap">Edit Room needs JavaScript switched on in your browser.</p></noscript>
+
+<script src="config.js?v=1"></script>
+<script src="app.js?v=1"></script>
+</body>
+</html>
