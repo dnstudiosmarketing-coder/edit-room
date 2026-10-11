@@ -1,6 +1,6 @@
-# Edit Room
+# DN Studios team app
 
-A small web app for a team of video editors and the people who run it.
+A small web app for DN Studios' video editors and the people who run the team. (The repository and the web address keep the app's first name, Edit Room.)
 
 - **Editors** log each brief the moment they get it, move it through three stages, and submit it with a Google Drive link. A brief's name, category and deadline are fixed once it is logged.
 - **Admins** see what is waiting to download, what is past its deadline and by how long, how each editor and each video category is doing, and can reassign a script, send work back, set what each category pays, and award bonuses.
@@ -19,6 +19,12 @@ It opens from a link on any phone or computer and can be added to the home scree
 | Sign-in | The app's own usernames and passwords | Created by an admin inside the app. Supabase Auth is not used. |
 
 Files at the top level (`index.html`, `app.js`, `styles.css`, `fonts.css`, `fonts/`, `config.js`, `sw.js`, `manifest.webmanifest`, icons) are the app itself. `db/` holds the database script. `test/` holds the checks.
+
+### The look, in short
+
+Gray is the room, white is the paper, black is the slate, yellow is the signal. Each main screen opens on a black panel that carries its headline numbers. Yellow is kept for the main action, the section you are in, and rewards (bonuses, first place). Orange and red mean late and overdue, green means on time. There is one type family, Barlow. Light and dark follow the phone's own setting.
+
+Every colour is a named value at the top of `styles.css`, once for light and once for dark; change it there and the whole app follows. The studio's name is set in three places: `APP` at the top of `app.js`, the heading and title in `index.html`, and `manifest.webmanifest` (the name under the home-screen icon). The saved sign-in on each phone is still stored under `editroom.*`; leave those names alone, or everyone is signed out.
 
 ### The database, in short
 
@@ -71,4 +77,4 @@ ER_BACKEND=real POSTGREST=/path/to/postgrest node deploy-shape.mjs   # pages in 
 - **Supabase's free plan** pauses a project after about a week with no use. Open the project in the Supabase dashboard and restore it; nothing is lost.
 - `app.login_log` is an empty table left over from the first version of the sign-in code. It is not used and can be dropped.
 - The `pg_net` extension is switched on in the Supabase project. It lets the database make web requests: it was used to check the live web API from the inside, and deadline notifications will need it.
-- The fonts (Barlow, Barlow Condensed, DM Mono) are served from `fonts/` under the SIL Open Font License; the licence texts are in that folder.
+- The font (Barlow) is served from `fonts/` under the SIL Open Font License; the licence text is in that folder.

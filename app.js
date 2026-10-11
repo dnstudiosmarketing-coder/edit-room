@@ -209,7 +209,7 @@ function applyState(d) {
   const s = d.settings || {}, active = [];
   state.cats = new Map();
   for (const c of Array.isArray(d.cats) ? d.cats : []) {
-    const cat = { id: String(c.id), name: str(c.name, 40), c: ((Math.round(num(c.c) || 0) % 8) + 8) % 8, rate: amount(c.rate), archived: c.archived === true };
+    const cat = { id: String(c.id), name: str(c.name, 40), rate: amount(c.rate), archived: c.archived === true };
     state.cats.set(cat.id, cat);
     if (!cat.archived) active.push(cat);
   }
@@ -329,7 +329,7 @@ async function loadPics() {
 /* ---------- reading the data ---------- */
 function catOf(p) {
   const c = p.catId ? state.cats.get(p.catId) : null;
-  return c ? { name: c.name, c: c.c, rate: c.rate, id: c.id, archived: c.archived } : { name: "No category", c: -1, rate: null, id: null, archived: false };
+  return c ? { name: c.name, rate: c.rate, id: c.id, archived: c.archived } : { name: "No category", rate: null, id: null, archived: false };
 }
 const rateOf = (p) => catOf(p).rate;
 function flagsOf(p) {
@@ -442,7 +442,7 @@ function statusPills(x, forAdmin) {
   else if (p.status === "reassigned") out.push(pill("", "Reassigned"));
   return out;
 }
-function metaRow(x) {
+function metaRow(x, brief) {
   const p = x.p, f = x.f, items = [];
   const it = (label, value) => h("div", null, h("dt", { text: label }), h("dd", { text: value }));
   if (p.status === "active") {
@@ -453,7 +453,7 @@ function metaRow(x) {
   } else if (p.status === "submitted") {
     items.push(it("Submitted", stamp(p.submittedAt || p.updatedAt)));
     items.push(it("Was due", stamp(f.deadline)));
-    if (f.received) items.push(it("Received", ago(f.receivedAt)));
+    if (f.received && !brief) items.push(it("Received", ago(f.receivedAt)));
   } else {
     items.push(it("Started", stamp(p.startedAt)));
     if (p.movedAt) items.push(it("Reassigned", stamp(p.movedAt)));
@@ -482,9 +482,9 @@ function readLink(text) {
   }
   return parseLink(v);
 }
-function linkLine(link, raw) {
+function linkLine(link, raw) {      // a Drive link needs no caption; anything else says where it points
   if (!link) return h("p", { class: "error", text: raw ? "The pasted link isn't a valid web address: " + raw : "No link was added." });
-  return h("p", { class: "linkline" }, h("span", { text: link.host }), link.google ? null : pill("warn", "Not a Google Drive link"));
+  return link.google ? null : h("p", { class: "linkline" }, h("span", { text: link.host }), pill("warn", "Not a Google Drive link"));
 }
 const openLink = (link, small, key) => h("a", { class: "btn" + (small ? " small" : " primary full"), href: link.href, target: "_blank", rel: "noopener noreferrer", dataset: { fk: "open:" + key } }, link.google ? "Open Drive link" : "Open link", icon("out", 16, 2.6));
 
@@ -649,7 +649,7 @@ function doneCard(x) {
   return h("article", { class: "clip" },
     h("div", { class: "clip-top" }, tape(cat), h("span", { class: "pills" }, statusPills(x, false))),
     h("h3", { class: "clip-title", text: p.name }),
-    metaRow(x),
+    metaRow(x, true),
     pay ? h("p", { class: "payline", text: pay }) : null,
     linkLine(link, p.link),
     link ? h("div", { class: "btn-row" }, openLink(link, true, "mine:" + p.id)) : null);
@@ -854,7 +854,7 @@ function syncSelect(sel, items, value) {
 function catSummary(all) {      // on time and late come from the server (last 70 days); past deadline right now is counted here
   const groups = new Map();
   const group = (key) => {
-    if (!groups.has(key)) { const c = key === "none" ? null : state.cats.get(key); groups.set(key, { id: key, name: c ? c.name : "No category", c: c ? c.c : -1, on: 0, late: 0, lateSum: 0, open: 0, openMax: 0 }); }
+    if (!groups.has(key)) { const c = key === "none" ? null : state.cats.get(key); groups.set(key, { id: key, name: c ? c.name : "No category", on: 0, late: 0, lateSum: 0, open: 0, openMax: 0 }); }
     return groups.get(key);
   };
   for (const c of state.config.categories) group(c.id);
@@ -970,6 +970,7 @@ function viewEditors() {
         stat(sum.late, "Late", sum.late ? "warn" : ""), stat(sum.active, "In progress"), stat(sum.past, "Past deadline", sum.past ? "warn" : ""))),
     h("section", { class: "section" },
       h("p", { class: "section-note", text: "Top performers first, ranked by videos submitted within the " + hours + "-hour deadline " + (per === "week" ? "this week." : "this month.") + " This is the order editors see on their leaderboard." }),
+      h("div", { class: "chart-key" }, h("span", { class: "hint", text: "Weekly bars, one scale for everyone" }), legend()),
       h("div", { class: "grid" }, rows.map((s) => rosterCard(s, win, target, s[on] > 0 ? 1 + rows.filter((o) => o[on] > s[on]).length : 0, peak))))];
 }
 function sparkNode(s, weekStartsList, max) {      // max is the busiest week of anyone on the team
@@ -990,11 +991,10 @@ function sparkNode(s, weekStartsList, max) {      // max is the busiest week of 
   const w = sel >= 0 ? s.weeks[sel] : null;
   return h("div", { class: "chart" },
     h("div", { class: "plot" },
-      legend(),
       box,
       h("div", { class: "axis", "aria-hidden": "true" }, h("span", { text: "Week of " + teamDay(weekStartsList[0]) }), h("span", { text: "This week" }))),
     w ? h("p", { class: "readout" }, h("b", { text: plural(w.on + w.late, "video", "videos") }), " in the week of " + teamDay(weekStartsList[sel]) + ": " + w.on + " on time, " + w.late + " late.")
-      : h("p", { class: "readout", text: "Videos submitted each week, on the same scale for every editor. Tap a bar for that week's numbers." }));
+      : h("p", { class: "readout", text: "Videos submitted each week. Tap a bar for that week's numbers." }));
 }
 function rosterCard(s, win, target, rank, peak) {
   const per = ui.period, on = per === "week" ? s.wkOn : s.moOn, late = per === "week" ? s.wkLate : s.moLate;
