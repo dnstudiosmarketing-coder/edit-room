@@ -379,7 +379,7 @@ begin
 end $$;
 create or replace trigger outbox_poke after insert on app.outbox for each statement execute function app.outbox_poke();
 
--- Run by the timer every 30 seconds: notice deadlines that just passed, and nudge the sender about anything
+-- Run by the timer every minute: notice deadlines that just passed, and nudge the sender about anything
 -- still waiting (a phone that was off, a push service that was busy).
 create or replace function app.notice_tick() returns void
 language plpgsql set search_path = '' as $$
@@ -1116,11 +1116,12 @@ begin
   return json_build_object('ok', true, 'editors', coalesce(array_length(ids, 1), 0), 'phones', n);
 end $$;
 
--- The timer, where the database has one (the live project). Locally this does nothing.
+-- The timer, where the database has one (the live project). Locally this does nothing. Once a minute is
+-- soon enough for a deadline, and pg_cron writes a line to cron.job_run_details for every run.
 do $$
 begin
   if exists (select 1 from pg_extension where extname = 'pg_cron') then
-    execute $q$select cron.schedule('dn-notices', '30 seconds', 'select app.notice_tick()')$q$;
+    execute $q$select cron.schedule('dn-notices', '* * * * *', 'select app.notice_tick()')$q$;
   end if;
 end $$;
 

@@ -1,5 +1,5 @@
 // The DN Studios notification sender. The database calls it when notifications are waiting (and a timer
-// checks every 30 seconds). It takes them a batch at a time, encrypts each one for each of the person's
+// checks every minute). It takes them a batch at a time, encrypts each one for each of the person's
 // phones, hands them to the phones' push services, and reports back what happened. Nothing else can start
 // it: each call must carry the secret that lives only in the database.
 import { makeKeys, sendPush } from "./webpush.js";

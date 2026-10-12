@@ -22,7 +22,7 @@ It opens from a link on any phone or computer and can be added to the home scree
 | The pages | This repository, served by GitHub Pages from the `gh-pages` branch | Plain HTML, CSS and JavaScript. No build step. |
 | The data | A Supabase project (`edit-room`, region us-west-1) | PostgreSQL. All rules live in `db/schema.sql`. |
 | Sign-in | The app's own usernames and passwords | Created by an admin inside the app. Supabase Auth is not used. |
-| Notifications | A Supabase Edge Function, `dn-push` (`supabase/functions/dn-push/`) | Sends Web Push messages. The database nudges it; a timer (pg_cron, every 30 seconds) catches anything missed and notices deadlines. |
+| Notifications | A Supabase Edge Function, `dn-push` (`supabase/functions/dn-push/`) | Sends Web Push messages. The database nudges it; a timer (pg_cron, every minute) catches anything missed and notices deadlines. |
 
 Files at the top level (`index.html`, `app.js`, `styles.css`, `fonts.css`, `fonts/`, `config.js`, `sw.js`, `manifest.webmanifest`, icons) are the app itself. `db/` holds the database script, `supabase/functions/dn-push/` the notification sender. `test/` holds the checks.
 
@@ -98,6 +98,7 @@ ER_BACKEND=real POSTGREST=/path/to/postgrest node deploy-shape.mjs   # pages in 
 - **Supabase's advisor** lists the `er_*` functions as callable without a Supabase sign-in. That is how the app works: it has its own logins, and each function checks them.
 - **Supabase's free plan** pauses a project after about a week with no use. Open the project in the Supabase dashboard and restore it; nothing is lost.
 - `app.login_log` is an empty table left over from the first version of the sign-in code. It is not used and can be dropped.
-- The `pg_net` extension lets the database nudge the notification sender; `pg_cron` runs `app.notice_tick()` every 30 seconds (job `dn-notices`). To see what was sent: `select kind, title, result, created_at from app.outbox order by created_at desc limit 20;`
+- The `pg_net` extension lets the database nudge the notification sender; `pg_cron` runs `app.notice_tick()` every minute (job `dn-notices`). To see what was sent: `select kind, title, result, created_at from app.outbox order by created_at desc limit 20;`
+- pg_cron writes one line to its own log, `cron.job_run_details`, for every run: about 1,440 a day, very roughly 80 MB a year. That is pg_cron's diary, not the team's records. If the database ever nears the free plan's size limit, clear the old lines in the SQL editor: `delete from cron.job_run_details where end_time < now() - interval '7 days';`
 - **Notifications stopped?** Check the job is there (`select * from cron.job`), that `app.meta.push_url` is set, and the `dn-push` function's logs in the Supabase dashboard.
 - The font (Barlow) is served from `fonts/` under the SIL Open Font License; the licence text is in that folder.
