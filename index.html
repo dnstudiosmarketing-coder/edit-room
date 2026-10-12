@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self' https://nzrsxjmkucceqakusjyw.supabase.co; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self' https://nzrsxjmkucceqakusjyw.supabase.co; frame-src https://drive.google.com; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="robots" content="noindex, nofollow">
 <meta name="referrer" content="no-referrer">
 <meta name="description" content="The DN Studios team app: log briefs, keep to the deadline and submit finished videos.">
@@ -17,8 +17,8 @@
 <link rel="icon" type="image/svg+xml" href="icon.svg">
 <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-192.png">
-<link rel="stylesheet" href="fonts.css?v=2">
-<link rel="stylesheet" href="styles.css?v=2">
+<link rel="stylesheet" href="fonts.css?v=3">
+<link rel="stylesheet" href="styles.css?v=3">
 </head>
 <body>
 <header class="top">
@@ -44,10 +44,11 @@
     <div id="sheet-content"></div>
   </div>
 </dialog>
+<dialog class="player" id="player" aria-labelledby="player-title"></dialog>
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 <noscript><p class="wrap">DN Studios needs JavaScript switched on in your browser.</p></noscript>
 
-<script src="config.js?v=2"></script>
-<script src="app.js?v=2"></script>
+<script src="config.js?v=3"></script>
+<script src="app.js?v=3"></script>
 </body>
 </html>

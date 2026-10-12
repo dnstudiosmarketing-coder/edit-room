@@ -30,9 +30,17 @@ async function open(name, extra) {
   page.on("console", (m) => { if ((m.type() === "error" || m.type() === "warning") && !String(m.location().url).includes("/rest/v1/rpc/")) problems.push(name + " console " + m.type() + ": " + m.text()); });
   page.on("pageerror", (e) => problems.push(name + " page error: " + e.message));
   page.on("requestfailed", (r) => { if (!r.url().includes("/rest/v1/rpc/")) problems.push(name + " request failed: " + r.url()); });
+  // Google Drive's player is out of reach here, so a plain stand-in answers for it; every address asked for is kept
+  await page.route("https://drive.google.com/**", (route) => {
+    drive.push(route.request().url());
+    route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: '<!doctype html><title>Drive player</title><body style="margin:0;height:100vh;display:grid;place-items:center;background:#111;color:#bbb;font:15px system-ui">Google Drive\'s player shows here</body>' });
+  });
   await page.goto(srv.url + "/");
   return page;
 }
+const drive = [];
+const playerOpen = (page) => page.evaluate(() => document.getElementById("player").open);
+const frameSrc = (page) => page.evaluate(() => { const f = document.querySelector("#player iframe"); return f ? f.getAttribute("src") : null; });
 const sql = (text, params) => srv.sql(text, params);
 const sync = (page) => page.evaluate(() => { document.dispatchEvent(new Event("visibilitychange")); });
 const tab = (page, id) => page.locator('#tabs button[data-tab="' + id + '"]').click();
@@ -63,7 +71,7 @@ async function look(page, name, label) {
   ok(m.wide <= 1, (label || name) + ": no sideways scroll", m.wide + "px too wide");
   ok(!m.unlabeled.length, (label || name) + ": every field has a label", m.unlabeled.join(", "));
   ok(!m.small.length, (label || name) + ": touch targets are big enough", m.small.join(" | "));
-  await page.screenshot({ path: path.join(SHOTS, name + ".png"), fullPage: !(await page.evaluate(() => document.getElementById("sheet").open)) });
+  await page.screenshot({ path: path.join(SHOTS, name + ".png"), fullPage: !(await page.evaluate(() => document.getElementById("sheet").open || document.getElementById("player").open)) });
 }
 
 try {
@@ -242,13 +250,35 @@ try {
   await toast(admin, "Now showing on everyone's home screen");
   const tile = admin.locator(".reel .shot", { hasText: "Night market short" });
   await tile.waitFor();
-  ok((await tile.getAttribute("href")) === href && (await tile.getAttribute("target")) === "_blank" && /Ada Obi/.test(await tile.innerText()) && /Shorts/.test(await tile.innerText()), "one click puts the video on the admin's home screen, linked to the Drive file", (await tile.innerText()).replace(/\n/g, " | "));
+  ok((await tile.evaluate((el) => el.tagName)) === "BUTTON" && (await tile.getAttribute("aria-label")) === "Play Night market short, by Ada Obi" && /Ada Obi/.test(await tile.innerText()) && /Shorts/.test(await tile.innerText()), "one click puts the video on the admin's home screen, ready to play", (await tile.innerText()).replace(/\n/g, " | "));
   ok(/Video of the moment/.test(await inbox.locator(".pills").innerText()) && (await inbox.getByRole("button", { name: "Take down from home screen" }).count()) === 1, "the video's card says it is showing, and offers to take it down");
   await look(admin, "13b-inbox-moment", "inbox with a video of the moment");
+  // tapping it plays it right here, in Drive's own player
+  await tile.click();
+  await admin.locator("#player .player-frame").waitFor();
+  ok((await frameSrc(admin)) === "https://drive.google.com/file/d/abc123/preview", "tapping it opens Drive's player inside the app, for that file", await frameSrc(admin));
+  await admin.frameLocator("#player .player-frame").getByText("Google Drive's player shows here").waitFor();
+  ok(drive.includes("https://drive.google.com/file/d/abc123/preview"), "the page's security rules let Drive's player load");
+  const pl = admin.locator("#player");
+  ok((await pl.locator(".player-title").innerText()) === "Night market short" && /Ada Obi/.test(await pl.locator(".player-by").innerText()) && /Shorts/.test(await pl.locator(".player-by").innerText()), "the player says what the video is and whose it is", (await pl.locator(".player-head").innerText()).replace(/\n/g, " | "));
+  const out = pl.getByRole("link", { name: "Open in Google Drive" });
+  ok((await out.getAttribute("href")) === href && (await out.getAttribute("target")) === "_blank" && /may not be shared with you/.test(await pl.locator(".player-foot").innerText()), "if the player can't show it, the Drive file is one tap away", await out.getAttribute("href"));
+  ok(await admin.evaluate(() => document.activeElement && document.activeElement.classList.contains("player-close")), "the Close button has the focus, so the video closes with one key");
+  const fr = await admin.evaluate(() => { const f = document.querySelector("#player iframe"); const r = f.getBoundingClientRect(); return { w: Math.round(r.width), h: Math.round(r.height), allow: f.getAttribute("allow"), full: f.hasAttribute("allowfullscreen"), ref: f.getAttribute("referrerpolicy") }; });
+  ok(fr.w === 390 && fr.h > 560 && fr.full && fr.ref === "strict-origin-when-cross-origin", "the player fills the screen and can go full screen, so upright and wide videos both fit", JSON.stringify(fr));
+  await look(admin, "13d-player", "video playing in the app");
+  await admin.keyboard.press("Escape");
+  await admin.waitForFunction(() => !document.getElementById("player").open && !document.querySelector("#player iframe"));
+  ok((await admin.locator("#player iframe").count()) === 0 && (await admin.evaluate(() => document.activeElement && document.activeElement.dataset.fk)) === (await tile.getAttribute("data-fk")), "closing stops the video and puts you back on its tile");
   await sync(ada);
   const mine = ada.locator(".reel .shot", { hasText: "Night market short" });
   await mine.waitFor();
-  ok(/Ada Obi \(you\)/.test(await mine.innerText()) && (await mine.getAttribute("href")) === href && (await ada.locator(".reel-item button").count()) === 0 && (await ada.getByRole("button", { name: "Add a video" }).count()) === 0, "every editor sees it on their home screen, and has no way to change it");
+  ok(/Ada Obi \(you\)/.test(await mine.innerText()) && (await ada.locator(".reel-item > button:not(.shot)").count()) === 0 && (await ada.getByRole("button", { name: "Add a video" }).count()) === 0, "every editor sees it on their home screen, and has no way to change it");
+  await mine.click();
+  await ada.locator("#player .player-frame").waitFor();
+  ok((await frameSrc(ada)) === "https://drive.google.com/file/d/abc123/preview" && /Ada Obi \(you\)/.test(await ada.locator("#player .player-by").innerText()), "an editor plays it in the app too", await frameSrc(ada));
+  await ada.locator("#player").getByRole("button", { name: "Close" }).click();
+  ok(!(await playerOpen(ada)) && (await ada.locator("#player iframe").count()) === 0, "the Close button stops the video at once");
   ok(/Video of the moment/.test(await ada.locator("article.clip", { hasText: "Night market short" }).locator(".pills").innerText()), "the editor's own card carries the Video of the moment mark");
   await look(ada, "13c-editor-moment", "editor home screen with a video of the moment");
   await tab(ada, "earn");
@@ -310,7 +340,7 @@ try {
   ok(/Assigned to you by your admin/.test(await tCard.innerText()) && /Due in (23h 5\dm|24h)/.test(await tCard.innerText()), "the new editor gets it as a fresh brief with a fresh 24 hours");
   const seen = tunde.locator(".reel .shot", { hasText: "Night market short" });
   await seen.waitFor();
-  ok(/Ada Obi/.test(await seen.innerText()) && !/\(you\)/.test(await seen.innerText()) && (await seen.getAttribute("href")) === href, "another editor sees the video of the moment, whose it is, and can open it");
+  ok(/Ada Obi/.test(await seen.innerText()) && !/\(you\)/.test(await seen.innerText()) && (await seen.getAttribute("aria-label")) === "Play Night market short, by Ada Obi", "another editor sees the video of the moment, whose it is, and can play it");
 
   /* ------------------------------------------------------------ send back, submit again */
   await tCard.getByRole("button", { name: "Submit with Drive link" }).click();
@@ -352,6 +382,30 @@ try {
   await sync(tunde);
   await tunde.locator(".reel .shot", { hasText: "Fuel prices explained" }).waitFor();
   ok(/Tunde Bello \(you\)/.test(await tunde.locator(".reel .shot", { hasText: "Fuel prices explained" }).innerText()), "the editor whose video was picked sees it marked as theirs");
+  // other ways of writing a Drive link play too; a link that isn't a Drive file still opens where it lives
+  const relink = async (link) => {
+    await sql("update app.projects set link = $1 where name = 'Fuel prices explained' and status = 'submitted'", [link]);
+    await tunde.reload();
+    await tunde.locator(".reel .shot", { hasText: "Fuel prices explained" }).waitFor();
+  };
+  const playAt = async () => {
+    await tunde.locator(".reel .shot", { hasText: "Fuel prices explained" }).click();
+    await tunde.locator("#player .player-frame").waitFor();
+    const s = await frameSrc(tunde);
+    await tunde.keyboard.press("Escape");
+    await tunde.waitForFunction(() => !document.getElementById("player").open && !document.querySelector("#player iframe"));
+    return s;
+  };
+  await relink("https://drive.google.com/file/d/final999/view?usp=sharing&resourcekey=0-AbC_d-Ef");
+  let at = await playAt();
+  ok(at === "https://drive.google.com/file/d/final999/preview?resourcekey=0-AbC_d-Ef", "a shared link's key goes with it, which Drive needs for some shared files", at);
+  await relink("https://drive.google.com/open?id=final999");
+  at = await playAt();
+  ok(at === "https://drive.google.com/file/d/final999/preview", "an older style of Drive link plays too", at);
+  await relink("https://drive.google.com/drive/folders/folder777");
+  const folder = tunde.locator(".reel .shot", { hasText: "Fuel prices explained" });
+  ok((await folder.evaluate((el) => el.tagName)) === "A" && (await folder.getAttribute("href")) === "https://drive.google.com/drive/folders/folder777" && (await folder.getAttribute("target")) === "_blank", "a Drive folder, which can't be played, still opens in Drive");
+  await relink("https://drive.google.com/file/d/final999/view");
   await admin.locator(".reel-item", { hasText: "Night market short" }).getByRole("button", { name: "Take down" }).click();
   await toast(admin, "Taken down from the home screen");
   await admin.locator(".reel .shot", { hasText: "Night market short" }).waitFor({ state: "hidden" });

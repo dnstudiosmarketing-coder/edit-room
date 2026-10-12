@@ -74,6 +74,7 @@ const ICONS = {       // line drawings on a 24-unit square
   earn: "M17.5 8.5V7a1.5 1.5 0 0 0-1.5-1.5H6A2 2 0 0 0 4 7.5V17a2 2 0 0 0 2 2h12.5a1.5 1.5 0 0 0 1.5-1.5V10a1.5 1.5 0 0 0-1.5-1.5H6a2 2 0 0 1-2-1.5M16 13.8h.2",
   star: "M12 4.2l2.3 4.8 5.2.7-3.8 3.7.9 5.2L12 16.1l-4.6 2.5.9-5.2-3.8-3.7 5.2-.7L12 4.2z",
   play: "M9 6.5v11l9-5.5-9-5.5z",
+  close: "M6.5 6.5l11 11M17.5 6.5l-11 11",
 };
 const SOLID = { play: true };      // drawn filled in
 function icon(name, size, weight) {
@@ -305,7 +306,7 @@ function leave(msg) {
   clearTimeout(syncTimer);
   state.phase = "login"; state.cursor = null; state.projects = new Map(); state.users = new Map(); state.featured = [];
   state.stats = { editors: new Map(), cats: new Map() }; state.horizon = null; resetHist();
-  closeSheet(); render();
+  closeSheet(); closePlayer(); render();
   if (msg) toast(msg, true);
 }
 let picBusy = false;
@@ -506,14 +507,31 @@ function featureBtn(p, key) {      // on a finished video's card, for an admin
   const up = isFeatured(p.id);
   return h("button", { class: "btn small", type: "button", dataset: { fk: "feat:" + key }, onclick: (e) => feature(e.currentTarget, p.id, !up) }, up ? null : icon("star", 18), up ? "Take down from home screen" : "Make video of the moment");
 }
-function shot(x) {      // one featured video: a black screen that opens the video
-  const link = parseLink(x.link), cat = x.catId ? state.cats.get(x.catId) : null, mine = x.uid === state.me.id;
+// A Google Drive file plays inside the app, in Drive's own player; any other link opens where it lives.
+// The player's address is built only from the file's id, plus the link key Drive needs for some shared
+// files, never from the pasted text itself.
+function driveEmbed(raw) {
+  let u;
+  try { u = new URL(String(raw || "")); } catch (e) { return null; }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+  const host = u.hostname.toLowerCase(), path = u.pathname;
+  if (host !== "drive.google.com" && host !== "docs.google.com" && host !== "drive.usercontent.google.com") return null;
+  const m = /\/file\/(?:u\/\d+\/)?d\/([^/]+)/.exec(path);
+  const id = m ? m[1] : /^\/(?:u\/\d+\/)?(?:open|uc|download)\/?$/.test(path) ? u.searchParams.get("id") : null;
+  if (!id || !/^[A-Za-z0-9_-]{5,128}$/.test(id)) return null;
+  const key = u.searchParams.get("resourcekey");
+  return "https://drive.google.com/file/d/" + id + "/preview" + (key && /^[A-Za-z0-9_-]{1,128}$/.test(key) ? "?resourcekey=" + key : "");
+}
+function shot(x) {      // one featured video: a black screen that plays it
+  const link = parseLink(x.link), embed = link ? driveEmbed(link.href) : null, cat = x.catId ? state.cats.get(x.catId) : null, mine = x.uid === state.me.id;
   const kids = [
     cat ? h("span", { class: "shot-cat", text: cat.name }) : h("span"),
     h("span", { class: "shot-play", "aria-hidden": "true" }, icon("play", 26)),
     h("span", { class: "shot-title", text: x.name }),
     h("span", { class: "shot-by" }, avatar(x.uid), h("span", { text: displayName(x.uid) + (mine ? " (you)" : "") }))];
-  return link ? h("a", { class: "shot", href: link.href, target: "_blank", rel: "noopener noreferrer", dataset: { fk: "shot:" + x.id }, "aria-label": "Watch " + x.name + ", by " + displayName(x.uid) }, kids)
+  const label = (embed ? "Play " : "Watch ") + x.name + ", by " + displayName(x.uid);
+  if (embed) return h("button", { class: "shot", type: "button", dataset: { fk: "shot:" + x.id }, "aria-label": label, onclick: () => openPlayer(x, embed, link) }, kids);
+  return link ? h("a", { class: "shot", href: link.href, target: "_blank", rel: "noopener noreferrer", dataset: { fk: "shot:" + x.id }, "aria-label": label }, kids)
     : h("div", { class: "shot" }, kids);
 }
 function momentPanel() {      // on everyone's home screen; an admin also gets the controls
@@ -523,7 +541,7 @@ function momentPanel() {      // on everyone's home screen; an admin also gets t
     admin ? h("button", { class: "btn small", type: "button", dataset: { fk: "moment-add" }, onclick: () => openMoment() }, "Add a video") : null);
   if (!list.length) return h("section", { class: "section" }, head, empty("Nothing is showing yet.", "Pick a submitted video and it appears here, on every editor's home screen."));
   return h("section", { class: "section" }, head,
-    admin ? h("p", { class: "section-note", text: "Everyone on the team sees these. A video opens for them only if its Drive file is shared with them." }) : null,
+    admin ? h("p", { class: "section-note", text: "Everyone on the team sees these and can play them in the app. Set each Drive file to Anyone with the link so it plays for everyone." }) : null,
     h("ul", { class: "reel" + (list.length === 1 ? " solo" : "") }, list.map((x) => h("li", { class: "reel-item" }, shot(x),
       admin ? h("button", { class: "btn small", type: "button", dataset: { fk: "down:" + x.id }, onclick: (e) => feature(e.currentTarget, x.id, false) }, "Take down") : null))));
 }
@@ -1194,6 +1212,50 @@ function closeSheet() {
 sheet.addEventListener("close", sheetClosed);
 sheet.addEventListener("click", (e) => { if (e.target === sheet) closeSheet(); });
 
+// A featured video plays here, on a black screen of its own, in Drive's player. The page's security rules
+// allow a frame from Drive and nothing else.
+const player = $("player");
+let playerFrom = null, playerKey = null;
+function drivePlayer(src, name) {
+  return h("iframe", { class: "player-frame", src: src, title: "Video: " + name, allow: "autoplay; picture-in-picture; encrypted-media", allowfullscreen: true, referrerpolicy: "strict-origin-when-cross-origin" });
+}
+function openPlayer(x, embed, link) {
+  if (!player.open) {
+    const a = document.activeElement;
+    playerFrom = a && a !== document.body ? a : null;
+    playerKey = playerFrom && playerFrom.dataset ? playerFrom.dataset.fk || null : null;
+  }
+  const cat = x.catId ? state.cats.get(x.catId) : null, mine = x.uid === state.me.id;
+  player.replaceChildren(
+    h("div", { class: "player-top" },
+      h("div", { class: "player-head" },
+        h("h2", { class: "player-title", id: "player-title", text: x.name }),
+        h("p", { class: "player-by" }, avatar(x.uid), h("span", { text: displayName(x.uid) + (mine ? " (you)" : "") }), cat ? h("span", { class: "shot-cat", text: cat.name }) : null)),
+      h("button", { class: "btn small player-close", type: "button", onclick: closePlayer }, icon("close", 18, 2.4), "Close")),
+    h("div", { class: "player-stage" }, h("p", { class: "player-wait", text: "Loading the video…" }), drivePlayer(embed, x.name)),
+    h("div", { class: "player-foot" },
+      h("span", { text: "Not playing? Its Drive file may not be shared with you." }),
+      h("a", { class: "btn small", href: link.href, target: "_blank", rel: "noopener noreferrer" }, "Open in Google Drive", icon("out", 16, 2.6))));
+  if (!player.open) { try { player.showModal(); } catch (e) { player.setAttribute("open", ""); } }
+  seatToast();
+  player.querySelector(".player-close").focus();
+}
+function playerClosed() {
+  if (player.open) return;
+  player.replaceChildren();        // the frame goes with it, so the sound stops
+  seatToast();
+  let el = playerFrom && playerFrom.isConnected ? playerFrom : null;
+  if (!el && playerKey) el = document.querySelector('[data-fk="' + esc(playerKey) + '"]');
+  if (el) el.focus({ preventScroll: true });
+  playerFrom = null; playerKey = null;
+}
+function closePlayer() {
+  if (!player.open) return;
+  try { player.close(); } catch (e) { player.removeAttribute("open"); }
+  playerClosed();        // straight away, rather than when the browser gets round to the close event
+}
+player.addEventListener("close", playerClosed);
+
 function formSheet(o) {
   const err = h("p", { class: "error", role: "alert", hidden: true });
   const go = o.submit ? h("button", { class: "btn grow " + (o.danger ? "danger" : "primary"), type: "submit" }, o.submit) : null;
@@ -1385,10 +1447,10 @@ function openMoment() {
   formSheet({
     title: title, submit: "Add this video",
     body: [
-      h("p", { text: "It shows on everyone's home screen, with the editor's name and a link to watch it, until you take it down. Five show at most: a sixth takes the oldest one down." }),
+      h("p", { text: "It shows on everyone's home screen with the editor's name, and plays right in the app, until you take it down. Five show at most: a sixth takes the oldest one down." }),
       h("div", { class: "options", role: "radiogroup", "aria-label": "Finished videos" }, opts),
       rows.length > shown.length ? h("p", { class: "hint", text: "These are the " + shown.length + " most recent. Any other finished video can be added from Projects." }) : null,
-      h("p", { class: "hint", text: "Check that the Drive file is shared with your team, or they won't be able to open it." })],
+      h("p", { class: "hint", text: "Set the Drive file to Anyone with the link so it plays for everyone." })],
     run: async () => {
       const pick = sheet.querySelector('input[name="m-pick"]:checked');
       if (!pick) throw new Oops("Pick a video.");
@@ -1588,8 +1650,8 @@ function openChangePassword() {
 /* ---------- drawing ---------- */
 let toastTimer = 0;
 const toastEl = $("toast");
-function seatToast() {      // while a sheet is open the message lives inside it, so it shows above the sheet and is read out
-  const home = sheet.open ? sheet : document.body;
+function seatToast() {      // while a sheet or the player is open the message lives inside it, so it shows on top and is read out
+  const home = sheet.open ? sheet : player.open ? player : document.body;
   if (toastEl.parentNode !== home) home.append(toastEl);
 }
 function toast(msg, bad) {
