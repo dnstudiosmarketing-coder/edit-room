@@ -6,6 +6,10 @@ A small web app for DN Studios' video editors and the people who run the team. (
 - **Admins** see what is waiting to download, what is past its deadline and by how long, how each editor and each video category is doing, and can reassign a script, send work back, set what each category pays, and award bonuses.
 - An admin can make any finished video a **Video of the moment**: it then shows at the top of everyone's home screen with the editor's name, and plays inside the app in Google Drive's own player (the page's security rules allow a frame from drive.google.com and nothing else). Up to five show at once. A file plays for everyone only if it is shared as "Anyone with the link"; a link that isn't a Drive file opens where it lives.
 - Everyone on the team sees a leaderboard of on-time submissions; each editor sees what they have earned.
+- **Phone notifications**, once each person turns them on: an admin's phone pings when a video is submitted, an editor's when a video reaches its deadline and the grace period starts. They arrive even when the app is closed. On iPhone the app has to be added to the home screen first.
+- On a submitted video, **Mark received** glows until the admin presses it.
+- An admin can **ask every editor for a new profile picture** (Settings): each one gets a notification and a reminder on their home screen until they choose one. Tapping a picture (anyone's, for an admin; the leaderboard, for editors) shows it full size.
+- Each editor has a **Videos** page listing every video they have submitted, playable in the app; an admin can open anyone's from the Editors screen.
 
 It opens from a link on any phone or computer and can be added to the home screen like an app.
 
@@ -18,8 +22,17 @@ It opens from a link on any phone or computer and can be added to the home scree
 | The pages | This repository, served by GitHub Pages from the `gh-pages` branch | Plain HTML, CSS and JavaScript. No build step. |
 | The data | A Supabase project (`edit-room`, region us-west-1) | PostgreSQL. All rules live in `db/schema.sql`. |
 | Sign-in | The app's own usernames and passwords | Created by an admin inside the app. Supabase Auth is not used. |
+| Notifications | A Supabase Edge Function, `dn-push` (`supabase/functions/dn-push/`) | Sends Web Push messages. The database nudges it; a timer (pg_cron, every 30 seconds) catches anything missed and notices deadlines. |
 
-Files at the top level (`index.html`, `app.js`, `styles.css`, `fonts.css`, `fonts/`, `config.js`, `sw.js`, `manifest.webmanifest`, icons) are the app itself. `db/` holds the database script. `test/` holds the checks.
+Files at the top level (`index.html`, `app.js`, `styles.css`, `fonts.css`, `fonts/`, `config.js`, `sw.js`, `manifest.webmanifest`, icons) are the app itself. `db/` holds the database script, `supabase/functions/dn-push/` the notification sender. `test/` holds the checks.
+
+### Notifications, in short
+
+A phone that allows notifications leaves its push address in `app.push_subs` (belonging to whoever is signed in on it; signing out lets it go). Things worth a ping go into `app.outbox`: a submission (for every admin), a deadline passing (for the editor, once, within 6 hours of it), a picture request, a test. Each insert nudges the sender through `pg_net`; the sender takes a batch with `app.push_claim`, encrypts each message for each phone (RFC 8291) and signs it (VAPID, RFC 8292), and reports back with `app.push_report`. A phone its push service calls gone is stamped `gone_at`; a busy push service is tried again after 2 minutes, five times at most.
+
+Nothing secret passes through anyone's hands. The nudge carries `app.meta.push_secret`, made inside the database; the sender checks it against the same row. The sender makes its own signing keys on its first run and keeps them in `app.meta`; phones get only the public half, through `er_state`. The sender connects to the database with `SUPABASE_DB_URL`, which Supabase gives every edge function. It is deployed with JWT checks off, because it checks the secret itself.
+
+On the live project, `app.meta.push_url` holds the sender's address and `app.meta.push_contact` the contact shown to push services; both are left empty in `db/schema.sql`, so a local or test database never sends anything.
 
 ### The look, in short
 
@@ -44,6 +57,8 @@ Nothing in the database ever removes a row. Sessions are revoked, projects and l
 
 If `db/schema.sql` changed, apply the changed statements to the Supabase project as a migration. The file is written so the whole of it can be run again safely. If a function's list of arguments changes, the old version has to be removed by hand first, or the web API will see two functions with one name.
 
+If `supabase/functions/dn-push/` changed, deploy it again as the `dn-push` edge function, with JWT checks off.
+
 ## Running the checks
 
 ```
@@ -52,6 +67,12 @@ npm install
 node check-api.mjs          # every call the app makes names a real database function and its arguments
 node db.test.mjs            # the database rules: sign-in, who may do what, deadlines, pay, bonuses, history
 node e2e.mjs                # the whole app in a real browser on a phone-sized screen
+```
+
+The notification sender is checked end to end against the real stack, with a local stand-in for the push services (its messages are decrypted with an independent library):
+
+```
+ER_BACKEND=real POSTGREST=/path/to/postgrest node push.test.mjs
 ```
 
 The browser run needs Playwright: `npm install playwright && npx playwright install chromium` (or point `GLOBAL_MODULES` at a folder that already has it).
@@ -77,5 +98,6 @@ ER_BACKEND=real POSTGREST=/path/to/postgrest node deploy-shape.mjs   # pages in 
 - **Supabase's advisor** lists the `er_*` functions as callable without a Supabase sign-in. That is how the app works: it has its own logins, and each function checks them.
 - **Supabase's free plan** pauses a project after about a week with no use. Open the project in the Supabase dashboard and restore it; nothing is lost.
 - `app.login_log` is an empty table left over from the first version of the sign-in code. It is not used and can be dropped.
-- The `pg_net` extension is switched on in the Supabase project. It lets the database make web requests: it was used to check the live web API from the inside, and deadline notifications will need it.
+- The `pg_net` extension lets the database nudge the notification sender; `pg_cron` runs `app.notice_tick()` every 30 seconds (job `dn-notices`). To see what was sent: `select kind, title, result, created_at from app.outbox order by created_at desc limit 20;`
+- **Notifications stopped?** Check the job is there (`select * from cron.job`), that `app.meta.push_url` is set, and the `dn-push` function's logs in the Supabase dashboard.
 - The font (Barlow) is served from `fonts/` under the SIL Open Font License; the licence text is in that folder.

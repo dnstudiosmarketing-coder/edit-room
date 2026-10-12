@@ -166,6 +166,7 @@ const ERRORS = {
   offline: "Can't reach the server. Check your connection and try again.",
   auth: "You've been signed out. Sign in again.",
   forbidden: "Your login isn't allowed to do that.",
+  push_failed: "This phone couldn't turn notifications on. Try again in a moment.",
   not_found: "That has changed since you opened it. Check the list and try again.",
   need_category: "Choose a category.",
   bad_name: "Enter a name. It may be too long or empty.",
@@ -209,7 +210,7 @@ function applyState(d) {
   const wasAdmin = state.isAdmin, hadMe = state.me.id;
   state.skew = Number(d.now) - Date.now();
   const m = d.me || {};
-  state.me = { id: String(m.id), name: str(m.name, 40), username: str(m.username, 24), role: m.role === "admin" ? "admin" : "editor", owner: m.owner === true, av: num(m.av) || 0, has: m.has === true };
+  state.me = { id: String(m.id), name: str(m.name, 40), username: str(m.username, 24), role: m.role === "admin" ? "admin" : "editor", owner: m.owner === true, av: num(m.av) || 0, has: m.has === true, avAt: num(m.avAt), phones: num(m.phones) || 0 };
   state.isAdmin = state.me.role === "admin";
   const s = d.settings || {}, active = [];
   state.cats = new Map();
@@ -218,11 +219,12 @@ function applyState(d) {
     state.cats.set(cat.id, cat);
     if (!cat.archived) active.push(cat);
   }
-  state.config = { categories: active, weeklyTarget: num(s.target), deliveryHours: num(s.delivery) || 24, graceHours: num(s.grace) == null ? 48 : num(s.grace), currency: str(s.currency, 6), tz: str(s.tz, 64) || "UTC" };
+  state.config = { categories: active, weeklyTarget: num(s.target), deliveryHours: num(s.delivery) || 24, graceHours: num(s.grace) == null ? 48 : num(s.grace), currency: str(s.currency, 6), tz: str(s.tz, 64) || "UTC",
+    push: typeof s.push === "string" && /^[A-Za-z0-9_-]{86,88}$/.test(s.push) ? s.push : null, picAsk: num(s.picAsk) };
   state.prefs = { bonusAmount: amount(s.bonus) };
   state.users = new Map();
   for (const u of Array.isArray(d.users) ? d.users : []) {
-    state.users.set(String(u.id), { id: String(u.id), name: str(u.name, 40) || "Unnamed", username: str(u.username, 24), role: u.role === "admin" ? "admin" : "editor", owner: u.owner === true, active: u.active !== false, av: num(u.av) || 0, has: u.has === true, seen: num(u.seen), earned: amount(u.earned) || 0, bonus: amount(u.bonus) || 0, last: num(u.last) || 0, moved: num(u.moved) || 0 });
+    state.users.set(String(u.id), { id: String(u.id), name: str(u.name, 40) || "Unnamed", username: str(u.username, 24), role: u.role === "admin" ? "admin" : "editor", owner: u.owner === true, active: u.active !== false, av: num(u.av) || 0, has: u.has === true, seen: num(u.seen), earned: amount(u.earned) || 0, bonus: amount(u.bonus) || 0, last: num(u.last) || 0, moved: num(u.moved) || 0, avAt: num(u.avAt), push: u.push === true });
   }
   if (Array.isArray(d.weeks) && d.weeks.length === 6) state.weeks = d.weeks.map(Number);
   state.month = Number(d.month) || 0;
@@ -299,7 +301,7 @@ async function enter(token) {
     if (EDITOR_TABS.some((x) => x[0] === e)) ui.etab = e;
   } catch (e) { /* start on the first tab */ }
   authPanel = null;
-  render(); plan(); loadPics();
+  render(); plan(); loadPics(); pushRefresh();
 }
 function leave(msg) {
   saveToken(null);
@@ -402,8 +404,16 @@ function avatar(uid, size, urlOverride) {
   if (url) return h("img", { class: cls, src: url, alt: "" });
   return h("span", { class: cls, "aria-hidden": "true", text: (displayName(uid).trim()[0] || "?") });
 }
-function person(uid, size) {
-  return h("div", { class: "person" + (size ? " big" : "") }, avatar(uid, size), h("span", { class: "person-name", text: displayName(uid) + (uid === state.me.id ? " (you)" : "") }));
+// A picture that opens full size when tapped (people without a picture just show their initial).
+function zoomable(uid, size) {
+  const pic = pics.get(uid);
+  if (!pic || !pic.url) return avatar(uid, size);
+  return h("button", { class: "pic-btn" + (size ? "" : " small"), type: "button", "aria-label": "See " + displayName(uid) + "'s picture", dataset: { fk: "pic:" + uid + ":" + (size || "") }, onclick: () => openPic(uid) }, avatar(uid, size));
+}
+// An admin can tap anyone's picture; elsewhere it opens only where the caller asks (the leaderboard).
+function person(uid, size, zoom) {
+  const z = zoom == null ? ui.view === "admin" : zoom;
+  return h("div", { class: "person" + (size ? " big" : "") }, z ? zoomable(uid, size) : avatar(uid, size), h("span", { class: "person-name", text: displayName(uid) + (uid === state.me.id ? " (you)" : "") }));
 }
 function meter(n, target) {
   const m = h("div", { class: "meter", role: "img", "aria-label": n + " of " + target + " submitted this week" }, h("i"));
@@ -564,8 +574,7 @@ function fillInstall(box) {
       h("span", { class: "hint", text: "It then opens from your home screen like any other app." }));
     return;
   }
-  const ua = navigator.userAgent || "", apple = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
-  box.replaceChildren(h("span", { class: "hint", text: apple
+  box.replaceChildren(h("span", { class: "hint", text: isApple()
     ? "To keep " + APP + " on your iPhone: open this page in Safari, tap the Share button, then Add to Home Screen."
     : "To keep " + APP + " on your phone: open your browser's menu and choose Install app or Add to Home screen." }));
 }
@@ -577,6 +586,119 @@ function installBox() {
 function refreshInstall() { for (const box of document.querySelectorAll("[data-install]")) fillInstall(box); }
 window.addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); installEvent = e; refreshInstall(); });
 window.addEventListener("appinstalled", () => { installEvent = null; refreshInstall(); });
+function isApple() { const ua = navigator.userAgent || ""; return /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1); }
+
+/* ---------- phone notifications ---------- */
+// Each phone signs up for notifications once, after its owner taps "Turn on notifications". The phone's
+// push address goes to the database, which queues a notification when a video comes in (for admins) or a
+// deadline passes (for the editor); the sender delivers it even when the app is closed.
+const pushable = () => !!state.config.push && "serviceWorker" in navigator && "PushManager" in window && typeof Notification !== "undefined" && window.isSecureContext;
+const needsHomeScreen = () => !!state.config.push && isApple() && !isInstalled() && !("PushManager" in window);   // iPhones allow them only from the home screen
+const pushPerm = () => (typeof Notification !== "undefined" ? Notification.permission : "denied");
+const within = (p, ms) => Promise.race([p, new Promise((_, no) => setTimeout(() => no(new Error("slow")), ms))]);
+function keyBytes(text) {
+  const s = String(text).replace(/-/g, "+").replace(/_/g, "/"), bin = atob(s + "===".slice((s.length + 3) % 4)), out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function sameKey(buf, bytes) {
+  if (!buf) return false;
+  const a = new Uint8Array(buf);
+  return a.length === bytes.length && a.every((v, i) => v === bytes[i]);
+}
+async function phoneSub() {      // this phone's sign-up, if it has one
+  const reg = await within(navigator.serviceWorker.ready, 8000);
+  return { reg: reg, sub: await reg.pushManager.getSubscription() };
+}
+async function pushSignUp() {
+  const key = keyBytes(state.config.push), cur = await phoneSub();
+  let sub = cur.sub;
+  if (sub && !sameKey(sub.options && sub.options.applicationServerKey, key)) { try { await sub.unsubscribe(); } catch (e) { /* replaced below */ } sub = null; }
+  if (!sub) sub = await cur.reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+  const j = sub.toJSON();
+  await call("er_save_push", { p_endpoint: j.endpoint, p_key: j.keys.p256dh, p_auth: j.keys.auth });
+}
+async function turnOnPush(btn) {      // from a tap: the phone asks its owner, then this phone signs up
+  if (btn) btn.disabled = true;
+  try {
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") {
+      toast(perm === "denied" ? "Notifications are blocked for " + APP + ". Allow them in your phone's settings to get pings." : "Notifications are still off.", perm === "denied");
+      return;
+    }
+    await pushSignUp();
+    await sync();
+    toast("Notifications are on for this phone.");
+  } catch (e) { toast(e instanceof ApiError ? errText(e) : ERRORS.push_failed, true); }
+  finally { if (btn && btn.isConnected) btn.disabled = false; schedule(); }
+}
+async function turnOffPush(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const cur = await phoneSub();
+    if (cur.sub) { await call("er_drop_push", { p_endpoint: cur.sub.endpoint }); try { await cur.sub.unsubscribe(); } catch (e) { /* the server has already let it go */ } }
+    await sync();
+    toast("Notifications are off for this phone.");
+  } catch (e) { toast(errText(e), true); }
+  finally { if (btn && btn.isConnected) btn.disabled = false; schedule(); }
+}
+function testPush(btn) {
+  return act(btn, async () => {
+    const r = await call("er_test_push");
+    if (r && r.queued) toast("Test sent. It should arrive in a few seconds.");
+    else toast("This phone isn't signed up yet. Turn notifications on first.", true);
+  });
+}
+async function pushRefresh() {      // on start: keep this phone's sign-up current, without asking anything
+  if (!pushable() || pushPerm() !== "granted") return;
+  try { await pushSignUp(); } catch (e) { /* tried again next time the app opens */ }
+}
+async function pushDrop(token) {      // signing out: this phone stops getting that person's notifications
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
+  try {
+    const reg = await within(navigator.serviceWorker.getRegistration(), 3000), sub = reg ? await reg.pushManager.getSubscription() : null;
+    if (sub) await api("er_drop_push", { p_token: token, p_endpoint: sub.endpoint });
+  } catch (e) { /* whoever signs in next on this phone takes it over */ }
+}
+function snoozed() { try { return Number(localStorage.getItem("editroom.pushAsk") || 0) > Date.now() - 7 * DAY; } catch (e) { return false; } }
+// On the home screen until notifications are on, refused, or put off for a week.
+function pushCard() {
+  if (state.phase !== "ready" || snoozed()) return null;
+  const home = needsHomeScreen();
+  if (!home && !(pushable() && pushPerm() === "default")) return null;
+  const admin = ui.view === "admin";
+  const later = h("button", { class: "btn small quiet", type: "button", dataset: { fk: "push-later" }, onclick: () => { try { localStorage.setItem("editroom.pushAsk", String(Date.now())); } catch (e) { /* asked again next time */ } schedule(); } }, "Not now");
+  return h("section", { class: "panel push-card", "aria-label": "Notifications" },
+    h("h2", { class: "section-title", text: admin ? "Get a ping when a video comes in" : "Get a ping when a deadline passes" }),
+    h("p", { text: home ? "On iPhone, add " + APP + " to your home screen first, then open it from there to turn on notifications."
+      : admin ? "Turn on notifications and this phone pings as soon as an editor submits a video, even when the app is closed."
+        : "Turn on notifications and this phone pings when a video reaches its deadline and the grace period starts, even when the app is closed." }),
+    h("div", { class: "btn-row" },
+      home ? h("button", { class: "btn small", type: "button", dataset: { fk: "push-how" }, onclick: () => openAccount() }, "How to add it")
+        : h("button", { class: "btn small primary", type: "button", dataset: { fk: "push-on" }, onclick: (e) => turnOnPush(e.currentTarget) }, "Turn on notifications"),
+      later));
+}
+// In the account sheet: what notifications are doing on this phone, and the switch.
+function notifyBox() {
+  const box = h("div", { class: "notify-box", id: "ac-notify" });
+  if (!state.config.push) { box.hidden = true; return box; }
+  const line = (text, buttons) => box.replaceChildren(h("h3", { class: "notify-title", text: "Notifications" }), h("p", { class: "hint", text: text }), buttons ? h("div", { class: "btn-row" }, buttons) : null);
+  if (needsHomeScreen()) { line("To get notifications on iPhone, add " + APP + " to your home screen, then open it from there."); return box; }
+  if (!pushable()) { line("This browser can't show notifications."); return box; }
+  if (pushPerm() === "denied") { line("Notifications are blocked for " + APP + " on this phone. Allow them in your phone's settings, then come back here."); return box; }
+  line("Checking this phone…");
+  phoneSub().then((cur) => {
+    if (cur.sub && pushPerm() === "granted") line("Notifications are on for this phone.", [
+      h("button", { class: "btn small", type: "button", id: "push-test", onclick: (e) => testPush(e.currentTarget) }, "Send a test"),
+      h("button", { class: "btn small", type: "button", id: "push-off", onclick: async (e) => { await turnOffPush(e.currentTarget); box.replaceWith(notifyBox()); } }, "Turn off")]);
+    else line("Notifications are off for this phone.", [h("button", { class: "btn small primary", type: "button", id: "push-on2", onclick: async (e) => { await turnOnPush(e.currentTarget); box.replaceWith(notifyBox()); } }, "Turn on notifications")]);
+  }).catch(() => line("Notifications aren't available on this phone right now."));
+  return box;
+}
+// An editor's reminder stays until they choose a picture after the admin asked.
+const pictureAsked = () => state.me.role === "editor" && state.config.picAsk != null && !(state.me.has && state.me.avAt != null && state.me.avAt >= state.config.picAsk);
+// Keeps a glowing button's pulse in step across the screen redrawing every few seconds.
+function glow(el) { el.style.animationDelay = -(Date.now() % 2000) + "ms"; return el; }
 
 /* ---------- signing in ---------- */
 let authPanel = null;
@@ -654,7 +776,13 @@ function viewWork(all) {
     h("strong", { text: "Reassigned: " + x.p.name }),
     h("span", { text: "Your admin moved this script to another editor." }),
     h("button", { class: "btn small", type: "button", dataset: { fk: "ack:" + x.p.id }, onclick: (e) => act(e.currentTarget, () => run("er_ack_moved", { p_project: x.p.id })) }, "Got it")));
+  if (pictureAsked()) notices.push(h("div", { class: "notice gold" },
+    h("strong", { text: "New profile picture, please" }),
+    h("span", { text: "Your admin asked everyone to update their profile picture. It shows next to your name on the leaderboard." }),
+    h("button", { class: "btn small primary", type: "button", dataset: { fk: "newpic" }, onclick: () => openAccount(true) }, "Update my picture")));
   if (notices.length) out.push(h("div", { class: "notices" }, notices));
+  const ask = pushCard();
+  if (ask) out.push(ask);
 
   const wk = state.weeks[5], target = cfg.weeklyTarget;
   const week = done.filter((x) => (x.p.submittedAt || 0) >= wk), onTime = week.filter((x) => x.f.onTime === true).length, lateN = week.length - onTime;
@@ -677,7 +805,8 @@ function viewWork(all) {
 
   const shown = ui.older ? done : done.slice(0, 6);
   out.push(h("section", { class: "section" },
-    h("h2", { class: "section-title", text: "Submitted" }),
+    h("div", { class: "section-head" }, h("h2", { class: "section-title", text: "Submitted" }),
+      done.some((x) => x.p.link) ? h("button", { class: "btn small", type: "button", dataset: { fk: "myvids" }, onclick: () => openVideos(uid) }, "All my videos") : null),
     shown.length ? h("div", { class: "grid" }, shown.map(doneCard)) : empty("Nothing submitted yet.", "Finished projects show up here once you submit them with a Drive link."),
     done.length > 6 ? h("div", { class: "btn-row" }, h("button", { class: "btn small", type: "button", dataset: { fk: "older" }, onclick: () => { ui.older = !ui.older; schedule(); } }, ui.older ? "Show fewer" : "Show all " + done.length)) : null));
 
@@ -727,7 +856,7 @@ function viewBoard() {
       h("p", { class: "slate-label", text: (kind === "week" ? "Week of " + teamDay(start) : teamMonth(start)) + ". Ranked by videos submitted within the " + hours + "-hour deadline." }),
       rows.length
         ? h("ol", { class: "podium n" + top.length }, top.map((r) => h("li", { class: "podium-cell" + (rank(r) === 1 ? " first" : "") + (r.u === me ? " me" : "") },
-            h("span", { class: "podium-pic" }, avatar(r.u, "xl"), h("span", { class: "rank", text: String(rank(r)) })),
+            h("span", { class: "podium-pic" }, zoomable(r.u, "xl"), h("span", { class: "rank", text: String(rank(r)) })),
             h("span", { class: "podium-name", text: name(r.u) }),
             h("span", { class: "podium-count", text: r.on + " on time" }),
             won(r.u) ? pill("gold", "Bonus") : null)))
@@ -735,7 +864,7 @@ function viewBoard() {
             h("strong", { text: kind === "week" ? "No on-time submissions yet this week." : "No on-time submissions yet this month." }),
             h("span", { text: "Submit within " + hours + " hours of logging a brief to get on the board." }))),
     rest.length ? h("ol", { class: "rows" }, rest.map((r) => h("li", { class: "rank-row" + (r.u === me ? " me" : "") },
-      h("span", { class: "rank", text: String(rank(r)) }), avatar(r.u),
+      h("span", { class: "rank", text: String(rank(r)) }), zoomable(r.u),
       h("span", { class: "person-name", text: name(r.u) }),
       h("span", { class: "rank-count", text: r.on + " on time" }),
       won(r.u) ? pill("gold", "Bonus") : null))) : null,
@@ -744,7 +873,7 @@ function viewBoard() {
   if (awards.length) out.push(h("section", { class: "section" },
     h("h2", { class: "section-title", text: "Bonuses awarded" }),
     h("ul", { class: "rows" }, awards.map((x) => h("li", null,
-      h("div", { class: "row-main" }, person(x.u), h("span", { class: "hint", text: x.label || "Bonus" })),
+      h("div", { class: "row-main" }, person(x.u, null, true), h("span", { class: "hint", text: x.label || "Bonus" })),
       h("span", { class: "rank-count", text: shortDate(x.at) }))))));
   return out;
 }
@@ -812,6 +941,8 @@ function viewInbox(all) {
       stat(active.length, "In progress"), stat(past.length, "Past deadline", past.length ? "warn" : ""), stat(over, "Grace over", over ? "crit" : ""))));
   const setup = setupCard();
   if (setup) out.push(setup);
+  const ask = pushCard();
+  if (ask) out.push(ask);
   const moment = momentPanel();
   if (moment) out.push(moment);
   out.push(h("section", { class: "section" },
@@ -841,7 +972,7 @@ function inboxCard(x) {
     linkLine(link, p.link),
     h("div", { class: "btn-row" },
       link ? openLink(link, false, key) : null,
-      h("button", { class: "btn grow", type: "button", dataset: { fk: "recv:" + key }, onclick: (e) => receive(e.currentTarget, uid, p) }, "Mark received"),
+      glow(h("button", { class: "btn grow glow", type: "button", dataset: { fk: "recv:" + key }, onclick: (e) => receive(e.currentTarget, uid, p) }, "Mark received")),
       h("button", { class: "btn grow", type: "button", dataset: { fk: "back:" + key }, onclick: () => openSendBack(uid, p) }, "Send back")),
     link ? h("div", { class: "btn-row" }, featureBtn(p, key)) : null);
 }
@@ -880,7 +1011,7 @@ function adminCard(x) {
     p.status === "submitted" ? linkLine(link, p.link) : null,
     h("div", { class: "btn-row" },
       p.status === "submitted" && link ? openLink(link, true, key) : null,
-      isWaiting(x) ? h("button", { class: "btn small", type: "button", dataset: { fk: "recv:" + key }, onclick: (e) => receive(e.currentTarget, uid, p) }, "Mark received") : null,
+      isWaiting(x) ? glow(h("button", { class: "btn small glow", type: "button", dataset: { fk: "recv:" + key }, onclick: (e) => receive(e.currentTarget, uid, p) }, "Mark received")) : null,
       h("button", { class: "btn small", type: "button", "aria-expanded": String(open), dataset: { fk: "mg:" + key }, onclick: () => { ui.manage = open ? null : key; schedule(); } }, open ? "Hide options" : "Manage")),
     open ? h("div", { class: "btn-row tools" }, tools) : null);
 }
@@ -1084,6 +1215,7 @@ function rosterCard(s, win, target, rank, peak) {
       fact(s.avg != null ? span(s.avg) : "–", "Average turnaround"), fact(money(s.earned.total), "Earned in total", s.earned.bonus ? "includes " + money(s.earned.bonus) + " in bonuses" : null)),
     s.last ? h("p", { class: "hint", text: "Last active " + ago(s.last) + "." }) : null,
     h("div", { class: "btn-row" },
+      h("button", { class: "btn small", type: "button", dataset: { fk: "vids:" + s.uid }, onclick: () => openVideos(s.uid) }, "Videos"),
       h("button", { class: "btn small", type: "button", dataset: { fk: "view:" + s.uid }, onclick: () => { ui.fEditor = s.uid; ui.fStatus = "all"; ui.fCat = "all"; ui.limit = 40; setTab("projects"); } }, "View projects"),
       h("button", { class: "btn small", type: "button", dataset: { fk: "bonus:" + s.uid }, onclick: () => openBonuses(s.uid) }, "Bonuses")));
 }
@@ -1123,6 +1255,13 @@ function settingsPanel() {
     catch (ex) { toast(errText(ex), true); }
   };
   for (const el of [delivery, grace, target, currency, bonus]) el.addEventListener("change", save);
+  const picStatus = h("p", { class: "hint", id: "pic-status" });
+  const picBox = h("section", { class: "section" },
+    h("h2", { class: "section-title", text: "Profile pictures" }),
+    h("div", { class: "panel" },
+      h("p", null, "Ask every editor to update their profile picture. Each one gets a reminder on their home screen until they choose a new one, and a notification if they've turned notifications on."),
+      picStatus,
+      h("div", { class: "btn-row" }, h("button", { class: "btn", type: "button", id: "ask-pics", onclick: () => openAskPictures() }, "Ask everyone for a new picture"))));
   const tryBox = h("section", { class: "section" },
     h("h2", { class: "section-title", text: "Try the editor screen" }),
     h("div", { class: "panel" },
@@ -1152,8 +1291,9 @@ function settingsPanel() {
             h("div", { class: "field" }, h("label", { for: "set-currency", text: "Currency symbol" }), currency),
             h("div", { class: "field" }, h("label", { for: "set-bonus", text: "Usual bonus amount" }), bonus, h("p", { class: "hint", text: "Filled in for you when you award a bonus. Only admins see it." })),
             h("div", { class: "field" }, h("label", { for: "set-target", text: "Weekly target per editor (videos)" }), target, h("p", { class: "hint", text: "Optional. Weeks run Monday to Sunday." }))))),
+      picBox,
       tryBox),
-    teamList: teamList, list: list, delivery: delivery, grace: grace, target: target, currency: currency, bonus: bonus,
+    teamList: teamList, list: list, delivery: delivery, grace: grace, target: target, currency: currency, bonus: bonus, picStatus: picStatus,
   };
   return setPanel;
 }
@@ -1162,7 +1302,7 @@ function teamRow(u) {
   return h("li", null,
     h("div", { class: "row-main" },
       h("div", { class: "row-head" }, person(u.id), u.owner ? pill("info", "Owner") : u.role === "admin" ? pill("info", "Admin") : null, u.active ? null : pill("warn", "Switched off")),
-      h("span", { class: "hint", text: "@" + u.username + (u.seen ? ", last seen " + ago(u.seen) : ", hasn't signed in yet") })),
+      h("span", { class: "hint", text: "@" + u.username + (u.seen ? ", last seen " + ago(u.seen) : ", hasn't signed in yet") + (u.push ? ", notifications on" : "") })),
     manage ? h("div", { class: "row-actions" }, h("button", { class: "btn small", type: "button", dataset: { fk: "user:" + u.id }, onclick: () => openUser(u.id) }, "Manage")) : null);
 }
 function fillSettings() {
@@ -1178,6 +1318,10 @@ function fillSettings() {
   put(S.target, cfg.weeklyTarget == null ? "" : String(cfg.weeklyTarget));
   put(S.currency, cfg.currency);
   put(S.bonus, state.prefs.bonusAmount == null ? "" : String(state.prefs.bonusAmount));
+  const eds = Array.from(state.users.values()).filter((u) => u.role === "editor" && u.active);
+  const fresh = eds.filter((u) => u.has && u.avAt != null && cfg.picAsk != null && u.avAt >= cfg.picAsk).length;
+  S.picStatus.textContent = cfg.picAsk == null ? "You haven't asked yet. " + eds.filter((u) => u.has).length + " of " + eds.length + " editors have a picture."
+    : "Asked " + stamp(cfg.picAsk) + ". " + fresh + " of " + eds.length + " editors have chosen a new picture since.";
 }
 
 /* ---------- dialogs ---------- */
@@ -1219,26 +1363,46 @@ let playerFrom = null, playerKey = null;
 function drivePlayer(src, name) {
   return h("iframe", { class: "player-frame", src: src, title: "Video: " + name, allow: "autoplay; picture-in-picture; encrypted-media", allowfullscreen: true, referrerpolicy: "strict-origin-when-cross-origin" });
 }
-function openPlayer(x, embed, link) {
+// The black screen that plays a video or shows a picture full size: what it is on top, then the thing itself.
+function showScreen(title, byline, stage, foot) {
   if (!player.open) {
     const a = document.activeElement;
     playerFrom = a && a !== document.body ? a : null;
     playerKey = playerFrom && playerFrom.dataset ? playerFrom.dataset.fk || null : null;
   }
-  const cat = x.catId ? state.cats.get(x.catId) : null, mine = x.uid === state.me.id;
-  player.replaceChildren(
+  const parts = [
     h("div", { class: "player-top" },
-      h("div", { class: "player-head" },
-        h("h2", { class: "player-title", id: "player-title", text: x.name }),
-        h("p", { class: "player-by" }, avatar(x.uid), h("span", { text: displayName(x.uid) + (mine ? " (you)" : "") }), cat ? h("span", { class: "shot-cat", text: cat.name }) : null)),
+      h("div", { class: "player-head" }, h("h2", { class: "player-title", id: "player-title", text: title }), byline),
       h("button", { class: "btn small player-close", type: "button", onclick: closePlayer }, icon("close", 18, 2.4), "Close")),
-    h("div", { class: "player-stage" }, h("p", { class: "player-wait", text: "Loading the video…" }), drivePlayer(embed, x.name)),
-    h("div", { class: "player-foot" },
-      h("span", { text: "Not playing? Its Drive file may not be shared with you." }),
-      h("a", { class: "btn small", href: link.href, target: "_blank", rel: "noopener noreferrer" }, "Open in Google Drive", icon("out", 16, 2.6))));
+    h("div", { class: "player-stage" }, stage)];
+  if (foot) parts.push(foot);
+  player.replaceChildren.apply(player, parts);
+  player.classList.toggle("no-foot", !foot);
   if (!player.open) { try { player.showModal(); } catch (e) { player.setAttribute("open", ""); } }
   seatToast();
   player.querySelector(".player-close").focus();
+}
+function openPlayer(x, embed, link) {
+  const cat = x.catId ? state.cats.get(x.catId) : null, mine = x.uid === state.me.id;
+  showScreen(x.name,
+    h("p", { class: "player-by" }, avatar(x.uid), h("span", { text: displayName(x.uid) + (mine ? " (you)" : "") }), cat ? h("span", { class: "shot-cat", text: cat.name }) : null),
+    [h("p", { class: "player-wait", text: "Loading the video…" }), drivePlayer(embed, x.name)],
+    h("div", { class: "player-foot" },
+      h("span", { text: "Not playing? Its Drive file may not be shared with you." }),
+      h("a", { class: "btn small", href: link.href, target: "_blank", rel: "noopener noreferrer" }, "Open in Google Drive", icon("out", 16, 2.6))));
+}
+// A teammate's picture, full size. The small copy shows at once; the large one replaces it when it arrives.
+const bigPics = new Map();        // user id -> { ver, url }
+function openPic(uid) {
+  const u = state.users.get(uid), ver = u ? u.av : uid === state.me.id ? state.me.av : 0, pic = pics.get(uid), have = bigPics.get(uid);
+  const img = h("img", { class: "pic-full", alt: "Profile picture of " + displayName(uid), src: have && have.ver === ver ? have.url : pic ? pic.url : "" });
+  showScreen(displayName(uid) + (uid === state.me.id ? " (you)" : ""), null, img, null);
+  if (have && have.ver === ver) return;
+  call("er_avatar_full", { p_user: uid }).then((r) => {
+    if (!r || typeof r.url !== "string" || !/^data:image\/(jpeg|png|webp);base64,/.test(r.url)) return;
+    bigPics.set(uid, { ver: num(r.ver) == null ? ver : num(r.ver), url: r.url });
+    if (img.isConnected) img.src = r.url;
+  }).catch(() => { /* the small copy stays */ });
 }
 function playerClosed() {
   if (player.open) return;
@@ -1459,6 +1623,61 @@ function openMoment() {
     },
   });
 }
+// Every video an editor has submitted, newest first, each one playable here. An editor sees their own
+// (the latest 400 are already on the phone); an admin sees anyone's, with older ones a page at a time.
+function videoRow(uid, p) {
+  const f = flagsOf(p), link = parseLink(p.link), embed = link ? driveEmbed(link.href) : null, cat = catOf(p), admin = ui.view === "admin";
+  const x = { id: p.id, uid: uid, name: p.name, catId: p.catId, link: p.link };
+  return h("li", null,
+    h("div", { class: "row-main" },
+      h("span", { class: "row-title", text: p.name }),
+      h("span", { class: "hint", text: cat.name + ", submitted " + stamp(p.submittedAt || p.updatedAt) }),
+      h("span", { class: "pills" },
+        f.onTime ? pill("good", "On time") : pill("warn", "Late by " + span(f.lateBy || 0)),
+        f.received ? pill("", "Received") : pill("info", admin ? "Waiting for you" : "With your admin"))),
+    h("div", { class: "row-actions" },
+      embed ? h("button", { class: "btn small", type: "button", dataset: { fk: "vplay:" + p.id }, onclick: () => openPlayer(x, embed, link) }, icon("play", 16), "Play")
+        : link ? h("a", { class: "btn small", href: link.href, target: "_blank", rel: "noopener noreferrer" }, "Open", icon("out", 15, 2.6)) : null));
+}
+function openVideos(uid) {
+  const admin = ui.view === "admin", seen = new Map();
+  const m = state.projects.get(uid);
+  if (m) for (const p of m.values()) if (p.status === "submitted" && p.link) seen.set(p.id, p);
+  const note = h("p", { class: "hint" }), list = h("ul", { class: "rows vid-list" }), more = h("div", { class: "btn-row" });
+  let next = null, done = !admin || !state.isAdmin, busy = false, failed = false;
+  const draw = () => {
+    const rows = Array.from(seen.values()).sort((a, b) => (b.submittedAt || 0) - (a.submittedAt || 0));
+    note.textContent = rows.length ? plural(rows.length, "video", "videos") + (done ? "" : " so far") + ", newest first." : busy ? "Loading…" : "";
+    list.replaceChildren.apply(list, rows.length ? rows.map((p) => videoRow(uid, p)) : [h("li", { class: "rows-empty", text: busy ? "Loading…" : uid === state.me.id && !admin ? "You haven't submitted a video yet." : "No videos submitted yet." })]);
+    more.replaceChildren.apply(more, done ? [] : [h("button", { class: "btn small", type: "button", disabled: busy, onclick: () => page() }, failed ? "Try again" : busy ? "Loading…" : "Show older videos")]);
+  };
+  const page = async () => {
+    if (busy || done) return;
+    busy = true; failed = false; draw();
+    try {
+      const r = await call("er_history", { p_before: next ? next.at : state.horizon || new Date(now()).toISOString(), p_before_id: next ? next.id : null, p_status: "submitted", p_editor: uid });
+      for (const row of (r && Array.isArray(r.rows) ? r.rows : [])) { const p = normProject(row); if (p.link) seen.set(p.id, p); }
+      next = r && r.next && typeof r.next.at === "string" ? { at: r.next.at, id: String(r.next.id) } : null;
+      done = !next;
+    } catch (e) { failed = true; }
+    busy = false;
+    if (list.isConnected) draw();
+  };
+  openSheet(uid === state.me.id && !admin ? "Your videos" : displayName(uid) + "'s videos", [note, list, more, h("div", { class: "btn-row tools" }, h("button", { class: "btn grow", type: "button", onclick: closeSheet }, "Close"))]);
+  draw();
+  if (!done) page();
+}
+function openAskPictures() {
+  formSheet({
+    title: "Ask everyone for a new picture", submit: "Ask everyone",
+    body: [h("p", { text: "Every editor gets a reminder on their home screen until they choose a new profile picture, and a notification if they've turned notifications on." })],
+    run: async () => {
+      const r = await run("er_ask_pictures");
+      if (r && r.again) return "You asked a few minutes ago, so nothing new was sent.";
+      return "Asked " + plural((r && r.editors) || 0, "editor", "editors") + ". " + ((r && r.phones) ? plural(r.phones, "phone", "phones") + " got a notification." : "None of them has notifications on yet.");
+    },
+  });
+}
 function openDelete(uid, p) {
   formSheet({
     title: "Delete project", submit: "Delete project", danger: true,
@@ -1574,28 +1793,41 @@ function openPassword(u) {
     },
   });
 }
-async function shrink(file) {      // a small square picture, so it loads fast for everyone
+// Two copies of a chosen picture: a small square that loads fast in every list, and the whole picture,
+// larger, for when someone taps it.
+async function shrink(file) {
   const url = URL.createObjectURL(file);
   try {
     const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error("bad")); i.src = url; });
-    const size = 128, c = document.createElement("canvas"), s = Math.min(img.naturalWidth, img.naturalHeight);
+    const w = img.naturalWidth, hgt = img.naturalHeight, s = Math.min(w, hgt);
     if (!s) throw new Error("bad");
-    c.width = c.height = size;
-    c.getContext("2d").drawImage(img, (img.naturalWidth - s) / 2, (img.naturalHeight - s) / 2, s, s, 0, 0, size, size);
-    const out = c.toDataURL("image/jpeg", 0.82);
-    if (!/^data:image\/jpeg;base64,/.test(out) || out.length > 60000) throw new Error("bad");
-    return out;
+    const c = document.createElement("canvas");
+    c.width = c.height = 128;
+    c.getContext("2d").drawImage(img, (w - s) / 2, (hgt - s) / 2, s, s, 0, 0, 128, 128);
+    const thumb = c.toDataURL("image/jpeg", 0.82);
+    if (!/^data:image\/jpeg;base64,/.test(thumb) || thumb.length > 60000) throw new Error("bad");
+    let full = null;
+    for (const [edge, q] of [[1080, 0.82], [800, 0.75], [560, 0.7]]) {
+      const k = Math.min(1, edge / Math.max(w, hgt)), b = document.createElement("canvas");
+      b.width = Math.max(1, Math.round(w * k)); b.height = Math.max(1, Math.round(hgt * k));
+      const g = b.getContext("2d");
+      g.fillStyle = "#FFFFFF"; g.fillRect(0, 0, b.width, b.height);        // see-through pictures get a white background
+      g.drawImage(img, 0, 0, b.width, b.height);
+      const out = b.toDataURL("image/jpeg", q);
+      if (/^data:image\/jpeg;base64,/.test(out) && out.length <= 560000) { full = out; break; }
+    }
+    return { thumb: thumb, full: full };
   } finally { URL.revokeObjectURL(url); }
 }
-function openAccount() {
+function openAccount(forPicture) {
   const me = state.me, admin = me.role === "admin";
-  let picked = null;        // null = keep, "" = remove, otherwise the new picture
+  let picked = null;        // null = keep, "" = remove, otherwise { thumb, full } for the new picture
   const slot = h("span", { id: "ac-pic" });
   const file = h("input", { class: "vh", id: "ac-file", type: "file", accept: "image/*", "aria-label": "Choose a picture", tabindex: "-1" });
   const perr = h("p", { class: "error", hidden: true, text: "That picture couldn't be used. Try another one." });
   const remove = h("button", { class: "btn small quiet", type: "button", onclick: () => { picked = ""; show(); } }, "Remove");
   const show = () => {
-    const cur = pics.get(me.id), url = picked != null ? picked : cur ? cur.url : "";
+    const cur = pics.get(me.id), url = picked === "" ? "" : picked ? picked.thumb : cur ? cur.url : "";
     slot.replaceChildren(avatar(me.id, "xl", url));
     remove.hidden = !url;
   };
@@ -1609,28 +1841,31 @@ function openAccount() {
   });
   const name = h("input", { class: "input", id: "ac-name", type: "text", maxlength: "40", autocomplete: "name" });
   name.value = me.name;
+  const choose = h("button", { class: "btn small" + (forPicture ? " primary" : ""), type: "button", id: "ac-choose", onclick: () => file.click() }, "Choose a picture");
   formSheet({
     title: "Your account", submit: admin ? "Save" : "Save picture",
     body: [
-      h("div", { class: "pic-row" }, slot, file, h("button", { class: "btn small", type: "button", onclick: () => file.click() }, "Choose a picture"), remove),
+      h("div", { class: "pic-row" }, slot, file, choose, remove),
       perr,
       admin ? field("Your name", name, "Signed in as @" + me.username + ". Your picture and name show wherever your work does.")
-        : h("p", { class: "hint", text: "Signed in as @" + me.username + ". Your picture shows next to your name on the leaderboard. Your name is set by your admin." })],
+        : h("p", { class: "hint", text: "Signed in as @" + me.username + ". Your picture shows next to your name on the leaderboard. Your name is set by your admin." }),
+      notifyBox()],
     foot: h("div", { class: "btn-row tools" },
       h("button", { class: "btn small", type: "button", onclick: openChangePassword }, "Change password"),
-      h("button", { class: "btn small", type: "button", onclick: () => { const t = state.token; leave(); api("er_logout", { p_token: t }).catch(() => {}); } }, "Sign out"),
+      h("button", { class: "btn small", type: "button", onclick: () => { const t = state.token; leave(); pushDrop(t).finally(() => api("er_logout", { p_token: t }).catch(() => {})); } }, "Sign out"),
       installBox()),
     run: async () => {
-      const args = { p_avatar: picked };
       if (admin) {
         const n = tidy(name.value);
         if (!n) throw new Oops("Enter your name.");
-        args.p_name = n;
+        if (n !== me.name) await call("er_set_profile", { p_name: n });
       } else if (picked == null) return "";
-      await run("er_set_profile", args);
+      if (picked != null) await call("er_set_picture", { p_avatar: picked === "" ? "" : picked.thumb, p_full: picked === "" ? null : picked.full });
+      await sync();
       return "Saved";
     },
   });
+  if (forPicture) choose.focus();
 }
 function openChangePassword() {
   const old = h("input", { class: "input", id: "cp-old", type: "password", autocomplete: "current-password" });
@@ -1769,5 +2004,9 @@ document.addEventListener("visibilitychange", () => {
   if (Date.now() - state.lastFull > 30 * MIN) state.wantFull = true;
   schedule(); sync();
 });
-if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("sw.js").catch(() => {});
+if ("serviceWorker" in navigator && window.isSecureContext) {
+  navigator.serviceWorker.register("sw.js").catch(() => {});
+  // a notification just arrived: fetch what changed, so the screen matches it
+  navigator.serviceWorker.addEventListener("message", (e) => { if (e.data && e.data.type === "sync" && state.phase === "ready") sync(); });
+}
 })();

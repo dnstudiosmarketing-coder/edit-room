@@ -190,6 +190,11 @@ button { cursor: pointer; touch-action: manipulation; }
 .avatar { flex: none; display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--ink); object-fit: cover; color: var(--card); font: 600 13px/1 var(--font); text-transform: uppercase; }
 .avatar.lg { width: 44px; height: 44px; font-size: 18px; }
 .avatar.xl { width: 60px; height: 60px; font-size: 25px; }
+/* a picture that opens full size: the tap area is at least 36px even round a small picture */
+.pic-btn { flex: none; display: inline-grid; place-items: center; min-width: 36px; min-height: 36px; padding: 0; border: 0; border-radius: 50%; background: none; color: inherit; cursor: zoom-in; }
+.pic-btn.small { margin: -4px; }
+.pic-btn:focus-visible { outline-offset: -2px; }
+.slate .pic-btn:focus-visible { outline-color: var(--yellow); }
 .slate .avatar { background: var(--slate-chip); color: var(--on-slate); }
 .ranked { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .rank { flex: none; display: inline-grid; place-items: center; min-width: 24px; height: 24px; padding: 0 6px; border-radius: 12px; background: var(--ink); color: var(--card); font: 600 13px/1 var(--font); }
@@ -283,7 +288,12 @@ select.input { appearance: none; -webkit-appearance: none; padding-right: 42px; 
 .notice strong { font-weight: 600; }
 .notice.warn { background: var(--warn-soft); }
 .notice.crit { background: var(--crit-soft); }
+.notice.gold { background: var(--yellow-soft); }
 .notice .btn { justify-self: start; }
+/* the card that offers phone notifications, and their switch in the account sheet */
+.push-card p { color: var(--ink-2); }
+.notify-box { display: grid; gap: 8px; padding-top: 14px; border-top: 1px solid var(--line); }
+.notify-title { font: 600 16px/1.3 var(--font); }
 .empty { display: grid; gap: 4px; padding: 18px 16px; border-radius: 18px; background: var(--well); color: var(--ink-3); font-size: 15px; }
 .empty strong { color: var(--ink); font-weight: 600; font-size: 16px; }
 .steps { display: grid; gap: 16px; counter-reset: step; }
@@ -393,6 +403,18 @@ dialog.player::backdrop { background: var(--slate); }
 .player .btn { border-color: var(--slate-chip); background: var(--slate-chip); color: var(--on-slate); }
 .player :focus-visible { outline-color: var(--yellow); }
 .player .toast:not(.bad) { background: #FFFFFF; color: #000000; }
+.player.no-foot .player-stage { margin-bottom: env(safe-area-inset-bottom, 0px); }
+.pic-full { position: absolute; inset: 0; width: 100%; height: 100%; padding: 12px; object-fit: contain; }
+
+/* a finished video waiting for the admin: its Mark received button glows, gently, until it's done */
+.btn.glow { border-color: var(--yellow); box-shadow: 0 0 0 3px rgb(255 210 30 / .6); }
+@media (prefers-reduced-motion: no-preference) {
+  .btn.glow { animation: glow 2s ease-in-out infinite; }
+}
+@keyframes glow {
+  0%, 100% { box-shadow: 0 0 0 2px rgb(255 210 30 / .55), 0 0 6px 1px rgb(255 210 30 / .2); }
+  50% { box-shadow: 0 0 0 4px rgb(255 210 30 / .95), 0 0 22px 7px rgb(255 210 30 / .55); }
+}
 @media (min-width: 760px) { .player-top, .player-foot { padding-inline: max(24px, calc((100% - 1068px) / 2)); } }
 .toast { position: fixed; z-index: 30; inset: auto auto calc(88px + env(safe-area-inset-bottom, 0px)) 50%; transform: translateX(-50%); width: max-content; max-width: calc(100% - 32px); margin: 0; padding: 11px 18px; border: 0; border-radius: 14px; background: var(--ink); color: var(--card); font-size: 15px; font-weight: 500; text-align: center; overflow: visible; }
 .toast.bad { background: var(--danger); color: #FFFFFF; }

@@ -130,12 +130,66 @@ create unique index if not exists featured_live on app.featured(project_id) wher
 create index if not exists featured_project on app.featured(project_id);
 create index if not exists featured_picked_by on app.featured(picked_by);
 
+-- Profile pictures: a small square for lists, and a larger copy of the whole picture for when someone taps
+-- it. The larger copy only counts while it belongs to the current picture (avatar_full_ver = avatar_ver).
+alter table app.users add column if not exists avatar_at timestamptz;          -- when the person last chose a picture
+alter table app.users add column if not exists avatar_full text check (avatar_full is null or char_length(avatar_full) <= 600000);
+alter table app.users add column if not exists avatar_full_ver int;
+alter table app.meta add column if not exists pic_ask_at timestamptz;          -- when an admin last asked every editor for a new picture
+
+-- Phone notifications. Each phone that allows them leaves its push address here; the address belongs to
+-- whoever is signed in on that phone. A phone that is signed out, turned off, or reported gone by its push
+-- service is stamped gone_at, never deleted.
+create table if not exists app.push_subs (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references app.users(id),
+  endpoint text not null check (char_length(endpoint) between 20 and 1000),
+  p256dh text not null check (char_length(p256dh) between 80 and 100),
+  auth text not null check (char_length(auth) between 16 and 40),
+  created_at timestamptz not null default now(),
+  seen_at timestamptz not null default now(),        -- the last time the phone confirmed it
+  ok_at timestamptz,                                  -- the last delivery the push service accepted
+  gone_at timestamptz
+);
+create unique index if not exists push_subs_live on app.push_subs(endpoint) where gone_at is null;
+create index if not exists push_subs_user on app.push_subs(user_id);
+
+-- Notifications waiting to go out, and a record of each one sent. The sender (an edge function) picks them
+-- up within seconds; a timer catches anything it missed and notices deadlines as they pass.
+create table if not exists app.outbox (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references app.users(id),
+  kind text not null check (kind in ('submitted', 'deadline', 'picture', 'test')),
+  project_id uuid references app.projects(id),
+  title text not null check (char_length(title) <= 120),
+  body text not null check (char_length(body) <= 300),
+  created_at timestamptz not null default now(),
+  claimed_at timestamptz,                             -- taken by the sender; taken again if not sent within 2 minutes
+  sent_at timestamptz,                                -- done: delivered, nobody to deliver to, or given up
+  tries int not null default 0,
+  result text
+);
+create index if not exists outbox_pending on app.outbox(created_at) where sent_at is null;
+create index if not exists outbox_user on app.outbox(user_id);
+create index if not exists outbox_project on app.outbox(project_id);
+create unique index if not exists outbox_deadline_once on app.outbox(project_id, user_id) where kind = 'deadline';
+
+-- What the sender needs. The secret is made here and never leaves the database: the database sends it with
+-- each nudge, and the sender checks it against this row. The sender makes its own signing keys on its first
+-- run and keeps them here; phones get only the public half.
+alter table app.meta add column if not exists push_url text;                   -- where the sender runs; set on the live project only
+alter table app.meta add column if not exists push_contact text;               -- shown to push services as the sender's contact
+alter table app.meta add column if not exists push_secret text;
+alter table app.meta add column if not exists vapid_public text;
+alter table app.meta add column if not exists vapid_private text;
+update app.meta set push_secret = encode(extensions.gen_random_bytes(32), 'hex') where id and push_secret is null;
+
 -- Row level security is on for every table, with a single rule that lets nobody through. The er_* functions
 -- run as the tables' owner, which the rule does not apply to; any other route to the data is refused.
 do $$
 declare t text;
 begin
-  foreach t in array array['meta', 'users', 'sessions', 'categories', 'projects', 'bonuses', 'featured'] loop
+  foreach t in array array['meta', 'users', 'sessions', 'categories', 'projects', 'bonuses', 'featured', 'push_subs', 'outbox'] loop
     execute format('alter table app.%I enable row level security', t);
     if not exists (select 1 from pg_policies where schemaname = 'app' and tablename = t and policyname = 'no_direct_access') then
       execute format('create policy no_direct_access on app.%I for all to public using (false) with check (false)', t);
@@ -267,6 +321,131 @@ create or replace function app.featured_now() returns json language sql stable s
      limit 5) t
 $$;
 
+-- ---------------------------------------------------------------- phone notifications (private)
+
+-- Queues one notification for each of these people who is still on the team and has a phone signed up.
+create or replace function app.notify_many(p_users uuid[], p_kind text, p_project uuid, p_title text, p_body text) returns int
+language plpgsql set search_path = '' as $$
+declare n int;
+begin
+  insert into app.outbox(user_id, kind, project_id, title, body)
+  select x.id, p_kind, p_project, left(p_title, 120), left(p_body, 300)
+    from app.users x
+   where x.id = any(coalesce(p_users, '{}')) and x.active and x.removed_at is null
+     and exists (select 1 from app.push_subs s where s.user_id = x.id and s.gone_at is null)
+  on conflict do nothing;
+  get diagnostics n = row_count;
+  return n;
+end $$;
+
+-- An editor hears once when a brief's delivery time runs out and its grace period starts. Only deadlines
+-- that passed in the last 6 hours count, so a phone signed up later is not flooded with old news.
+create or replace function app.queue_deadlines() returns int
+language plpgsql set search_path = '' as $$
+declare n int;
+begin
+  insert into app.outbox(user_id, kind, project_id, title, body)
+  select p.editor_id, 'deadline', p.id, 'Deadline passed: ' || left(p.name, 100),
+         case when p.grace_hours > 0 then 'You''re in the ' || p.grace_hours || '-hour grace period now. Submit before it ends, or your admin can reassign it.'
+              else 'Submit it as soon as you can. Your admin can now reassign it.' end
+    from app.projects p join app.users x on x.id = p.editor_id and x.active and x.removed_at is null
+   where p.status = 'active' and not p.deleted and p.due_at <= now() and p.due_at > now() - interval '6 hours'
+     and exists (select 1 from app.push_subs s where s.user_id = p.editor_id and s.gone_at is null)
+  on conflict do nothing;
+  get diagnostics n = row_count;
+  return n;
+end $$;
+
+-- Nudges the sender when something is waiting. Where the sender isn't set up (or the web request extension
+-- isn't installed) this does nothing; at most one nudge goes out per transaction.
+create or replace function app.push_poke() returns void
+language plpgsql security definer set search_path = '' as $$
+declare m app.meta;
+begin
+  if current_setting('app.poked', true) = '1' then return; end if;
+  select * into m from app.meta;
+  if m.push_url is null or m.push_secret is null or to_regprocedure('net.http_post(text,jsonb,jsonb,jsonb,integer)') is null then return; end if;
+  if not exists (select 1 from app.outbox o where o.sent_at is null and (o.claimed_at is null or o.claimed_at < now() - interval '2 minutes')) then return; end if;
+  perform set_config('app.poked', '1', true);
+  execute 'select net.http_post(url := $1, body := $2, headers := $3, timeout_milliseconds := 20000)'
+    using m.push_url, '{}'::jsonb, jsonb_build_object('Content-Type', 'application/json', 'x-push-secret', m.push_secret);
+end $$;
+
+create or replace function app.outbox_poke() returns trigger
+language plpgsql set search_path = '' as $$
+begin
+  perform app.push_poke();
+  return null;
+end $$;
+create or replace trigger outbox_poke after insert on app.outbox for each statement execute function app.outbox_poke();
+
+-- Run by the timer every 30 seconds: notice deadlines that just passed, and nudge the sender about anything
+-- still waiting (a phone that was off, a push service that was busy).
+create or replace function app.notice_tick() returns void
+language plpgsql set search_path = '' as $$
+begin
+  perform app.queue_deadlines();
+  perform app.push_poke();
+end $$;
+
+-- The sender's side. It connects to the database directly and is the only caller of these.
+create or replace function app.push_secret_ok(p text) returns boolean
+language sql stable set search_path = '' as $$
+  select coalesce(m.push_secret is not null and p is not null and m.push_secret = p, false) from app.meta m
+$$;
+
+create or replace function app.push_keys() returns table (public_key text, private_key text, contact text)
+language sql stable set search_path = '' as $$
+  select m.vapid_public, m.vapid_private, m.push_contact from app.meta m
+$$;
+
+-- The first keys stored stay: a second sender starting at the same moment keeps the ones already there.
+create or replace function app.push_keys_set(p_public text, p_private text) returns void
+language sql set search_path = '' as $$
+  update app.meta set vapid_public = p_public, vapid_private = p_private
+   where id and vapid_public is null and p_public ~ '^[A-Za-z0-9_-]{86,88}$' and p_private ~ '^[A-Za-z0-9_-]{42,44}$'
+$$;
+
+-- Hands the sender a batch of waiting notifications, one row per phone (no phone: one row with no address).
+-- Rows taken stay with that sender for 2 minutes; two senders never get the same notification.
+create or replace function app.push_claim(p_limit int default 100)
+returns table (notice uuid, kind text, project uuid, title text, body text, sub uuid, endpoint text, p256dh text, auth text)
+language plpgsql set search_path = '' as $$
+#variable_conflict use_column
+begin
+  return query
+  with picked as (
+    select o.id from app.outbox o
+     where o.sent_at is null and (o.claimed_at is null or o.claimed_at < now() - interval '2 minutes')
+     order by o.created_at
+     limit greatest(1, least(coalesce(p_limit, 100), 500))
+     for update skip locked),
+  marked as (
+    update app.outbox o set claimed_at = now(), tries = o.tries + 1
+      from picked where o.id = picked.id
+    returning o.id as nid, o.user_id as uid, o.kind as k, o.project_id as pid, o.title as t, o.body as b)
+  select m.nid, m.k, m.pid, m.t, m.b, s.id, s.endpoint, s.p256dh, s.auth
+    from marked m left join app.push_subs s on s.user_id = m.uid and s.gone_at is null
+   order by m.nid;
+end $$;
+
+-- What happened to one notification. Delivered to any phone, or nobody left to deliver to: done. Refused
+-- for another reason: tried again later, five times at most.
+create or replace function app.push_report(p_notice uuid, p_ok uuid[], p_gone uuid[], p_failed int, p_note text default null) returns void
+language plpgsql set search_path = '' as $$
+declare n_ok int := coalesce(array_length(p_ok, 1), 0); n_fail int := greatest(coalesce(p_failed, 0), 0);
+begin
+  if n_ok > 0 then update app.push_subs set ok_at = now() where id = any(p_ok); end if;
+  if coalesce(array_length(p_gone, 1), 0) > 0 then update app.push_subs set gone_at = now() where id = any(p_gone) and gone_at is null; end if;
+  update app.outbox o
+     set sent_at = case when n_ok > 0 or n_fail = 0 or o.tries >= 5 then now() end,
+         result = case when n_ok > 0 then 'delivered to ' || n_ok || case when n_ok = 1 then ' phone' else ' phones' end
+                       when n_fail = 0 then 'no phones'
+                       when o.tries >= 5 then left('gave up: ' || coalesce(p_note, 'refused'), 200)
+                       else left('will try again: ' || coalesce(p_note, 'refused'), 200) end
+   where o.id = p_notice and o.sent_at is null;
+end $$;
+
 -- ---------------------------------------------------------------- sign-in
 
 create or replace function public.er_status() returns json language sql stable security definer set search_path = '' as $$
@@ -355,12 +534,45 @@ begin
     end if;
   end if;
   if p_avatar = '' then
-    update app.users set avatar = null, avatar_ver = avatar_ver + 1 where id = u.id and avatar is not null;
+    update app.users set avatar = null, avatar_full = null, avatar_full_ver = null, avatar_ver = avatar_ver + 1 where id = u.id and avatar is not null;
   elsif p_avatar is not null then
     if char_length(p_avatar) > 60000 or p_avatar !~ '^data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$' then raise exception 'bad_picture'; end if;
-    update app.users set avatar = p_avatar, avatar_ver = avatar_ver + 1 where id = u.id;
+    update app.users set avatar = p_avatar, avatar_full = null, avatar_full_ver = null, avatar_ver = avatar_ver + 1, avatar_at = now() where id = u.id;
   end if;
   return json_build_object('ok', true);
+end $$;
+
+-- A new picture of your own: the small square everyone's lists use, and optionally the whole picture,
+-- larger, for when someone taps it. An empty p_avatar removes the picture.
+create or replace function public.er_set_picture(p_token text, p_avatar text, p_full text default null) returns json
+language plpgsql security definer set search_path = '' as $$
+declare u app.users;
+begin
+  u := app.who(p_token);
+  if p_avatar is null then raise exception 'invalid'; end if;
+  if p_avatar = '' then
+    update app.users set avatar = null, avatar_full = null, avatar_full_ver = null, avatar_ver = avatar_ver + 1 where id = u.id and avatar is not null;
+    return json_build_object('ok', true);
+  end if;
+  if char_length(p_avatar) > 60000 or p_avatar !~ '^data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$' then raise exception 'bad_picture'; end if;
+  if p_full is not null and (char_length(p_full) > 600000 or p_full !~ '^data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$') then raise exception 'bad_picture'; end if;
+  update app.users set avatar = p_avatar, avatar_ver = avatar_ver + 1, avatar_at = now(),
+         avatar_full = p_full, avatar_full_ver = case when p_full is null then null else avatar_ver + 1 end
+   where id = u.id;
+  return json_build_object('ok', true);
+end $$;
+
+-- Anyone signed in can see a teammate's picture full size (the leaderboard shows them to everyone anyway).
+-- Pictures chosen before larger copies were kept come back as the small square.
+create or replace function public.er_avatar_full(p_token text, p_user uuid) returns json
+language plpgsql security definer set search_path = '' as $$
+declare u app.users; t app.users; big boolean;
+begin
+  u := app.who(p_token);
+  select * into t from app.users where id = p_user and removed_at is null;
+  if not found or t.avatar is null then return json_build_object('url', null); end if;
+  big := t.avatar_full is not null and t.avatar_full_ver = t.avatar_ver;
+  return json_build_object('ver', t.avatar_ver, 'full', big, 'url', case when big then t.avatar_full else t.avatar end);
 end $$;
 
 create or replace function public.er_avatars(p_token text, p_ids json) returns json
@@ -416,7 +628,8 @@ begin
 
     select coalesce(json_agg(json_build_object(
         'id', x.id, 'name', x.name, 'username', x.username, 'role', x.role, 'owner', x.owner, 'active', x.active,
-        'av', x.avatar_ver, 'has', x.avatar is not null, 'created', app.ms(x.created_at), 'seen', app.ms(x.last_seen),
+        'av', x.avatar_ver, 'has', x.avatar is not null, 'created', app.ms(x.created_at), 'seen', app.ms(x.last_seen), 'avAt', app.ms(x.avatar_at),
+        'push', exists (select 1 from app.push_subs s where s.user_id = x.id and s.gone_at is null),
         'earned', coalesce((select sum(p.amount) from app.projects p where p.editor_id = x.id and p.received_at is not null and not p.deleted), 0),
         'bonus', coalesce((select sum(b.amount) from app.bonuses b where b.editor_id = x.id and not b.removed), 0),
         -- last sign of work: a brief handed over by the admin counts only once the editor touches it
@@ -503,8 +716,10 @@ begin
 
   return json_build_object(
     'now', app.ms(clock_timestamp()), 'cursor', app.ms(t0), 'full', since is null,
-    'me', json_build_object('id', u.id, 'name', u.name, 'username', u.username, 'role', u.role, 'owner', u.owner, 'av', u.avatar_ver, 'has', u.avatar is not null),
-    'settings', json_build_object('delivery', m.delivery_hours, 'grace', m.grace_hours, 'target', m.weekly_target, 'currency', m.currency, 'tz', m.tz, 'bonus', case when adm then m.bonus_default end),
+    'me', json_build_object('id', u.id, 'name', u.name, 'username', u.username, 'role', u.role, 'owner', u.owner, 'av', u.avatar_ver, 'has', u.avatar is not null,
+                            'avAt', app.ms(u.avatar_at), 'phones', (select count(*) from app.push_subs s where s.user_id = u.id and s.gone_at is null)),
+    'settings', json_build_object('delivery', m.delivery_hours, 'grace', m.grace_hours, 'target', m.weekly_target, 'currency', m.currency, 'tz', m.tz, 'bonus', case when adm then m.bonus_default end,
+                                  'push', m.vapid_public, 'picAsk', app.ms(m.pic_ask_at)),
     'cats', j_cats, 'users', j_users, 'weeks', j_weeks, 'month', app.ms(mo),
     'board', json_build_object('week', j_bw, 'month', j_bm, 'awards', j_aw), 'featured', j_feat,
     'bonuses', j_bonuses, 'totals', j_totals, 'stats', j_stats, 'horizon', case when adm and since is null then horizon end,
@@ -520,7 +735,7 @@ language plpgsql security definer set search_path = '' as $$
 declare u app.users; j json; j_next json; n int;
 begin
   u := app.admin(p_token);
-  if p_before is null or p_status is null or p_status not in ('all', 'ontime', 'sublate', 'received', 'reassigned') then raise exception 'invalid'; end if;
+  if p_before is null or p_status is null or p_status not in ('all', 'ontime', 'sublate', 'received', 'reassigned', 'submitted') then raise exception 'invalid'; end if;
   with page as (
     select v.id, v.touched_at, v.ja from app.pv v
      where not v.deleted and not (v.status = 'active' or (v.status = 'submitted' and v.received_at is null))
@@ -531,7 +746,8 @@ begin
             or (p_status = 'ontime' and v.status = 'submitted' and v.submitted_at <= v.due_at)
             or (p_status = 'sublate' and v.status = 'submitted' and v.submitted_at > v.due_at)
             or (p_status = 'received' and v.status = 'submitted' and v.received_at is not null)
-            or (p_status = 'reassigned' and v.status = 'reassigned'))
+            or (p_status = 'reassigned' and v.status = 'reassigned')
+            or (p_status = 'submitted' and v.status = 'submitted'))
      order by v.touched_at desc, v.id desc
      limit 40)
   select coalesce(json_agg(page.ja order by page.touched_at desc, page.id desc), '[]'::json), count(*),
@@ -586,15 +802,20 @@ begin
   return json_build_object('ok', true);
 end $$;
 
+-- Every admin's phone pings when a video comes in (an admin submitting their own work isn't told about it).
 create or replace function public.er_submit(p_token text, p_project uuid, p_link text, p_note text default '') returns json
 language plpgsql security definer set search_path = '' as $$
-declare u app.users;
+declare u app.users; p app.projects;
 begin
   u := app.who(p_token);
   if p_link is null or char_length(p_link) > 600 or p_link !~ '^https?://[^[:space:]]{4,}$' then raise exception 'bad_link'; end if;
   update app.projects set status = 'submitted', link = p_link, note = left(btrim(coalesce(p_note, '')), 400), submitted_at = now(), updated_at = now()
-   where id = p_project and editor_id = u.id and status = 'active' and not deleted;
+   where id = p_project and editor_id = u.id and status = 'active' and not deleted
+  returning * into p;
   if not found then raise exception 'not_found'; end if;
+  perform app.notify_many(array(select x.id from app.users x where x.role = 'admin' and x.active and x.removed_at is null and x.id <> u.id),
+    'submitted', p.id, 'Video submitted: ' || left(p.name, 100),
+    u.name || case when p.submitted_at <= p.due_at then ' submitted it on time.' else ' submitted it after the deadline.' end);
   return json_build_object('ok', true);
 end $$;
 
@@ -807,7 +1028,7 @@ begin
   end if;
   if p_avatar is not null then
     if p_avatar <> '' then raise exception 'invalid'; end if;     -- an admin can remove someone's picture, not choose it
-    update app.users set avatar = null, avatar_ver = avatar_ver + 1 where id = t.id and avatar is not null;
+    update app.users set avatar = null, avatar_full = null, avatar_full_ver = null, avatar_ver = avatar_ver + 1 where id = t.id and avatar is not null;
   end if;
   return json_build_object('ok', true);
 end $$;
@@ -828,10 +1049,79 @@ begin
     raise exception 'in_use';
   end if;
   update app.users set removed_at = now(), active = false, username = 'x-' || left(replace(id::text, '-', ''), 22),
-         pass_hash = '!', avatar = null, avatar_ver = avatar_ver + 1, failed = 0, locked_until = null
+         pass_hash = '!', avatar = null, avatar_full = null, avatar_full_ver = null, avatar_ver = avatar_ver + 1, failed = 0, locked_until = null
    where id = t.id;
   update app.sessions set revoked = true where user_id = t.id and not revoked;
+  update app.push_subs set gone_at = now() where user_id = t.id and gone_at is null;
   return json_build_object('ok', true);
+end $$;
+
+-- ---------------------------------------------------------------- phone notifications
+
+-- A phone that allows notifications signs up here, for whoever is signed in on it. Signing in as someone
+-- else on the same phone moves it to them. Only the big push services' addresses are accepted.
+create or replace function public.er_save_push(p_token text, p_endpoint text, p_key text, p_auth text) returns json
+language plpgsql security definer set search_path = '' as $$
+declare u app.users; v_host text; n int;
+begin
+  u := app.who(p_token);
+  if p_endpoint is null or char_length(p_endpoint) > 1000 or p_endpoint !~ '^https://[A-Za-z0-9.-]+(:[0-9]+)?/[^[:space:]]+$' then raise exception 'invalid'; end if;
+  v_host := lower(substring(p_endpoint from '^https://([A-Za-z0-9.-]+)'));
+  if not (v_host like '%.googleapis.com' or v_host like '%.push.apple.com' or v_host = 'push.services.mozilla.com' or v_host like '%.push.services.mozilla.com' or v_host like '%.notify.windows.com') then
+    raise exception 'invalid';
+  end if;
+  if p_key is null or p_key !~ '^[A-Za-z0-9_-]{86,88}={0,2}$' or p_auth is null or p_auth !~ '^[A-Za-z0-9_-]{16,32}={0,2}$' then raise exception 'invalid'; end if;
+  insert into app.push_subs(user_id, endpoint, p256dh, auth) values (u.id, p_endpoint, p_key, p_auth)
+  on conflict (endpoint) where gone_at is null do update set user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth, seen_at = now();
+  select count(*) into n from app.push_subs where user_id = u.id and gone_at is null;
+  return json_build_object('ok', true, 'phones', n);
+end $$;
+
+-- Turning notifications off on a phone, or signing out of it.
+create or replace function public.er_drop_push(p_token text, p_endpoint text) returns json
+language plpgsql security definer set search_path = '' as $$
+declare u app.users;
+begin
+  u := app.who(p_token);
+  update app.push_subs set gone_at = now() where endpoint = p_endpoint and user_id = u.id and gone_at is null;
+  return json_build_object('ok', true);
+end $$;
+
+-- A test notification to your own phones.
+create or replace function public.er_test_push(p_token text) returns json
+language plpgsql security definer set search_path = '' as $$
+declare u app.users; n int; k int;
+begin
+  u := app.who(p_token);
+  n := app.notify_many(array[u.id], 'test', null, 'Notifications are on',
+    case when u.role = 'admin' then 'This phone will ping you when an editor submits a video.' else 'This phone will ping you when a video reaches its deadline.' end);
+  select count(*) into k from app.push_subs where user_id = u.id and gone_at is null;
+  return json_build_object('ok', true, 'phones', k, 'queued', n);
+end $$;
+
+-- An admin asks every editor for a new picture: a notification to each phone that allows them, and a
+-- reminder on each editor's home screen until they choose one. Asking twice within 10 minutes sends nothing new.
+create or replace function public.er_ask_pictures(p_token text) returns json
+language plpgsql security definer set search_path = '' as $$
+declare u app.users; m app.meta; ids uuid[]; n int := 0;
+begin
+  u := app.admin(p_token);
+  select * into m from app.meta;
+  select coalesce(array_agg(x.id), '{}') into ids from app.users x where x.role = 'editor' and x.active and x.removed_at is null;
+  if m.pic_ask_at is not null and m.pic_ask_at > now() - interval '10 minutes' then
+    return json_build_object('ok', true, 'editors', coalesce(array_length(ids, 1), 0), 'phones', 0, 'again', true);
+  end if;
+  update app.meta set pic_ask_at = now() where id;
+  n := app.notify_many(ids, 'picture', null, 'New profile picture, please', 'Your admin asked everyone to update their profile picture. Tap to add yours.');
+  return json_build_object('ok', true, 'editors', coalesce(array_length(ids, 1), 0), 'phones', n);
+end $$;
+
+-- The timer, where the database has one (the live project). Locally this does nothing.
+do $$
+begin
+  if exists (select 1 from pg_extension where extname = 'pg_cron') then
+    execute $q$select cron.schedule('dn-notices', '30 seconds', 'select app.notice_tick()')$q$;
+  end if;
 end $$;
 
 -- ---------------------------------------------------------------- who may call what

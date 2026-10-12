@@ -238,6 +238,17 @@ try {
   const href = await inbox.getByRole("link", { name: "Open Drive link" }).getAttribute("href");
   ok(href === "https://drive.google.com/file/d/abc123/view?usp=sharing" && (await inbox.getByRole("link", { name: "Open Drive link" }).getAttribute("target")) === "_blank", "the Drive link opens in one tap, in a new tab", href);
   ok(/Final cut, captions burned in/.test(await inbox.innerText()) && (await admin.locator('#tabs button[data-tab="inbox"] .count').innerText()) === "1", "the inbox shows the editor's note and counts what is waiting");
+  const recvBtn = inbox.getByRole("button", { name: "Mark received" });
+  const glowing = await recvBtn.evaluate((b) => ({ cls: b.classList.contains("glow"), ring: getComputedStyle(b).boxShadow }));
+  ok(glowing.cls && /rgba\(255, 210, 30/.test(glowing.ring), "a submitted video's Mark received button glows (still, for people who turn off motion)", JSON.stringify(glowing));
+  const moving = await browser.newContext(Object.assign({}, PHONE, { reducedMotion: "no-preference" }));
+  const mp = await moving.newPage();
+  await mp.goto(srv.url + "/");
+  await mp.evaluate((t) => localStorage.setItem("editroom.token", t), await admin.evaluate(() => localStorage.getItem("editroom.token")));
+  await mp.reload();
+  const pulse = await mp.locator("article.clip", { hasText: "Night market short" }).getByRole("button", { name: "Mark received" }).evaluate((b) => getComputedStyle(b).animationName + " " + getComputedStyle(b).animationIterationCount);
+  ok(pulse === "glow infinite", "and pulses for everyone else", pulse);
+  await moving.close();
   await look(admin, "13-inbox-waiting", "inbox with a submission");
 
   /* ------------------------------------------------------------ video of the moment */
@@ -459,6 +470,22 @@ try {
   await adaCard.waitFor();
   ok((await admin.locator("#view article.clip").count()) === 3 && /Earned in total/.test(await adaCard.innerText()), "every editor has a card with their numbers");
   await look(admin, "23-editors", "admin editors");
+  // each editor's submitted videos, on a page of their own
+  await adaCard.getByRole("button", { name: "Videos", exact: true }).click();
+  await sheet(admin).getByText("Ada Obi's videos").waitFor();
+  const vrow = sheet(admin).locator(".vid-list > li", { hasText: "Night market short" });
+  await vrow.waitFor();
+  await sheet(admin).getByText("1 video, newest first.").waitFor();
+  ok(/On time/.test(await vrow.innerText()) && /Received/.test(await vrow.innerText()) && /Shorts, submitted /.test(await vrow.innerText()), "an editor's videos page lists what they submitted: when, on time or late, received or not", (await vrow.innerText()).replace(/\n/g, " | "));
+  await look(admin, "23b-editor-videos", "one editor's videos");
+  await vrow.getByRole("button", { name: "Play" }).click();
+  await admin.locator("#player .player-frame").waitFor();
+  ok((await frameSrc(admin)) === "https://drive.google.com/file/d/abc123/preview", "each video plays straight from the list");
+  await admin.keyboard.press("Escape");
+  await admin.waitForFunction(() => !document.getElementById("player").open);
+  ok(await admin.evaluate(() => document.getElementById("sheet").open), "closing the video goes back to the list");
+  await sheet(admin).getByRole("button", { name: "Close" }).click();
+  await closed(admin);
   await adaCard.getByRole("button", { name: "Bonuses" }).click();
   ok((await admin.inputValue("#bn-amt")) === "25" && /^Top performer, week of /.test(await admin.inputValue("#bn-label")), "the bonus sheet starts with the admin's usual amount", await admin.inputValue("#bn-label"));
   await look(admin, "24-bonus", "bonus sheet");
@@ -477,10 +504,35 @@ try {
   ok(/From bonuses/.test(await ada.locator("#view").innerText()) && /Top performer, week of/.test(await ada.locator("#view").innerText()), "the bonus is added to the editor's earnings");
   await look(ada, "26-earnings-bonus", "earnings with a bonus");
 
+  /* ------------------------------------------------------------ asking everyone for a new picture */
+  await tab(admin, "settings");
+  ok(/^You haven't asked yet\. 0 of 3 editors have a picture\.$/.test(await admin.locator("#pic-status").innerText()), "settings say how many editors have a picture", await admin.locator("#pic-status").innerText());
+  await admin.locator("#ask-pics").click();
+  await sheet(admin).getByRole("button", { name: "Ask everyone" }).waitFor();
+  await look(admin, "26b-ask-pictures", "ask everyone for a picture");
+  await sheet(admin).getByRole("button", { name: "Ask everyone" }).click();
+  await toast(admin, "Asked 3 editors. None of them has notifications on yet.");
+  await closed(admin);
+  ok(/^Asked .+\. 0 of 3 editors have chosen a new picture since\.$/.test(await admin.locator("#pic-status").innerText()), "the admin sees when they asked and how many have answered", await admin.locator("#pic-status").innerText());
+  await tab(ada, "work");
+  await sync(ada);
+  await see(ada, "New profile picture, please", "every editor is asked on their home screen");
+  await look(ada, "26c-picture-asked", "editor asked for a new picture");
+  // an editor's own list of everything they've submitted
+  await ada.getByRole("button", { name: "All my videos" }).click();
+  await sheet(ada).getByText("Your videos").waitFor();
+  const myRow = sheet(ada).locator(".vid-list > li", { hasText: "Night market short" });
+  await myRow.waitFor();
+  ok(/Received/.test(await myRow.innerText()) && (await myRow.getByRole("button", { name: "Play" }).count()) === 1, "editors have a page of every video they've submitted, each one playable", (await myRow.innerText()).replace(/\n/g, " | "));
+  await look(ada, "26d-my-videos", "an editor's own videos");
+  await sheet(ada).getByRole("button", { name: "Close" }).click();
+  await closed(ada);
+
   /* ------------------------------------------------------------ account: picture, name, password, sign out */
   const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAEAAAAAoCAIAAADBrGu+AAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAPUlEQVRYw+3PQQkAAAgEsItjRMMaxgw+hcEKLNP1WgQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQELhYkk9jT5G7+yQAAAABJRU5ErkJggg==", "base64");      // a small orange picture
-  await ada.locator("#who").click();
+  await ada.getByRole("button", { name: "Update my picture" }).click();
   await sheet(ada).getByText("Your account").waitFor();
+  ok((await ada.evaluate(() => document.activeElement && document.activeElement.id)) === "ac-choose", "the reminder's button goes straight to choosing a picture");
   ok((await ada.locator("#ac-name").count()) === 0 && /Your name is set by your admin/.test(await sheet(ada).innerText()) && !(await sheet(ada).getByRole("button", { name: "Remove" }).isVisible()), "an editor can set a picture but not change their own name");
   await ada.setInputFiles("#ac-file", { name: "me.png", mimeType: "image/png", buffer: png });
   await ada.locator("#ac-pic img").waitFor();
@@ -490,9 +542,24 @@ try {
   await closed(ada);
   await ada.locator("#who img.avatar").waitFor();
   ok(true, "the picture is saved and shows in the header");
+  await gone(ada, "New profile picture, please", "choosing a picture clears the reminder");
+  const stored = (await sql("select avatar_full, avatar_full_ver = avatar_ver as current from app.users where username = 'ada.obi'")).rows[0];
+  ok(/^data:image\/jpeg;base64,/.test(stored.avatar_full || "") && stored.current, "a larger copy of the whole picture is kept for tapping on", (stored.avatar_full || "").length + " characters");
   await sync(admin);
+  await admin.locator("#pic-status", { hasText: "1 of 3 editors have chosen a new picture since." }).waitFor();
+  ok(/^Asked .+\. 1 of 3 editors have chosen a new picture since\.$/.test(await admin.locator("#pic-status").innerText()), "the admin sees the editor has answered", await admin.locator("#pic-status").innerText());
+  await tab(admin, "editors");
   await admin.locator("article.clip", { hasText: "Ada Obi" }).locator("img.avatar").waitFor();
   ok(true, "the admin sees the editor's picture");
+  // the admin taps it: the whole picture, full size
+  await admin.locator("article.clip", { hasText: "Ada Obi" }).locator(".pic-btn").click();
+  await admin.locator("#player .pic-full").waitFor();
+  await admin.waitForFunction((src) => document.querySelector("#player .pic-full").getAttribute("src") === src, stored.avatar_full);
+  ok((await admin.locator("#player .player-title").innerText()) === "Ada Obi", "tapping an editor's picture opens the whole picture, large");
+  await look(admin, "27a-picture-full", "an editor's picture, full size");
+  await admin.keyboard.press("Escape");
+  await admin.waitForFunction(() => !document.getElementById("player").open);
+  ok(await admin.evaluate(() => document.activeElement && document.activeElement.classList.contains("pic-btn")), "closing it goes back to the picture");
   // the admin fixes the editor's name
   await tab(admin, "settings");
   await admin.locator("#view .rows").first().locator("> li", { hasText: "Ada Obi" }).getByRole("button", { name: "Manage" }).click();
@@ -509,6 +576,12 @@ try {
   await tunde.locator(".podium img.avatar").first().waitFor();
   ok(/Ada O\./.test(await tunde.locator(".podium").innerText()), "other editors see the top performer's picture and name on the leaderboard");
   await look(tunde, "28-leaderboard-pictures", "leaderboard with pictures");
+  await tunde.locator(".podium .pic-btn").first().click();
+  await tunde.locator("#player .pic-full").waitFor();
+  await tunde.waitForFunction((src) => document.querySelector("#player .pic-full").getAttribute("src") === src, stored.avatar_full);
+  ok((await tunde.locator("#player .player-title").innerText()) === "Ada O.", "an editor can tap a picture on the leaderboard to see it full size");
+  await tunde.locator("#player").getByRole("button", { name: "Close" }).click();
+  ok((await tunde.locator(".podium .pic-btn").count()) === 1 && (await tunde.locator("#view .reel .pic-btn, #view article.clip .pic-btn").count()) === 0, "elsewhere, an editor's screen keeps pictures as they were");
 
   await ada.locator("#who").click();
   await sheet(ada).getByRole("button", { name: "Change password" }).click();
@@ -713,6 +786,19 @@ try {
   await adaHist.locator(".readout b").waitFor();
   ok(/videos? in the week of .*: \d+ on time, \d+ late\./.test(await adaHist.locator(".readout").innerText()), "tapping a week's bar gives that week's numbers", await adaHist.locator(".readout").innerText());
   await look(admin, "30c-editors-history", "editors with weeks of history");
+  // the videos page reaches back through all of them, a page at a time
+  const adaTotal = (await sql("select count(*)::int as n from app.projects where editor_id = $1 and status = 'submitted' and not deleted and link is not null", [adaId])).rows[0].n;
+  await adaHist.getByRole("button", { name: "Videos", exact: true }).click();
+  await sheet(admin).getByText(/videos so far, newest first\./).waitFor();
+  for (let i = 0; i < 6 && (await sheet(admin).getByRole("button", { name: "Show older videos" }).count()); i++) {
+    await sheet(admin).getByRole("button", { name: "Show older videos" }).click();
+    await admin.waitForTimeout(250);
+  }
+  await sheet(admin).getByText(adaTotal + " videos, newest first.").waitFor();
+  const vnames = await sheet(admin).locator(".vid-list .row-title").allInnerTexts();
+  ok(vnames.length === adaTotal && vnames.includes("Archive video 100") && vnames.includes("Night market short"), "every video an editor ever submitted can be reached from their page", vnames.length + " of " + adaTotal);
+  await sheet(admin).getByRole("button", { name: "Close" }).click();
+  await closed(admin);
 
   // a changed delivery time applies to new briefs
   await tab(admin, "settings");
@@ -760,6 +846,103 @@ try {
   await tab(admin, "projects");
   await pick(admin, "#f-status", "all");
   await look(admin, "38-narrow-projects", "narrowest phone, projects");
+
+  /* ------------------------------------------------------------ phone notifications */
+  // A phone's push service can't be reached from here, so the browser's notification permission and push
+  // sign-up are stood in for; everything from the app's side, and the database's, is real.
+  const pushPhone = async (name, who) => {
+    const ctx = await browser.newContext(PHONE);
+    await ctx.addInitScript(() => {
+      let perm = "default", sub = null;
+      const endpoint = "https://fcm.googleapis.com/fcm/send/e2e-" + Math.random().toString(36).slice(2, 10) + "-" + "x".repeat(30);
+      Object.defineProperty(Notification, "permission", { get: () => perm, configurable: true });
+      Notification.requestPermission = async () => { perm = window.__answer || "granted"; return perm; };
+      PushManager.prototype.subscribe = async function (opts) {
+        sub = { endpoint: endpoint, options: { applicationServerKey: opts.applicationServerKey },
+          toJSON: () => ({ endpoint: endpoint, keys: { p256dh: "B" + "Q".repeat(86), auth: "a".repeat(22) } }),
+          unsubscribe: async () => { sub = null; return true; } };
+        return sub;
+      };
+      PushManager.prototype.getSubscription = async function () { return sub; };
+    });
+    const page = await ctx.newPage();
+    page.setDefaultTimeout(8000);
+    page.on("console", (m) => { if ((m.type() === "error" || m.type() === "warning") && !String(m.location().url).includes("/rest/v1/rpc/")) problems.push(name + " console " + m.type() + ": " + m.text()); });
+    page.on("pageerror", (e) => problems.push(name + " page error: " + e.message));
+    await page.goto(srv.url + "/");
+    await page.fill("#li-user", who[0]);
+    await page.fill("#li-pass", who[1]);
+    await page.getByRole("button", { name: "Sign in" }).click();
+    await page.locator("#tabs").waitFor();
+    return page;
+  };
+  const phonesOf = async (username) => (await sql("select endpoint from app.push_subs s join app.users x on x.id = s.user_id where x.username = $1 and s.gone_at is null", [username])).rows.map((r) => r.endpoint);
+  const pa0 = await pushPhone("push admin before", ["sam", "admin-pass-1"]);
+  ok((await pa0.getByText("Get a ping when a video comes in").count()) === 0, "until the sender is set up, nobody is offered notifications");
+  await pa0.context().close();
+  await sql("update app.meta set vapid_public = $1", ["B" + "k".repeat(86)]);
+  const pa = await pushPhone("push admin", ["sam", "admin-pass-1"]);
+  await see(pa, "Get a ping when a video comes in", "then the admin's home screen offers phone notifications");
+  await look(pa, "39-push-offer", "notifications offered to the admin");
+  await pa.getByRole("button", { name: "Turn on notifications" }).click();
+  await toast(pa, "Notifications are on for this phone.");
+  ok((await phonesOf("sam")).length === 1 && (await pa.getByText("Get a ping when a video comes in").count()) === 0, "turning them on signs this phone up, and the offer goes away");
+  await pa.locator("#who").click();
+  await sheet(pa).locator("#ac-notify").getByText("Notifications are on for this phone.").waitFor();
+  await look(pa, "40-push-account", "notifications in the account sheet");
+  await sheet(pa).getByRole("button", { name: "Send a test" }).click();
+  await toast(pa, "Test sent. It should arrive in a few seconds.");
+  ok((await sql("select count(*)::int as n from app.outbox o join app.users x on x.id = o.user_id where x.username = 'sam' and o.kind = 'test'")).rows[0].n === 1, "a test notification is queued for the admin's phone");
+  await sheet(pa).getByRole("button", { name: "Cancel" }).click();
+  await closed(pa);
+  // an editor puts it off for now
+  const pe = await pushPhone("push editor", ["tunde.bello", newPw]);      // the password the admin reset earlier
+  await see(pe, "Get a ping when a deadline passes", "editors are offered pings about their deadlines");
+  await pe.getByRole("button", { name: "Not now" }).click();
+  await gone(pe, "Get a ping when a deadline passes", "Not now puts the offer away");
+  await pe.reload();
+  await pe.locator("#tabs").waitFor();
+  ok((await pe.getByText("Get a ping when a deadline passes").count()) === 0, "and it stays away for a while");
+  // an editor submitting pings the admin's phone
+  await tab(ada, "work");
+  await ada.locator("article.clip", { hasText: "Quick turnaround" }).getByRole("button", { name: "Submit with Drive link" }).click();
+  await ada.fill("#s-link", "https://drive.google.com/file/d/quick42/view");
+  await sheet(ada).getByRole("button", { name: "Submit project" }).click();
+  await closed(ada);
+  const pinged = (await sql("select o.title, o.body from app.outbox o join app.users x on x.id = o.user_id where x.username = 'sam' and o.kind = 'submitted'")).rows;
+  ok(pinged.length === 1 && pinged[0].title === "Video submitted: Quick turnaround" && pinged[0].body === "Ada O. submitted it on time.", "an editor submitting a video queues a ping for the admin's phone", JSON.stringify(pinged));
+  // turning it off, and signing out, stop the pings
+  await pa.locator("#who").click();
+  await sheet(pa).getByRole("button", { name: "Turn off" }).click();
+  await toast(pa, "Notifications are off for this phone.");
+  ok((await phonesOf("sam")).length === 0, "turning notifications off on the phone stops them");
+  await sheet(pa).getByRole("button", { name: "Turn on notifications" }).click();
+  await toast(pa, "Notifications are on for this phone.");
+  ok((await phonesOf("sam")).length === 1, "and they can be turned back on from the account sheet");
+  await sheet(pa).getByRole("button", { name: "Sign out" }).click();
+  await see(pa, "Use the username and password your admin gave you.", "the admin signs out of that phone");
+  await pa.waitForTimeout(400);
+  ok((await phonesOf("sam")).length === 0, "and that phone stops getting the admin's notifications");
+  await pa.context().close();
+  await pe.context().close();
+  // the offline helper shows what arrives, with the studio's badge, and buzzes (the lightweight test browser
+  // can't show notifications at all, so this one check runs in the full one)
+  const full = await chromium.launch({ channel: "chromium" });
+  const nctx = await full.newContext(Object.assign({}, PHONE, { permissions: ["notifications"] }));
+  const np = await nctx.newPage();
+  await np.goto(srv.url + "/");
+  await np.evaluate(() => navigator.serviceWorker.ready.then(() => true));
+  const cdp = await nctx.newCDPSession(np);
+  const regs = [];
+  cdp.on("ServiceWorker.workerRegistrationUpdated", (e) => regs.push(...e.registrations));
+  await cdp.send("ServiceWorker.enable");
+  for (let i = 0; i < 40 && !regs.some((r) => r.scopeURL === srv.url + "/" && !r.isDeleted); i++) await np.waitForTimeout(100);
+  const reg = regs.find((r) => r.scopeURL === srv.url + "/" && !r.isDeleted);
+  await cdp.send("ServiceWorker.deliverPushMessage", { origin: srv.url, registrationId: reg.registrationId, data: JSON.stringify({ title: "Video submitted: Night market short", body: "Ada Obi submitted it on time.", tag: "submitted:abc", url: "./" }) });
+  let shown = [];
+  for (let i = 0; i < 40 && !shown.length; i++) { await np.waitForTimeout(100); shown = await np.evaluate(async () => (await (await navigator.serviceWorker.ready).getNotifications()).map((n) => ({ title: n.title, body: n.body, tag: n.tag, badge: n.badge, icon: n.icon, vibrate: Array.from(n.vibrate || []) }))); }
+  ok(shown.length === 1 && shown[0].title === "Video submitted: Night market short" && shown[0].body === "Ada Obi submitted it on time." && shown[0].tag === "submitted:abc" && /badge-96\.png$/.test(shown[0].badge) && /icon-192\.png$/.test(shown[0].icon) && shown[0].vibrate.join() === "180,80,180", "a notification arriving on the phone shows what came in, with the studio's badge and a buzz", JSON.stringify(shown));
+  await full.close();
 } catch (e) {
   ok(false, "the run stopped early", String(e && e.message).split("\n").slice(0, 4).join(" / "));
 }

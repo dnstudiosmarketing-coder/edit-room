@@ -9,6 +9,8 @@
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.8",
-    "pg": "^8.23.1"
+    "http_ece": "^1.2.0",
+    "pg": "^8.23.1",
+    "postgres": "^3.4.5"
   }
 }

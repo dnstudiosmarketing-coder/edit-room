@@ -310,6 +310,115 @@ ok((await rpc("er_change_password", { p_token: TA, p_old: "wrong", p_new: "brand
 await rpc("er_change_password", { p_token: TA, p_old: "ada-pass-1", p_new: "brand-new-pass" });
 ok((await rpc("er_login", { p_username: "ada", p_password: "brand-new-pass" })).ok && (await rpc("er_login", { p_username: "ada", p_password: "ada-pass-1" })).error === "bad_login", "the new password works and the old one stops");
 
+// ---- phone notifications: who gets told what, and how the sender hands them out
+const EP = (n) => "https://fcm.googleapis.com/fcm/send/dn-test-" + n + "-" + "x".repeat(40);
+const P256 = "B" + "Q".repeat(86), AUTH = "a".repeat(22);
+const push = (token, n, extra) => rpc("er_save_push", Object.assign({ p_token: token, p_endpoint: EP(n), p_key: P256, p_auth: AUTH }, extra || {}));
+const outbox = async (kind) => (await sql("select o.*, x.name as who from app.outbox o join app.users x on x.id = o.user_id where o.kind = $1 order by o.created_at, o.id", [kind])).rows;
+st = await rpc("er_state", { p_token: A });
+ok(st.settings.push === null && st.me.phones === 0 && st.settings.picAsk === null, "until the sender has made its keys, phones aren't offered notifications", JSON.stringify({ push: st.settings.push, phones: st.me.phones }));
+await fails(push(TA, 1, { p_endpoint: "https://evil.example.com/collect/" + "y".repeat(30) }), "invalid", "only the big push services' addresses are accepted");
+await fails(push(TA, 1, { p_endpoint: "http://fcm.googleapis.com/fcm/send/" + "z".repeat(30) }), "invalid", "and only over https");
+await fails(push(TA, 1, { p_key: "short" }), "invalid", "the phone's keys are checked");
+ok((await push(TA, 1)).phones === 1 && (await push(TA, 1)).phones === 1, "an editor's phone signs up, and signing up again changes nothing");
+await push(A, 2);
+await push(TT, 3);
+await push(TC, 3);
+ok((await sql("select user_id from app.push_subs where endpoint = $1 and gone_at is null", [EP(3)])).rows.map((r) => r.user_id).join() === chidi, "a phone someone else signs in on pings them instead");
+await push(TT, 3);
+ok((await sql("select count(*)::int as n from app.push_subs where endpoint = $1", [EP(3)])).rows[0].n === 1, "and the phone is still one record");
+st = await rpc("er_state", { p_token: A });
+ok(st.me.phones === 1 && st.users.find((x) => x.id === tunde).push === true && st.users.find((x) => x.id === chidi).push === false, "the admin can see who has notifications on");
+
+// a video coming in pings every admin with a phone; an admin's own submission pings nobody
+const sp = (await rpc("er_log_brief", { p_token: TA, p_name: "Ping test reel", p_category: shorts })).id;
+await rpc("er_submit", { p_token: TA, p_project: sp, p_link: "https://drive.google.com/file/d/pingtest/view" });
+let ob = await outbox("submitted");
+ok(ob.length === 1 && ob[0].who === "Sam O." && ob[0].title === "Video submitted: Ping test reel" && ob[0].body === "Ada O. submitted it on time." && ob[0].project_id === sp, "a submitted video queues a ping for the admin", JSON.stringify(ob.map((o) => [o.who, o.title, o.body])));
+const own = (await rpc("er_log_brief", { p_token: A, p_name: "Admin's own reel", p_category: shorts })).id;
+await rpc("er_submit", { p_token: A, p_project: own, p_link: "https://drive.google.com/file/d/ownreel/view" });
+ok((await outbox("submitted")).length === 1, "an admin isn't pinged about their own submission");
+
+// a deadline passing pings the editor once; old deadlines and editors without a phone are left alone
+const dl = (await rpc("er_log_brief", { p_token: TT, p_name: "Deadline ping brief", p_category: shorts })).id;
+const dlOld = (await rpc("er_log_brief", { p_token: TT, p_name: "Long overdue brief", p_category: shorts })).id;
+const dlChidi = (await rpc("er_log_brief", { p_token: TC, p_name: "Chidi late brief", p_category: shorts })).id;
+await sql("update app.projects set started_at = now() - interval '25 hours' where id = any($1::uuid[])", [[dl, dlChidi]]);
+await sql("update app.projects set started_at = now() - interval '31 hours' where id = $1", [dlOld]);
+ok((await sql("select app.queue_deadlines() as n")).rows[0].n === 1 && (await sql("select app.queue_deadlines() as n")).rows[0].n === 0, "a deadline that just passed queues one ping, and only once");
+ob = await outbox("deadline");
+ok(ob.length === 1 && ob[0].who === "Tunde Bello" && ob[0].title === "Deadline passed: Deadline ping brief" && /48-hour grace period/.test(ob[0].body), "the editor is told the grace period has started", JSON.stringify(ob.map((o) => [o.who, o.title, o.body])));
+await sql("select app.notice_tick()");
+await sql("select app.push_poke()");
+ok(true, "the timer's work runs quietly where there is no sender to nudge");
+
+// the sender: a batch at a time, one row per phone, never handed out twice
+ok((await sql("select app.push_secret_ok(null) as a, app.push_secret_ok('nope') as b, app.push_secret_ok((select push_secret from app.meta)) as c, length((select push_secret from app.meta)) as len")).rows.map((r) => [r.a, r.b, r.c, r.len].join()).join() === "false,false,true,64", "only the database's own secret starts the sender");
+let batch = (await sql("select * from app.push_claim(100)")).rows;
+ok(batch.length === 2 && batch.every((r) => r.endpoint && r.p256dh === P256 && r.auth === AUTH) && (await sql("select * from app.push_claim(100)")).rows.length === 0, "the sender gets each waiting ping with its phone, and nobody gets them twice", JSON.stringify(batch.map((r) => [r.kind, r.title])));
+const bySub = (kind) => batch.find((r) => r.kind === kind);
+await sql("select app.push_report($1, array[$2]::uuid[], '{}'::uuid[], 0)", [bySub("submitted").notice, bySub("submitted").sub]);
+await sql("select app.push_report($1, '{}'::uuid[], '{}'::uuid[], 1, 'push service busy')", [bySub("deadline").notice]);
+let rec = (await sql("select kind, sent_at is not null as sent, result, tries from app.outbox where id = any($1::uuid[]) order by kind desc", [[bySub("submitted").notice, bySub("deadline").notice]])).rows;
+ok(rec.map((r) => r.kind + ":" + r.sent + ":" + r.result).join(" | ") === "submitted:true:delivered to 1 phone | deadline:false:will try again: push service busy", "a delivery is recorded; a refusal is tried again", JSON.stringify(rec));
+ok((await sql("select * from app.push_claim(100)")).rows.length === 0, "a refused ping waits before the next try");
+await sql("update app.outbox set claimed_at = now() - interval '3 minutes' where id = $1", [bySub("deadline").notice]);
+batch = (await sql("select * from app.push_claim(100)")).rows;
+ok(batch.length === 1 && batch[0].kind === "deadline", "and is handed out again after two minutes");
+await sql("update app.outbox set tries = 5 where id = $1", [batch[0].notice]);
+await sql("select app.push_report($1, '{}'::uuid[], '{}'::uuid[], 1, 'push service busy')", [batch[0].notice]);
+ok((await sql("select result from app.outbox where id = $1 and sent_at is not null", [batch[0].notice])).rows[0].result === "gave up: push service busy", "after five tries it is given up");
+
+// a phone the push service says is gone is stamped, not deleted, and the person can sign it up again
+await rpc("er_test_push", { p_token: TT });
+batch = (await sql("select * from app.push_claim(100)")).rows;
+await sql("select app.push_report($1, '{}'::uuid[], array[$2]::uuid[], 0)", [batch[0].notice, batch[0].sub]);
+ok((await sql("select result from app.outbox where id = $1", [batch[0].notice])).rows[0].result === "no phones" && (await rpc("er_state", { p_token: TT })).me.phones === 0, "a phone the push service reports gone stops counting");
+ok((await sql("select count(*)::int as n from app.push_subs where endpoint = $1", [EP(3)])).rows[0].n === 1 && (await push(TT, 3)).phones === 1, "it stays on the record, and signing it up again starts a fresh one");
+ok((await rpc("er_test_push", { p_token: TA })).queued === 1 && (await rpc("er_test_push", { p_token: TC })).phones === 0, "a test ping goes only to your own phones");
+await rpc("er_drop_push", { p_token: TA, p_endpoint: EP(1) });
+ok((await rpc("er_state", { p_token: TA })).me.phones === 0 && (await rpc("er_test_push", { p_token: TA })).queued === 0, "turning notifications off on a phone stops its pings");
+await sql("select app.push_report(id, '{}'::uuid[], '{}'::uuid[], 0) from app.outbox where sent_at is null");
+
+// the sender's keys: the first ones stored stay, and phones get only the public half
+const PUB = "B" + "k".repeat(86), PRIV = "p".repeat(43);
+await sql("select app.push_keys_set('short', 'x')");
+ok((await sql("select vapid_public from app.meta")).rows[0].vapid_public === null, "malformed keys are not stored");
+await sql("select app.push_keys_set($1, $2)", [PUB, PRIV]);
+await sql("select app.push_keys_set($1, $2)", ["B" + "z".repeat(86), "q".repeat(43)]);
+st = await rpc("er_state", { p_token: TA });
+ok(st.settings.push === PUB && !JSON.stringify(st).includes(PRIV) && (await sql("select private_key from app.push_keys()")).rows[0].private_key === PRIV, "the first keys stay, and only the public one reaches phones");
+
+// asking everyone for a new picture
+await fails(rpc("er_ask_pictures", { p_token: TA }), "forbidden", "only an admin can ask everyone for a picture");
+let ask = await rpc("er_ask_pictures", { p_token: A });
+ob = await outbox("picture");
+ok(ask.editors === 3 && ask.phones === 1 && ob.length === 1 && ob[0].who === "Tunde Bello" && ob[0].title === "New profile picture, please", "every editor is asked; those with notifications on get a ping", JSON.stringify(ask));
+ask = await rpc("er_ask_pictures", { p_token: A });
+ok(ask.again === true && (await outbox("picture")).length === 1, "asking twice within ten minutes sends nothing new");
+st = await rpc("er_state", { p_token: TT });
+ok(st.settings.picAsk > 0 && st.me.avAt === null, "editors see when they were asked, and that they haven't chosen a picture since");
+const THUMB = "data:image/jpeg;base64," + "A".repeat(400), FULL = "data:image/jpeg;base64," + "B".repeat(4000);
+await fails(rpc("er_set_picture", { p_token: TT, p_avatar: "<svg onload=alert(1)>" }), "bad_picture", "a new picture must be an image");
+await fails(rpc("er_set_picture", { p_token: TT, p_avatar: THUMB, p_full: "javascript:alert(1)" }), "bad_picture", "and so must its larger copy");
+await fails(rpc("er_set_picture", { p_token: TT, p_avatar: THUMB, p_full: "data:image/jpeg;base64," + "C".repeat(600000) }), "bad_picture", "the larger copy has a size limit");
+await rpc("er_set_picture", { p_token: TT, p_avatar: THUMB, p_full: FULL });
+st = await rpc("er_state", { p_token: TT });
+ok(st.me.has && st.me.avAt >= st.settings.picAsk && (await rpc("er_state", { p_token: A })).users.find((x) => x.id === tunde).avAt === st.me.avAt, "choosing a picture after being asked clears the reminder, and the admin can see it");
+let big = await rpc("er_avatar_full", { p_token: TA, p_user: tunde });
+ok(big.full === true && big.url === FULL && (await rpc("er_avatars", { p_token: TA, p_ids: [tunde] }))[tunde] === THUMB, "teammates get the large copy on request, and lists keep the small one");
+await rpc("er_set_profile", { p_token: TT, p_avatar: "data:image/jpeg;base64,DDDD" });
+big = await rpc("er_avatar_full", { p_token: TA, p_user: tunde });
+ok(big.full === false && big.url === "data:image/jpeg;base64,DDDD" && (await sql("select avatar_full from app.users where id = $1", [tunde])).rows[0].avatar_full === null, "a picture set the old way drops the outdated large copy");
+await rpc("er_set_picture", { p_token: TT, p_avatar: "" });
+ok((await rpc("er_avatar_full", { p_token: TA, p_user: tunde })).url === null && (await rpc("er_state", { p_token: TT })).me.has === false, "a picture can be removed");
+await fails(rpc("er_avatar_full", { p_token: "x".repeat(64), p_user: tunde }), "auth", "pictures are only for people signed in");
+
+// every video an editor has submitted, a page at a time, for the admin's list
+const subs = await rpc("er_history", { p_token: A, p_before: new Date(Date.now() + 60000).toISOString(), p_status: "submitted", p_editor: ada });
+ok(subs.rows.length > 0 && subs.rows.every((r) => r.status === "submitted" && r.u === ada), "the admin can page through one editor's submitted videos", subs.rows.length + " rows");
+await fails(rpc("er_history", { p_token: A, p_before: new Date().toISOString(), p_status: "bogus" }), "invalid", "only known filters are accepted");
+
 // ---- switching a login off, roles, lockout
 const admin2 = (await rpc("er_add_user", { p_token: A, p_name: "Kemi Admin", p_username: "kemi", p_password: "kemi-pass-1", p_role: "admin" })).id;
 const TK = (await rpc("er_login", { p_username: "kemi", p_password: "kemi-pass-1" })).token;
@@ -340,7 +449,9 @@ await fails(rpc("er_delete_user", { p_token: A, p_user: typo }), "in_use", "a lo
 await fails(rpc("er_delete_user", { p_token: A, p_user: ada }), "in_use", "a login with real history cannot be deleted");
 await fails(rpc("er_delete_user", { p_token: A, p_user: ownerId }), "forbidden", "the owner cannot be deleted");
 await rpc("er_delete_project", { p_token: A, p_project: tp });
+await push(TY, 9);
 ok((await rpc("er_delete_user", { p_token: A, p_user: typo })).ok === true, "once its test work is deleted, the login can be deleted");
+ok((await sql("select count(*)::int as n from app.push_subs where user_id = $1 and gone_at is null", [typo])).rows[0].n === 0, "and its phones stop getting notifications");
 await fails(rpc("er_state", { p_token: TY }), "auth", "a deleted login is signed out");
 ok((await rpc("er_login", { p_username: "tpyo", p_password: "typo-pass-1" })).error === "bad_login" && !(await rpc("er_state", { p_token: A })).users.some((x) => x.id === typo), "and it is gone for good");
 ok((await rpc("er_add_user", { p_token: A, p_name: "Right Login", p_username: "tpyo", p_password: "typo-pass-2" })).ok === true, "its username can be used again");
@@ -367,7 +478,7 @@ await rpc("er_logout", { p_token: A });
 await fails(rpc("er_state", { p_token: A }), "auth", "signing out ends the session");
 
 // ---- the tables themselves cannot be reached
-for (const q of ["select * from app.users", "select * from app.projects", "select * from app.featured", "update app.meta set delivery_hours = 1", "select app.who('x')", "select app.password('aaaaaaaa')", "select app.featured_now()"]) {
+for (const q of ["select * from app.users", "select * from app.projects", "select * from app.featured", "select * from app.outbox", "select * from app.push_subs", "select app.push_keys()", "select app.push_claim(5)", "update app.meta set delivery_hours = 1", "select app.who('x')", "select app.password('aaaaaaaa')", "select app.featured_now()"]) {
   await fails(asAnon(q), "permission denied", "direct access is refused: " + q);
 }
 const pub = await sql("select count(*)::int as n from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname like 'er\\_%' and has_function_privilege('anon', p.oid, 'execute')");
