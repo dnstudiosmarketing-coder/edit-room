@@ -21,8 +21,9 @@
   --font: "Barlow", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   color-scheme: light;
 }
+/* Night: a phone set to dark, unless Day was picked in the app (theme.js marks the page data-theme) */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --canvas: #1C1C1C; --card: #2B2B2B; --inset: #363636; --well: #141414;
     --ink: #FFFFFF; --ink-2: #CFCFCF; --ink-3: #A6A6A6;
     --line: #3D3D3D; --edge: #5A5A5A; --field: #808080; --groove: #000000;
@@ -35,6 +36,21 @@
     --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23FFFFFF' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
     color-scheme: dark;
   }
+}
+/* Night picked in the app, whatever the phone is set to. The same values as above: change one, change both
+   (the browser checks in test/e2e.mjs fail if they differ). */
+:root[data-theme="dark"] {
+  --canvas: #1C1C1C; --card: #2B2B2B; --inset: #363636; --well: #141414;
+  --ink: #FFFFFF; --ink-2: #CFCFCF; --ink-3: #A6A6A6;
+  --line: #3D3D3D; --edge: #5A5A5A; --field: #808080; --groove: #000000;
+  --yellow-soft: #443A0F;
+  --good: #6FD98A; --good-soft: #173A22;
+  --warn: #FFAB70; --warn-soft: #4A2A12;
+  --crit: #FF938A; --crit-soft: #4D1F1B;
+  --on-time: #FFFFFF; --late: #EC835A;
+  --focus: #FFD21E; --scrim: rgb(0 0 0 / .7); --mark-ring: #3D3D3D;
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23FFFFFF' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  color-scheme: dark;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -290,10 +306,13 @@ select.input { appearance: none; -webkit-appearance: none; padding-right: 42px; 
 .notice.crit { background: var(--crit-soft); }
 .notice.gold { background: var(--yellow-soft); }
 .notice .btn { justify-self: start; }
-/* the card that offers phone notifications, and their switch in the account sheet */
+/* the card that offers phone notifications */
 .push-card p { color: var(--ink-2); }
-.notify-box { display: grid; gap: 8px; padding-top: 14px; border-top: 1px solid var(--line); }
-.notify-title { font: 600 16px/1.3 var(--font); }
+/* a titled part of the account sheet: day or night, notifications */
+.part { display: grid; gap: 8px; padding-top: 14px; border-top: 1px solid var(--line); }
+.part-title { font: 600 16px/1.3 var(--font); }
+.seg.long-last { grid-template-columns: 1fr 1fr auto; }      /* "Same as phone" keeps to one line on a small phone */
+.seg.long-last > button:last-child { padding-inline: 12px; }
 .empty { display: grid; gap: 4px; padding: 18px 16px; border-radius: 18px; background: var(--well); color: var(--ink-3); font-size: 15px; }
 .empty strong { color: var(--ink); font-weight: 600; font-size: 16px; }
 .steps { display: grid; gap: 16px; counter-reset: step; }

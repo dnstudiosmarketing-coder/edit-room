@@ -1,8 +1,8 @@
 // Keeps the app opening when the connection drops, and shows phone notifications. The network is always
 // tried first, so a new version shows up as soon as the phone is online; the saved copy is only the
 // fallback. Data is never saved here.
-const CACHE = "edit-room-shell-4";
-const SHELL = ["./", "styles.css", "fonts.css", "app.js", "config.js", "manifest.webmanifest", "icon-192.png", "badge-96.png",
+const CACHE = "edit-room-shell-5";
+const SHELL = ["./", "theme.js", "styles.css", "fonts.css", "app.js", "config.js", "manifest.webmanifest", "icon-192.png", "badge-96.png",
   "fonts/barlow-latin-400-normal.woff2", "fonts/barlow-latin-500-normal.woff2", "fonts/barlow-latin-600-normal.woff2"];
 
 self.addEventListener("install", (event) => {

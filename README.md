@@ -10,6 +10,7 @@ A small web app for DN Studios' video editors and the people who run the team. (
 - On a submitted video, **Mark received** glows until the admin presses it.
 - An admin can **ask every editor for a new profile picture** (Settings): each one gets a notification and a reminder on their home screen until they choose one. Tapping a picture (anyone's, for an admin; the leaderboard, for editors) shows it full size.
 - Each editor has a **Videos** page listing every video they have submitted, playable in the app; an admin can open anyone's from the Editors screen.
+- **Day or night**: under Your account (tap your name at the top), anyone can pick Day, Night, or Same as phone. The choice stays on that phone.
 
 It opens from a link on any phone or computer and can be added to the home screen like an app.
 
@@ -24,7 +25,7 @@ It opens from a link on any phone or computer and can be added to the home scree
 | Sign-in | The app's own usernames and passwords | Created by an admin inside the app. Supabase Auth is not used. |
 | Notifications | A Supabase Edge Function, `dn-push` (`supabase/functions/dn-push/`) | Sends Web Push messages. The database nudges it; a timer (pg_cron, every minute) catches anything missed and notices deadlines. |
 
-Files at the top level (`index.html`, `app.js`, `styles.css`, `fonts.css`, `fonts/`, `config.js`, `sw.js`, `manifest.webmanifest`, icons) are the app itself. `db/` holds the database script, `supabase/functions/dn-push/` the notification sender. `test/` holds the checks.
+Files at the top level (`index.html`, `app.js`, `theme.js`, `styles.css`, `fonts.css`, `fonts/`, `config.js`, `sw.js`, `manifest.webmanifest`, icons) are the app itself. `db/` holds the database script, `supabase/functions/dn-push/` the notification sender. `test/` holds the checks.
 
 ### Notifications, in short
 
@@ -36,9 +37,9 @@ On the live project, `app.meta.push_url` holds the sender's address and `app.met
 
 ### The look, in short
 
-Gray is the room, white is the paper, black is the slate, yellow is the signal. Each main screen opens on a black panel that carries its headline numbers. Yellow is kept for the main action, the section you are in, and rewards (bonuses, first place). Orange and red mean late and overdue, green means on time. There is one type family, Barlow. Light and dark follow the phone's own setting.
+Gray is the room, white is the paper, black is the slate, yellow is the signal. Each main screen opens on a black panel that carries its headline numbers. Yellow is kept for the main action, the section you are in, and rewards (bonuses, first place). Orange and red mean late and overdue, green means on time. There is one type family, Barlow. Day and night follow the phone's own setting, unless someone picks one under Your account: `theme.js`, which runs before the page is drawn, keeps that choice on the phone (`editroom.theme`) and marks the page `data-theme="light"` or `"dark"`, and sets the status bar to match.
 
-Every colour is a named value at the top of `styles.css`, once for light and once for dark; change it there and the whole app follows. The studio's name is set in three places: `APP` at the top of `app.js`, the heading and title in `index.html`, and `manifest.webmanifest` (the name under the home-screen icon). The saved sign-in on each phone is still stored under `editroom.*`; leave those names alone, or everyone is signed out.
+Every colour is a named value at the top of `styles.css`, once for light and once for dark; change it there and the whole app follows. The dark values are written out twice, once for a phone set to dark and once for anyone who picks Night. Keep the two the same: the browser checks fail if they differ. The studio's name is set in three places: `APP` at the top of `app.js`, the heading and title in `index.html`, and `manifest.webmanifest` (the name under the home-screen icon). The saved sign-in on each phone is still stored under `editroom.*`; leave those names alone, or everyone is signed out.
 
 ### The database, in short
 
@@ -52,7 +53,7 @@ Nothing in the database ever removes a row. Sessions are revoked, projects and l
 
 1. Edit the files.
 2. Run the checks (below).
-3. If `index.html`, `app.js`, `styles.css`, `fonts.css` or `config.js` changed, raise the `?v=` number on the four lines in `index.html` that load them, so phones pick up the new files together.
+3. If `index.html`, `app.js`, `theme.js`, `styles.css`, `fonts.css` or `config.js` changed, raise the `?v=` number on the five lines in `index.html` that load them, so phones pick up the new files together. If a file is added to the app, add it to the list at the top of `sw.js` and raise the number in `CACHE` there.
 4. Publish: `git push origin main main:gh-pages`. The site updates within a few minutes.
 
 If `db/schema.sql` changed, apply the changed statements to the Supabase project as a migration. The file is written so the whole of it can be run again safely. If a function's list of arguments changes, the old version has to be removed by hand first, or the web API will see two functions with one name.

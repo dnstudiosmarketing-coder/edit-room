@@ -680,9 +680,9 @@ function pushCard() {
 }
 // In the account sheet: what notifications are doing on this phone, and the switch.
 function notifyBox() {
-  const box = h("div", { class: "notify-box", id: "ac-notify" });
+  const box = h("div", { class: "part", id: "ac-notify" });
   if (!state.config.push) { box.hidden = true; return box; }
-  const line = (text, buttons) => box.replaceChildren(h("h3", { class: "notify-title", text: "Notifications" }), h("p", { class: "hint", text: text }), buttons ? h("div", { class: "btn-row" }, buttons) : null);
+  const line = (text, buttons) => box.replaceChildren(h("h3", { class: "part-title", text: "Notifications" }), h("p", { class: "hint", text: text }), buttons ? h("div", { class: "btn-row" }, buttons) : null);
   if (needsHomeScreen()) { line("To get notifications on iPhone, add " + APP + " to your home screen, then open it from there."); return box; }
   if (!pushable()) { line("This browser can't show notifications."); return box; }
   if (pushPerm() === "denied") { line("Notifications are blocked for " + APP + " on this phone. Allow them in your phone's settings, then come back here."); return box; }
@@ -1819,6 +1819,31 @@ async function shrink(file) {
     return { thumb: thumb, full: full };
   } finally { URL.revokeObjectURL(url); }
 }
+// Day, night, or whatever the phone is set to: for this phone only, and in effect at once. theme.js, which
+// runs before the page is drawn, keeps the choice and applies it.
+const THEMES = [["light", "Day"], ["dark", "Night"], [null, "Same as phone"]];
+function themeBox() {
+  const t = window.dnTheme, hint = h("p", { class: "hint", id: "ac-theme-hint" });
+  const opts = THEMES.map(([value, label]) => h("button", { type: "button", dataset: { theme: value || "phone" }, onclick: () => { t.set(value); mark(); } }, label));
+  const mark = () => {
+    const pick = t.get();
+    opts.forEach((b, i) => b.setAttribute("aria-pressed", String(THEMES[i][0] === pick)));
+    hint.textContent = pick === "light" ? "The app stays in day mode on this phone, even when the phone is in dark mode."
+      : pick === "dark" ? "The app stays in night mode on this phone, even when the phone is in light mode."
+        : "The app follows your phone, which is in " + (t.dark() ? "dark" : "light") + " mode right now.";
+  };
+  const box = h("div", { class: "part", id: "ac-theme" },
+    h("h3", { class: "part-title", id: "ac-theme-title", text: "Day or night" }),
+    h("div", { class: "seg long-last", role: "group", "aria-labelledby": "ac-theme-title", "aria-describedby": "ac-theme-hint" }, opts),
+    hint);
+  if (!t) { box.hidden = true; return box; }      // theme.js didn't load: the phone's setting decides
+  mark();
+  // the phone switching between light and dark while this is open (once the sheet is gone, the listener goes too)
+  const mq = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+  const follow = () => { if (box.isConnected) mark(); else mq.removeEventListener("change", follow); };
+  if (mq && mq.addEventListener) mq.addEventListener("change", follow);
+  return box;
+}
 function openAccount(forPicture) {
   const me = state.me, admin = me.role === "admin";
   let picked = null;        // null = keep, "" = remove, otherwise { thumb, full } for the new picture
@@ -1849,6 +1874,7 @@ function openAccount(forPicture) {
       perr,
       admin ? field("Your name", name, "Signed in as @" + me.username + ". Your picture and name show wherever your work does.")
         : h("p", { class: "hint", text: "Signed in as @" + me.username + ". Your picture shows next to your name on the leaderboard. Your name is set by your admin." }),
+      themeBox(),
       notifyBox()],
     foot: h("div", { class: "btn-row tools" },
       h("button", { class: "btn small", type: "button", onclick: openChangePassword }, "Change password"),

@@ -847,6 +847,71 @@ try {
   await pick(admin, "#f-status", "all");
   await look(admin, "38-narrow-projects", "narrowest phone, projects");
 
+  /* ------------------------------------------------------------ day or night */
+  const looks = (page) => page.evaluate(() => ({
+    attr: document.documentElement.getAttribute("data-theme"),
+    bg: getComputedStyle(document.body).backgroundColor,
+    scheme: getComputedStyle(document.documentElement).colorScheme,
+    bars: Array.from(document.querySelectorAll('meta[name="theme-color"]')).map((m) => m.content).join(","),
+    kept: (() => { try { return localStorage.getItem("editroom.theme"); } catch (e) { return "blocked"; } })(),
+  }));
+  const DAY = "rgb(233, 233, 233)", NIGHT = "rgb(28, 28, 28)";
+  const site = (f) => fs.readFileSync(new URL("../" + f, import.meta.url), "utf8");
+  const css = site("styles.css"), head = site("index.html").split("</head>")[0];
+  const auto = /@media \(prefers-color-scheme: dark\) \{\s*:root:not\(\[data-theme="light"\]\) \{([^}]*)\}\s*\}/.exec(css), chosen = /:root\[data-theme="dark"\] \{([^}]*)\}/.exec(css);
+  const flat = (s) => s.replace(/\s+/g, " ").trim();
+  ok(auto && chosen && flat(auto[1]) === flat(chosen[1]), "the dark colours for a phone set to dark and for Night picked in the app are the same");
+  ok(head.includes('src="theme.js') && head.indexOf('src="theme.js') < head.indexOf('rel="stylesheet"'), "the day or night choice is applied in the page's head, before the styles");
+  const versions = Array.from(site("index.html").matchAll(/\?v=(\d+)"/g), (m) => m[1]);
+  ok(versions.length === 5 && new Set(versions).size === 1 && /"theme\.js"/.test(site("sw.js")), "every file the page loads carries the same version, and the offline helper keeps theme.js", versions.join(","));
+  // Ada's phone is set to dark (from the checks above)
+  await ada.emulateMedia({ colorScheme: "dark" });
+  let th = await looks(ada);
+  ok(th.attr === null && th.bg === NIGHT && th.kept === null, "with no choice made, the app follows a phone set to dark", JSON.stringify(th));
+  await ada.locator("#who").click();
+  const dn = sheet(ada).locator("#ac-theme");
+  await dn.waitFor();
+  ok((await dn.getByRole("button", { name: "Same as phone" }).getAttribute("aria-pressed")) === "true" && (await dn.getByRole("button").count()) === 3, "the account sheet offers Day, Night and Same as phone, starting on Same as phone");
+  await see(ada, "The app follows your phone, which is in dark mode right now.", "and says what the phone is set to");
+  await dn.getByRole("button", { name: "Day" }).click();
+  th = await looks(ada);
+  ok(th.attr === "light" && th.bg === DAY && th.scheme === "light" && th.bars === "#E9E9E9,#E9E9E9" && th.kept === "light", "picking Day turns the app light at once on a phone set to dark, status bar too", JSON.stringify(th));
+  ok((await dn.getByRole("button", { name: "Day" }).getAttribute("aria-pressed")) === "true" && (await dn.getByRole("button", { name: "Same as phone" }).getAttribute("aria-pressed")) === "false", "and the choice shows as picked");
+  await look(ada, "41-day-on-dark-phone", "Day picked on a dark phone");
+  await sheet(ada).getByRole("button", { name: "Cancel" }).click();
+  await closed(ada);
+  ok((await looks(ada)).attr === "light", "closing the sheet keeps the choice (it doesn't wait for Save)");
+  // the choice is in place before anything is drawn, so the wrong one never flashes
+  const early = await ada.context().newPage();
+  await early.addInitScript(() => {
+    new MutationObserver((list, obs) => { if (document.body) { window.__atBody = document.documentElement.getAttribute("data-theme"); obs.disconnect(); } }).observe(document, { childList: true, subtree: true });
+  });
+  await early.emulateMedia({ colorScheme: "dark" });
+  await early.goto(srv.url + "/");
+  await early.locator("#tabs").waitFor();
+  ok((await early.evaluate(() => window.__atBody)) === "light" && (await looks(early)).bg === DAY, "opened again, the app is light from the first moment", String(await early.evaluate(() => window.__atBody)));
+  // another open copy of the app follows along
+  await ada.locator("#who").click();
+  await dn.getByRole("button", { name: "Night" }).click();
+  await early.waitForFunction(() => document.documentElement.getAttribute("data-theme") === "dark");
+  ok((await looks(early)).bg === NIGHT, "a second copy of the app open on the same phone changes too");
+  await early.close();
+  // Night on a phone set to light
+  await ada.emulateMedia({ colorScheme: "light" });
+  th = await looks(ada);
+  ok(th.attr === "dark" && th.bg === NIGHT && th.scheme === "dark" && th.bars === "#1C1C1C,#1C1C1C" && th.kept === "dark", "Night keeps the app dark on a phone set to light, status bar too", JSON.stringify(th));
+  await see(ada, "The app stays in night mode on this phone, even when the phone is in light mode.", "and says it will stay that way");
+  await look(ada, "42-night-on-light-phone", "Night picked on a light phone");
+  // and back to the phone's own setting
+  await dn.getByRole("button", { name: "Same as phone" }).click();
+  th = await looks(ada);
+  ok(th.attr === null && th.bg === DAY && th.bars === "#E9E9E9,#1C1C1C" && th.kept === null, "Same as phone hands it back to the phone", JSON.stringify(th));
+  await ada.emulateMedia({ colorScheme: "dark" });
+  ok((await looks(ada)).bg === NIGHT, "and the app changes when the phone does");
+  await see(ada, "The app follows your phone, which is in dark mode right now.", "and the sheet keeps up with the phone");
+  await sheet(ada).getByRole("button", { name: "Cancel" }).click();
+  await closed(ada);
+
   /* ------------------------------------------------------------ phone notifications */
   // A phone's push service can't be reached from here, so the browser's notification permission and push
   // sign-up are stood in for; everything from the app's side, and the database's, is real.
