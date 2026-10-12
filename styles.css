@@ -313,6 +313,14 @@ select.input { appearance: none; -webkit-appearance: none; padding-right: 42px; 
 .part-title { font: 600 16px/1.3 var(--font); }
 .seg.long-last { grid-template-columns: 1fr 1fr auto; }      /* "Same as phone" keeps to one line on a small phone */
 .seg.long-last > button:last-child { padding-inline: 12px; }
+/* payment details: a label over each value, and an account number big enough to read out */
+.details { display: grid; gap: 12px; padding: 14px 16px; border-radius: 16px; background: var(--inset); }
+.details > div { display: grid; gap: 2px; min-width: 0; }
+.details dt { font-size: 13px; line-height: 1.3; color: var(--ink-3); }
+.details dd { font-size: 16px; line-height: 1.35; overflow-wrap: anywhere; }
+.details .tel { display: inline-block; padding-block: 8px; margin-block: -8px; color: inherit; text-decoration: underline; text-decoration-color: var(--edge); text-underline-offset: 3px; }
+.details .acct dd { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 12px; }
+.acct-num { font: 600 22px/1.25 var(--font); letter-spacing: 0.06em; font-variant-numeric: tabular-nums; }
 .empty { display: grid; gap: 4px; padding: 18px 16px; border-radius: 18px; background: var(--well); color: var(--ink-3); font-size: 15px; }
 .empty strong { color: var(--ink); font-weight: 600; font-size: 16px; }
 .steps { display: grid; gap: 16px; counter-reset: step; }

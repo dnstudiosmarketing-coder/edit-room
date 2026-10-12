@@ -419,8 +419,50 @@ const subs = await rpc("er_history", { p_token: A, p_before: new Date(Date.now()
 ok(subs.rows.length > 0 && subs.rows.every((r) => r.status === "submitted" && r.u === ada), "the admin can page through one editor's submitted videos", subs.rows.length + " rows");
 await fails(rpc("er_history", { p_token: A, p_before: new Date().toISOString(), p_status: "bogus" }), "invalid", "only known filters are accepted");
 
+// ---- payment details: each editor keeps their own; an admin can read anyone's
+st = await rpc("er_state", { p_token: TA });
+ok(st.me.details === null && (await rpc("er_state", { p_token: A })).users.find((x) => x.id === ada).pay === false, "nobody has payment details to begin with, and the admin can see who hasn't added them");
+const det = (tok, extra) => rpc("er_save_details", Object.assign({ p_token: tok, p_name: "Adaeze  Obi ", p_phone: " 0803 123 4567 ", p_bank: "GTBank", p_account: "0123 456-789" }, extra || {}));
+await fails(det(TA, { p_name: " " }), "bad_full_name", "a full name is needed");
+await fails(det(TA, { p_name: "A" }), "bad_full_name", "of more than one letter");
+await fails(det(TA, { p_phone: "call me" }), "bad_phone", "a phone number must be a number");
+await fails(det(TA, { p_phone: "12345" }), "bad_phone", "with enough digits");
+await fails(det(TA, { p_bank: "" }), "bad_bank", "the bank is needed");
+await fails(det(TA, { p_account: "012345678" }), "bad_account", "an account number has 10 digits, not 9");
+await fails(det(TA, { p_account: "01234567890" }), "bad_account", "or 11");
+await fails(det(TA, { p_account: "01234x6789" }), "bad_account", "and nothing but digits");
+await fails(rpc("er_save_details", { p_token: "x".repeat(64), p_name: "Someone", p_phone: "08031234567", p_bank: "GTBank", p_account: "0123456789" }), "auth", "only someone signed in can save details");
+ok((await det(TA)).ok === true, "an editor saves their payment details");
+st = await rpc("er_state", { p_token: TA });
+ok(st.me.details && st.me.details.name === "Adaeze Obi" && st.me.details.phone === "0803 123 4567" && st.me.details.bank === "GTBank" && st.me.details.account === "0123456789" && st.me.details.at > 0, "and sees them back tidied: extra spaces gone, the account number as 10 digits", JSON.stringify(st.me.details));
+ok((await det(TA)).same === true && (await sql("select count(*)::int as n from app.details where user_id = $1", [ada])).rows[0].n === 1, "saving the same details again adds nothing");
+ok((await rpc("er_state", { p_token: A })).users.find((x) => x.id === ada).pay === true, "the admin can see that she has added hers");
+let seen = await rpc("er_details", { p_token: A, p_user: ada });
+ok(seen.details.account === "0123456789" && seen.details.name === "Adaeze Obi" && seen.details.phone === "0803 123 4567" && seen.changed === null, "the admin can read an editor's details", JSON.stringify(seen));
+ok((await rpc("er_details", { p_token: TA, p_user: ada })).details.bank === "GTBank", "an editor can read their own");
+await fails(rpc("er_details", { p_token: TT, p_user: ada }), "forbidden", "but not anyone else's");
+const tState = await rpc("er_state", { p_token: TT });
+ok(tState.users.every((x) => !("pay" in x)) && !JSON.stringify(tState).includes("0123456789") && !JSON.stringify(tState).includes("Adaeze"), "and nothing about them reaches other editors");
+ok((await rpc("er_details", { p_token: A, p_user: tunde })).details === null, "someone who hasn't added details has none");
+await fails(rpc("er_details", { p_token: A, p_user: "00000000-0000-0000-0000-000000000000" }), "not_found", "an unknown login has none to show");
+// a new phone number is no cause for alarm; a new account is
+await det(TA, { p_phone: "+234 803 123 4567" });
+ok((await rpc("er_details", { p_token: A, p_user: ada })).changed === null, "a new phone number leaves the account as it was");
+await det(TA, { p_phone: "+234 803 123 4567", p_bank: "OPay", p_account: "8031234567" });
+seen = await rpc("er_details", { p_token: A, p_user: ada });
+ok(seen.details.bank === "OPay" && seen.details.account === "8031234567" && seen.changed && seen.changed.bank === "GTBank" && seen.changed.last4 === "6789" && seen.changed.at === seen.details.at, "a new bank account warns the admin, with where pay went before", JSON.stringify(seen.changed));
+await sql("update app.details set created_at = created_at - interval '1 hour' where user_id = $1", [ada]);
+await det(TA, { p_name: "Adaeze N. Obi", p_phone: "+234 803 123 4567", p_bank: "OPay", p_account: "8031234567" });
+seen = await rpc("er_details", { p_token: A, p_user: ada });
+ok(seen.details.name === "Adaeze N. Obi" && seen.changed && seen.changed.bank === "GTBank" && seen.changed.at < seen.details.at, "and keeps warning after smaller edits, from when the account changed", JSON.stringify(seen.changed));
+await sql("update app.details set created_at = created_at - interval '31 days' where user_id = $1", [ada]);
+ok((await rpc("er_details", { p_token: A, p_user: ada })).changed === null, "the warning goes after 30 days");
+for (let i = 0; i < 10; i++) await det(TT, { p_name: "Tunde Bello", p_account: "100000000" + i });
+await fails(det(TT, { p_name: "Tunde Bello", p_account: "2000000000" }), "too_many", "a login can change its details at most 10 times a day");
+ok((await sql("select count(*)::int as n from app.details where user_id = $1", [tunde])).rows[0].n === 10 && (await sql("select count(*)::int as n from app.details where user_id = $1", [ada])).rows[0].n === 4, "every change stays on record");
+
 // ---- switching a login off, roles, lockout
-const admin2 = (await rpc("er_add_user", { p_token: A, p_name: "Kemi Admin", p_username: "kemi", p_password: "kemi-pass-1", p_role: "admin" })).id;
+const admin2 =(await rpc("er_add_user", { p_token: A, p_name: "Kemi Admin", p_username: "kemi", p_password: "kemi-pass-1", p_role: "admin" })).id;
 const TK = (await rpc("er_login", { p_username: "kemi", p_password: "kemi-pass-1" })).token;
 ok((await rpc("er_state", { p_token: TK })).projects.length >= 5, "a second admin sees everything");
 const ownerId = (await rpc("er_state", { p_token: A })).me.id;
@@ -478,7 +520,7 @@ await rpc("er_logout", { p_token: A });
 await fails(rpc("er_state", { p_token: A }), "auth", "signing out ends the session");
 
 // ---- the tables themselves cannot be reached
-for (const q of ["select * from app.users", "select * from app.projects", "select * from app.featured", "select * from app.outbox", "select * from app.push_subs", "select app.push_keys()", "select app.push_claim(5)", "update app.meta set delivery_hours = 1", "select app.who('x')", "select app.password('aaaaaaaa')", "select app.featured_now()"]) {
+for (const q of ["select * from app.users", "select * from app.projects", "select * from app.featured", "select * from app.outbox", "select * from app.push_subs", "select * from app.details", "select app.details_of(null)","select app.push_keys()", "select app.push_claim(5)", "update app.meta set delivery_hours = 1", "select app.who('x')", "select app.password('aaaaaaaa')", "select app.featured_now()"]) {
   await fails(asAnon(q), "permission denied", "direct access is refused: " + q);
 }
 const pub = await sql("select count(*)::int as n from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname like 'er\\_%' and has_function_privilege('anon', p.oid, 'execute')");

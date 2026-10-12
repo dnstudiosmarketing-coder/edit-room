@@ -185,6 +185,11 @@ const ERRORS = {
   setup_done: APP + " is already set up. Reload and sign in.",
   bad_name_setup: "Enter your name.",
   in_use: "This login has work or bonuses on record, so it can't be deleted. Switch it off instead.",
+  bad_full_name: "Enter your full name, as it appears on your bank account.",
+  bad_phone: "Enter your phone number, like 0803 123 4567.",
+  bad_bank: "Enter the name of your bank.",
+  bad_account: "Enter your 10-digit account number.",
+  too_many: "You've changed your details a lot today. Try again tomorrow.",
 };
 const errText = (e) => ERRORS[e && e.code] || "That didn't work. Try again in a moment.";
 async function act(btn, fn, okMsg) {
@@ -193,6 +198,12 @@ async function act(btn, fn, okMsg) {
   catch (e) { toast(e instanceof Oops ? e.message : errText(e), true); if (btn && btn.isConnected) btn.disabled = false; }
 }
 
+// Payment details as the server sends them: the name on the bank account, a phone number, the bank, and a
+// 10-digit account number. Anything that doesn't look right counts as none.
+function normDetails(d) {
+  if (!d || typeof d !== "object" || !/^[0-9]{10}$/.test(String(d.account))) return null;
+  return { name: str(d.name, 80), phone: str(d.phone, 20), bank: str(d.bank, 60), account: String(d.account), at: num(d.at) };
+}
 function normProject(r) {
   return {
     id: String(r.id), name: str(r.name, 140) || "Untitled project", catId: r.cat ? String(r.cat) : null,
@@ -210,7 +221,7 @@ function applyState(d) {
   const wasAdmin = state.isAdmin, hadMe = state.me.id;
   state.skew = Number(d.now) - Date.now();
   const m = d.me || {};
-  state.me = { id: String(m.id), name: str(m.name, 40), username: str(m.username, 24), role: m.role === "admin" ? "admin" : "editor", owner: m.owner === true, av: num(m.av) || 0, has: m.has === true, avAt: num(m.avAt), phones: num(m.phones) || 0 };
+  state.me = { id: String(m.id), name: str(m.name, 40), username: str(m.username, 24), role: m.role === "admin" ? "admin" : "editor", owner: m.owner === true, av: num(m.av) || 0, has: m.has === true, avAt: num(m.avAt), phones: num(m.phones) || 0, details: normDetails(m.details) };
   state.isAdmin = state.me.role === "admin";
   const s = d.settings || {}, active = [];
   state.cats = new Map();
@@ -224,7 +235,7 @@ function applyState(d) {
   state.prefs = { bonusAmount: amount(s.bonus) };
   state.users = new Map();
   for (const u of Array.isArray(d.users) ? d.users : []) {
-    state.users.set(String(u.id), { id: String(u.id), name: str(u.name, 40) || "Unnamed", username: str(u.username, 24), role: u.role === "admin" ? "admin" : "editor", owner: u.owner === true, active: u.active !== false, av: num(u.av) || 0, has: u.has === true, seen: num(u.seen), earned: amount(u.earned) || 0, bonus: amount(u.bonus) || 0, last: num(u.last) || 0, moved: num(u.moved) || 0, avAt: num(u.avAt), push: u.push === true });
+    state.users.set(String(u.id), { id: String(u.id), name: str(u.name, 40) || "Unnamed", username: str(u.username, 24), role: u.role === "admin" ? "admin" : "editor", owner: u.owner === true, active: u.active !== false, av: num(u.av) || 0, has: u.has === true, seen: num(u.seen), earned: amount(u.earned) || 0, bonus: amount(u.bonus) || 0, last: num(u.last) || 0, moved: num(u.moved) || 0, avAt: num(u.avAt), push: u.push === true, pay: u.pay === true });
   }
   if (Array.isArray(d.weeks) && d.weeks.length === 6) state.weeks = d.weeks.map(Number);
   state.month = Number(d.month) || 0;
@@ -695,6 +706,8 @@ function notifyBox() {
   }).catch(() => line("Notifications aren't available on this phone right now."));
   return box;
 }
+// An editor is reminded to add payment details until they have.
+const detailsMissing = () => state.me.role === "editor" && !state.me.details;
 // An editor's reminder stays until they choose a picture after the admin asked.
 const pictureAsked = () => state.me.role === "editor" && state.config.picAsk != null && !(state.me.has && state.me.avAt != null && state.me.avAt >= state.config.picAsk);
 // Keeps a glowing button's pulse in step across the screen redrawing every few seconds.
@@ -780,6 +793,10 @@ function viewWork(all) {
     h("strong", { text: "New profile picture, please" }),
     h("span", { text: "Your admin asked everyone to update their profile picture. It shows next to your name on the leaderboard." }),
     h("button", { class: "btn small primary", type: "button", dataset: { fk: "newpic" }, onclick: () => openAccount(true) }, "Update my picture")));
+  if (detailsMissing()) notices.push(h("div", { class: "notice gold" },
+    h("strong", { text: "Add your payment details" }),
+    h("span", { text: "Your admin needs your full name, phone number and bank account to pay you." }),
+    h("button", { class: "btn small primary", type: "button", dataset: { fk: "paydetails" }, onclick: () => openDetails() }, "Add my details")));
   if (notices.length) out.push(h("div", { class: "notices" }, notices));
   const ask = pushCard();
   if (ask) out.push(ask);
@@ -1202,6 +1219,8 @@ function rosterCard(s, win, target, rank, peak) {
   if (quiet != null && quiet >= 7) chips.push(pill("", "Quiet for " + quiet + " days"));
   if (!s.last) chips.push(pill("", "No activity yet"));
   if (s.moved) chips.push(pill("", s.moved + " reassigned away"));
+  const who = state.users.get(s.uid);
+  if (who && who.role === "editor" && !who.pay) chips.push(pill("", "No payment details"));
   const week = s.wkOn + s.wkLate;
   return h("article", { class: "clip" },
     h("div", { class: "clip-top" }, h("div", { class: "ranked" }, rank ? h("span", { class: "rank" + (rank === 1 ? " first" : ""), text: String(rank) }) : null, person(s.uid, "lg")), chips.length ? h("span", { class: "pills" }, chips) : null),
@@ -1215,6 +1234,7 @@ function rosterCard(s, win, target, rank, peak) {
       fact(s.avg != null ? span(s.avg) : "–", "Average turnaround"), fact(money(s.earned.total), "Earned in total", s.earned.bonus ? "includes " + money(s.earned.bonus) + " in bonuses" : null)),
     s.last ? h("p", { class: "hint", text: "Last active " + ago(s.last) + "." }) : null,
     h("div", { class: "btn-row" },
+      h("button", { class: "btn small", type: "button", dataset: { fk: "profile:" + s.uid }, onclick: () => openProfile(s.uid) }, "Profile"),
       h("button", { class: "btn small", type: "button", dataset: { fk: "vids:" + s.uid }, onclick: () => openVideos(s.uid) }, "Videos"),
       h("button", { class: "btn small", type: "button", dataset: { fk: "view:" + s.uid }, onclick: () => { ui.fEditor = s.uid; ui.fStatus = "all"; ui.fCat = "all"; ui.limit = 40; setTab("projects"); } }, "View projects"),
       h("button", { class: "btn small", type: "button", dataset: { fk: "bonus:" + s.uid }, onclick: () => openBonuses(s.uid) }, "Bonuses")));
@@ -1819,6 +1839,95 @@ async function shrink(file) {
     return { thumb: thumb, full: full };
   } finally { URL.revokeObjectURL(url); }
 }
+// Puts text on the clipboard. Where the clipboard can't be reached, the text is selected so it can be copied
+// by hand.
+async function copyText(text, el) {
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch (e) {
+    if (!el) return false;
+    const r = document.createRange(), s = getSelection();
+    r.selectNodeContents(el); s.removeAllRanges(); s.addRange(r);
+    try { return document.execCommand("copy"); } catch (x) { return false; }
+  }
+}
+// Payment details, label above value. An admin gets a button to copy the account number.
+function detailsList(d, canCopy) {
+  const digits = h("span", { class: "acct-num", text: d.account }), tel = d.phone.replace(/[^0-9+]/g, "");
+  return h("dl", { class: "details" },
+    h("div", null, h("dt", { text: "Full name" }), h("dd", { text: d.name })),
+    h("div", null, h("dt", { text: "Phone number" }), h("dd", null, h("a", { class: "tel", href: "tel:" + tel, text: d.phone }))),
+    h("div", null, h("dt", { text: "Bank" }), h("dd", { text: d.bank })),
+    h("div", { class: "acct" }, h("dt", { text: "Account number" }), h("dd", null, digits,
+      canCopy ? h("button", { class: "btn small", type: "button", dataset: { fk: "copy-acct" }, onclick: async () => toast(await copyText(d.account, digits) ? "Account number copied" : "Selected. Copy it from your phone's menu.") }, "Copy") : null)));
+}
+// An editor's own payment details, in their account sheet.
+function payBox() {
+  const d = state.me.details;
+  return h("div", { class: "part", id: "ac-pay" },
+    h("h3", { class: "part-title", text: "Payment details" }),
+    d ? detailsList(d, false) : null,
+    h("p", { class: "hint", text: d ? "Only you and your admins can see these." : "Add your full name, phone number and bank account so your admin can pay you. Only you and your admins can see them." }),
+    h("div", { class: "btn-row" }, d
+      ? h("button", { class: "btn small", type: "button", id: "pay-edit", onclick: () => openDetails() }, "Change details")
+      : h("button", { class: "btn small primary", type: "button", id: "pay-add", onclick: () => openDetails() }, "Add your details")));
+}
+function openDetails() {
+  const d = state.me.details;
+  const input = (id, type, max, extra) => h("input", Object.assign({ class: "input", id: id, type: type, maxlength: String(max) }, extra));
+  const name = input("pd-name", "text", 80, { autocomplete: "name" });
+  const phone = input("pd-phone", "tel", 20, { autocomplete: "tel", inputmode: "tel" });
+  const bank = input("pd-bank", "text", 60, { autocomplete: "off" });
+  const acct = input("pd-account", "text", 14, { autocomplete: "off", inputmode: "numeric" });
+  if (d) { name.value = d.name; phone.value = d.phone; bank.value = d.bank; acct.value = d.account; }
+  formSheet({
+    title: "Payment details", submit: "Save details",
+    body: [
+      h("p", { text: "Your admin uses these to pay you. Only you and your admins can see them." }),
+      field("Full name", name, "As it appears on your bank account."),
+      field("Phone number", phone),
+      field("Bank", bank, "For example GTBank, Access Bank or OPay."),
+      field("Account number", acct, "10 digits.")],
+    run: async () => {
+      const n = tidy(name.value), p = tidy(phone.value), b = tidy(bank.value), a = acct.value.replace(/[\s-]/g, ""), digits = p.replace(/[^0-9]/g, "");
+      if (n.length < 2) throw new Oops(ERRORS.bad_full_name);
+      if (!/^\+?[0-9 ()-]+$/.test(p) || digits.length < 7 || digits.length > 15) throw new Oops(ERRORS.bad_phone);
+      if (b.length < 2) throw new Oops(ERRORS.bad_bank);
+      if (!/^[0-9]{10}$/.test(a)) throw new Oops(ERRORS.bad_account);
+      const r = await run("er_save_details", { p_name: n, p_phone: p, p_bank: b, p_account: a });
+      return r && r.same ? "Nothing changed" : "Payment details saved";
+    },
+  });
+}
+// An editor's profile, for an admin: who they are, and their payment details, fetched when it opens.
+function openProfile(uid) {
+  const u = state.users.get(uid);
+  if (!u) return;
+  const first = u.name.split(" ")[0], body = h("div", { class: "part", id: "pf-pay" });
+  const draw = (nodes) => body.replaceChildren.apply(body, [h("h3", { class: "part-title", text: "Payment details" })].concat(nodes.filter(Boolean)));
+  const load = async () => {
+    draw([h("p", { class: "hint", text: "Loading…" })]);
+    try {
+      const r = await call("er_details", { p_user: uid }), d = normDetails(r && r.details), ch = r && r.changed && num(r.changed.at) ? r.changed : null;
+      if (!body.isConnected) return;
+      if (!d) { draw([empty("No payment details yet.", first + " sees a reminder on their home screen until they add them.")]); return; }
+      draw([
+        ch ? h("div", { class: "notice warn" }, h("strong", { text: "Bank details changed " + shortDate(num(ch.at)) }),
+          h("span", { text: "Before, pay went to " + str(ch.bank, 60) + ", account ending " + str(ch.last4, 4) + ". If you didn't expect this, check with " + first + " before paying." })) : null,
+        detailsList(d, true),
+        d.at ? h("p", { class: "hint", text: "Updated " + stamp(d.at) + "." }) : null]);
+    } catch (e) {
+      if (!body.isConnected) return;
+      draw([h("p", { class: "error", role: "alert", text: errText(e) }), h("div", { class: "btn-row" }, h("button", { class: "btn small", type: "button", onclick: load }, "Try again"))]);
+    }
+  };
+  openSheet(u.name, [h("div", { class: "form" },
+    h("div", { class: "pic-row" }, avatar(uid, "lg"), h("div", { class: "row-main" },
+      h("span", { class: "row-title", text: "@" + u.username }),
+      h("span", { class: "hint", text: u.seen ? "Last seen " + ago(u.seen) : "Hasn't signed in yet" }))),
+    body,
+    h("div", { class: "btn-row" }, h("button", { class: "btn grow", type: "button", onclick: closeSheet }, "Close")))]);
+  load();
+}
 // Day, night, or whatever the phone is set to: for this phone only, and in effect at once. theme.js, which
 // runs before the page is drawn, keeps the choice and applies it.
 const THEMES = [["light", "Day"], ["dark", "Night"], [null, "Same as phone"]];
@@ -1874,6 +1983,7 @@ function openAccount(forPicture) {
       perr,
       admin ? field("Your name", name, "Signed in as @" + me.username + ". Your picture and name show wherever your work does.")
         : h("p", { class: "hint", text: "Signed in as @" + me.username + ". Your picture shows next to your name on the leaderboard. Your name is set by your admin." }),
+      admin ? null : payBox(),
       themeBox(),
       notifyBox()],
     foot: h("div", { class: "btn-row tools" },

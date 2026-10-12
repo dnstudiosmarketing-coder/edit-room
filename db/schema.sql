@@ -184,12 +184,26 @@ alter table app.meta add column if not exists vapid_public text;
 alter table app.meta add column if not exists vapid_private text;
 update app.meta set push_secret = encode(extensions.gen_random_bytes(32), 'hex') where id and push_secret is null;
 
+-- Each editor's payment details: the name on their bank account, a phone number, their bank and the account
+-- number. Saving a change adds a row, and the newest row is the one in use; older rows stay as the record,
+-- so an admin can be warned when the account pay goes to has just changed.
+create table if not exists app.details (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references app.users(id),
+  full_name text not null check (char_length(full_name) between 2 and 80),
+  phone text not null check (char_length(phone) between 7 and 20),
+  bank_name text not null check (char_length(bank_name) between 2 and 60),
+  bank_account text not null check (bank_account ~ '^[0-9]{10}$'),      -- Nigerian account numbers (NUBAN) have 10 digits
+  created_at timestamptz not null default now()
+);
+create index if not exists details_user on app.details(user_id, created_at desc);
+
 -- Row level security is on for every table, with a single rule that lets nobody through. The er_* functions
 -- run as the tables' owner, which the rule does not apply to; any other route to the data is refused.
 do $$
 declare t text;
 begin
-  foreach t in array array['meta', 'users', 'sessions', 'categories', 'projects', 'bonuses', 'featured', 'push_subs', 'outbox'] loop
+  foreach t in array array['meta', 'users', 'sessions', 'categories', 'projects', 'bonuses', 'featured', 'push_subs', 'outbox', 'details'] loop
     execute format('alter table app.%I enable row level security', t);
     if not exists (select 1 from pg_policies where schemaname = 'app' and tablename = t and policyname = 'no_direct_access') then
       execute format('create policy no_direct_access on app.%I for all to public using (false) with check (false)', t);
@@ -319,6 +333,14 @@ create or replace function app.featured_now() returns json language sql stable s
      where f.taken_at is null and p.status = 'submitted' and not p.deleted and p.link is not null
      order by f.picked_at desc, f.id desc
      limit 5) t
+$$;
+
+-- Someone's payment details as they stand now (their newest saved row), or null if they haven't added any.
+create or replace function app.details_of(p_user uuid) returns json language sql stable set search_path = '' as $$
+  select json_build_object('name', d.full_name, 'phone', d.phone, 'bank', d.bank_name, 'account', d.bank_account, 'at', app.ms(d.created_at))
+    from app.details d where d.user_id = p_user
+   order by d.created_at desc, d.id desc
+   limit 1
 $$;
 
 -- ---------------------------------------------------------------- phone notifications (private)
@@ -630,6 +652,7 @@ begin
         'id', x.id, 'name', x.name, 'username', x.username, 'role', x.role, 'owner', x.owner, 'active', x.active,
         'av', x.avatar_ver, 'has', x.avatar is not null, 'created', app.ms(x.created_at), 'seen', app.ms(x.last_seen), 'avAt', app.ms(x.avatar_at),
         'push', exists (select 1 from app.push_subs s where s.user_id = x.id and s.gone_at is null),
+        'pay', exists (select 1 from app.details d where d.user_id = x.id),       -- the details themselves come from er_details
         'earned', coalesce((select sum(p.amount) from app.projects p where p.editor_id = x.id and p.received_at is not null and not p.deleted), 0),
         'bonus', coalesce((select sum(b.amount) from app.bonuses b where b.editor_id = x.id and not b.removed), 0),
         -- last sign of work: a brief handed over by the admin counts only once the editor touches it
@@ -717,7 +740,8 @@ begin
   return json_build_object(
     'now', app.ms(clock_timestamp()), 'cursor', app.ms(t0), 'full', since is null,
     'me', json_build_object('id', u.id, 'name', u.name, 'username', u.username, 'role', u.role, 'owner', u.owner, 'av', u.avatar_ver, 'has', u.avatar is not null,
-                            'avAt', app.ms(u.avatar_at), 'phones', (select count(*) from app.push_subs s where s.user_id = u.id and s.gone_at is null)),
+                            'avAt', app.ms(u.avatar_at), 'phones', (select count(*) from app.push_subs s where s.user_id = u.id and s.gone_at is null),
+                            'details', app.details_of(u.id)),
     'settings', json_build_object('delivery', m.delivery_hours, 'grace', m.grace_hours, 'target', m.weekly_target, 'currency', m.currency, 'tz', m.tz, 'bonus', case when adm then m.bonus_default end,
                                   'push', m.vapid_public, 'picAsk', app.ms(m.pic_ask_at)),
     'cats', j_cats, 'users', j_users, 'weeks', j_weeks, 'month', app.ms(mo),
@@ -1054,6 +1078,59 @@ begin
   update app.sessions set revoked = true where user_id = t.id and not revoked;
   update app.push_subs set gone_at = now() where user_id = t.id and gone_at is null;
   return json_build_object('ok', true);
+end $$;
+
+-- ---------------------------------------------------------------- payment details
+
+-- An editor saves their own payment details. Spaces and dashes in the account number are dropped, and what
+-- is left must be 10 digits. Saving the same details again adds nothing; a login can change them at most
+-- 10 times a day.
+create or replace function public.er_save_details(p_token text, p_name text, p_phone text, p_bank text, p_account text) returns json
+language plpgsql security definer set search_path = '' as $$
+declare u app.users; cur app.details; v_name text; v_phone text; v_bank text; v_account text;
+begin
+  u := app.who(p_token);
+  v_name := app.clean(p_name, 80, 'bad_full_name');
+  if char_length(v_name) < 2 then raise exception 'bad_full_name'; end if;
+  v_phone := app.clean(p_phone, 20, 'bad_phone');
+  if v_phone !~ '^\+?[0-9 ()-]+$' or char_length(regexp_replace(v_phone, '[^0-9]', '', 'g')) not between 7 and 15 then raise exception 'bad_phone'; end if;
+  v_bank := app.clean(p_bank, 60, 'bad_bank');
+  if char_length(v_bank) < 2 then raise exception 'bad_bank'; end if;
+  v_account := regexp_replace(coalesce(p_account, ''), '[[:space:]-]', '', 'g');
+  if v_account !~ '^[0-9]{10}$' then raise exception 'bad_account'; end if;
+  select * into cur from app.details d where d.user_id = u.id order by d.created_at desc, d.id desc limit 1;
+  if found and cur.full_name = v_name and cur.phone = v_phone and cur.bank_name = v_bank and cur.bank_account = v_account then
+    return json_build_object('ok', true, 'same', true);
+  end if;
+  if (select count(*) from app.details d where d.user_id = u.id and d.created_at > now() - interval '1 day') >= 10 then raise exception 'too_many'; end if;
+  insert into app.details(user_id, full_name, phone, bank_name, bank_account) values (u.id, v_name, v_phone, v_bank, v_account);
+  return json_build_object('ok', true);
+end $$;
+
+-- Payment details: everyone can read their own, and an admin anyone's. When the bank or the account number
+-- changed in the last 30 days, the reply also says when, and where pay went before (the bank and the last
+-- 4 digits), so the admin can check before paying.
+create or replace function public.er_details(p_token text, p_user uuid) returns json
+language plpgsql security definer set search_path = '' as $$
+declare u app.users; cur app.details; prev app.details; since timestamptz; changed json;
+begin
+  u := app.who(p_token);
+  if p_user is null then raise exception 'invalid'; end if;
+  if p_user <> u.id and u.role <> 'admin' then raise exception 'forbidden'; end if;
+  if not exists (select 1 from app.users x where x.id = p_user and x.removed_at is null) then raise exception 'not_found'; end if;
+  select * into cur from app.details d where d.user_id = p_user order by d.created_at desc, d.id desc limit 1;
+  if not found then return json_build_object('details', null, 'changed', null); end if;
+  select * into prev from app.details d
+   where d.user_id = p_user and (d.bank_account <> cur.bank_account or lower(d.bank_name) <> lower(cur.bank_name))
+   order by d.created_at desc, d.id desc limit 1;
+  if found then
+    -- when the account in use now took over
+    select min(d.created_at) into since from app.details d where d.user_id = p_user and d.created_at > prev.created_at;
+    if since > now() - interval '30 days' then
+      changed := json_build_object('at', app.ms(since), 'bank', prev.bank_name, 'last4', right(prev.bank_account, 4));
+    end if;
+  end if;
+  return json_build_object('details', app.details_of(p_user), 'changed', changed);
 end $$;
 
 -- ---------------------------------------------------------------- phone notifications

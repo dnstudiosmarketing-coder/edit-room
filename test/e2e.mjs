@@ -912,6 +912,79 @@ try {
   await sheet(ada).getByRole("button", { name: "Cancel" }).click();
   await closed(ada);
 
+  /* ------------------------------------------------------------ payment details */
+  await ada.emulateMedia({ colorScheme: "light" });
+  await tab(ada, "work");
+  await see(ada, "Add your payment details", "an editor without payment details is reminded on their home screen");
+  await ada.getByRole("button", { name: "Add my details" }).click();
+  await sheet(ada).locator("#pd-name").waitFor();
+  ok((await ada.locator("#pd-phone").getAttribute("type")) === "tel" && (await ada.locator("#pd-account").getAttribute("inputmode")) === "numeric", "the phone and account number fields bring up the number keys");
+  await ada.fill("#pd-name", "Adaeze  Obi");
+  await ada.fill("#pd-phone", "0803 123 4567");
+  await ada.fill("#pd-bank", "GTBank");
+  await ada.fill("#pd-account", "012345678");
+  await sheet(ada).getByRole("button", { name: "Save details" }).click();
+  await sheet(ada).getByText("Enter your 10-digit account number.").waitFor();
+  ok((await sql("select count(*)::int as n from app.details")).rows[0].n === 0, "a 9-digit account number is caught before anything is saved");
+  await look(ada, "43-pay-form", "the payment details form");
+  await ada.fill("#pd-account", "0123 456 789");
+  await sheet(ada).getByRole("button", { name: "Save details" }).click();
+  await toast(ada, "Payment details saved");
+  await gone(ada, "Add your payment details", "once they're saved, the reminder goes");
+  const kept = (await sql("select d.full_name, d.phone, d.bank_name, d.bank_account from app.details d join app.users x on x.id = d.user_id where x.username = 'ada.obi'")).rows;
+  ok(kept.length === 1 && kept[0].full_name === "Adaeze Obi" && kept[0].bank_account === "0123456789" && kept[0].phone === "0803 123 4567", "the details are saved tidied up", JSON.stringify(kept));
+  await ada.locator("#who").click();
+  const myPay = sheet(ada).locator("#ac-pay");
+  await myPay.getByText("0123456789").waitFor();
+  ok(/Adaeze Obi/.test(await myPay.innerText()) && /GTBank/.test(await myPay.innerText()) && (await myPay.getByRole("button", { name: "Copy" }).count()) === 0, "the editor sees their payment details in their account");
+  await look(ada, "44-pay-account", "payment details in the editor's account");
+  await sheet(ada).getByRole("button", { name: "Cancel" }).click();
+  await closed(ada);
+  // the admin's side
+  await admin.setViewportSize({ width: 390, height: 844 });
+  await sync(admin);
+  await tab(admin, "editors");
+  const roster = admin.locator("article.clip", { hasText: "Earned in total" }), payAda = roster.filter({ hasText: "Ada O." }), payTunde = roster.filter({ hasText: "Tunde" });
+  await payAda.waitFor();
+  ok((await payAda.getByText("No payment details").count()) === 0 && (await payTunde.getByText("No payment details").count()) === 1, "on the Editors screen the admin can see who hasn't added payment details");
+  await payAda.getByRole("button", { name: "Profile" }).click();
+  const prof = sheet(admin).locator("#pf-pay");
+  await prof.getByText("0123456789").waitFor();
+  ok(/Adaeze Obi/.test(await prof.innerText()) && /GTBank/.test(await prof.innerText()) && /0803 123 4567/.test(await prof.innerText()), "an editor's profile shows the admin their payment details");
+  ok((await prof.locator('a[href^="tel:"]').getAttribute("href")) === "tel:08031234567", "the phone number rings when tapped");
+  await prof.getByRole("button", { name: "Copy" }).click();
+  await toast(admin, "Account number copied");
+  ok((await admin.evaluate(() => navigator.clipboard.readText())) === "0123456789", "Copy puts the account number on the clipboard, digits only");
+  await look(admin, "45-profile", "an editor's profile, for the admin");
+  await sheet(admin).getByRole("button", { name: "Close" }).click();
+  await closed(admin);
+  await payTunde.getByRole("button", { name: "Profile" }).click();
+  await sheet(admin).locator("#pf-pay").getByText("No payment details yet.").waitFor();
+  ok(true, "an editor who hasn't added details shows none, and the admin is told they've been reminded");
+  await sheet(admin).getByRole("button", { name: "Close" }).click();
+  await closed(admin);
+  // a new bank account is pointed out to the admin
+  await ada.locator("#who").click();
+  await sheet(ada).getByRole("button", { name: "Change details" }).click();
+  ok((await ada.inputValue("#pd-account")) === "0123456789" && (await ada.inputValue("#pd-name")) === "Adaeze Obi", "changing details starts from the saved ones");
+  await ada.fill("#pd-bank", "OPay");
+  await ada.fill("#pd-account", "8031234567");
+  await sheet(ada).getByRole("button", { name: "Save details" }).click();
+  await toast(ada, "Payment details saved");
+  await payAda.getByRole("button", { name: "Profile" }).click();
+  await sheet(admin).locator("#pf-pay").getByText("8031234567").waitFor();
+  await see(admin, "Before, pay went to GTBank, account ending 6789.", "when an editor's bank account changes, the admin is warned, with where pay went before");
+  await look(admin, "46-profile-changed", "a changed bank account");
+  await sheet(admin).getByRole("button", { name: "Close" }).click();
+  await closed(admin);
+  // an editor can't read anyone else's
+  const peek = await ada.evaluate(async (args) => {
+    const tok = localStorage.getItem("editroom.token");
+    const r = await fetch(args.api + "er_details", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ p_token: tok, p_user: args.uid }) });
+    return r.status + " " + (await r.text());
+  }, { api: srv.url + "/rest/v1/rpc/", uid: (await sql("select id from app.users where username = 'tunde.bello'")).rows[0].id });
+  ok(/^400 .*forbidden/.test(peek), "an editor can't read another editor's details", peek);
+
   /* ------------------------------------------------------------ phone notifications */
   // A phone's push service can't be reached from here, so the browser's notification permission and push
   // sign-up are stood in for; everything from the app's side, and the database's, is real.

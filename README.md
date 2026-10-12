@@ -11,6 +11,7 @@ A small web app for DN Studios' video editors and the people who run the team. (
 - An admin can **ask every editor for a new profile picture** (Settings): each one gets a notification and a reminder on their home screen until they choose one. Tapping a picture (anyone's, for an admin; the leaderboard, for editors) shows it full size.
 - Each editor has a **Videos** page listing every video they have submitted, playable in the app; an admin can open anyone's from the Editors screen.
 - **Day or night**: under Your account (tap your name at the top), anyone can pick Day, Night, or Same as phone. The choice stays on that phone.
+- **Payment details**: each editor adds their full name (as on their bank account), phone number, bank and 10-digit account number under Your account, and sees a reminder on their home screen until they do. An admin finds them under **Profile** on the Editors screen, with a button that copies the account number; when an editor's bank or account number changed in the last 30 days, the profile says so and where pay went before. Only the editor and the admins can read them.
 
 It opens from a link on any phone or computer and can be added to the home screen like an app.
 
@@ -46,6 +47,8 @@ Every colour is a named value at the top of `styles.css`, once for light and onc
 Every table sits in a private `app` schema that the web API does not expose. The app can only call the `er_*` functions in `public`; each one checks the caller's session token and then decides what that person may see or change. Passwords are stored as bcrypt hashes, sessions as hashes of a random token. Deadlines run on the database clock, so a phone with the wrong time changes nothing.
 
 `config.js` holds the project's address and its *publishable* key. Both are meant to be public: on their own they only reach the functions above.
+
+Payment details live in `app.details`: saving a change adds a row, and the newest row is the one in use, so every earlier account stays on record. They reach an admin only through `er_details`, one editor at a time, never in `er_state`.
 
 Nothing in the database ever removes a row. Sessions are revoked, projects and logins are marked as removed. Keep it that way: it preserves the record, and it means changes can be applied without a destructive statement.
 
