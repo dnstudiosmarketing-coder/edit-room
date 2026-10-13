@@ -1,4 +1,5 @@
 // Checks the database rules on their own: sign-in, who may do what, deadlines, pay, bonuses, leaderboard.
+import fs from "node:fs";
 import { createDb, SETUP_CODE } from "./db.mjs";
 
 const out = [];
@@ -148,6 +149,48 @@ const q1 = st.projects.find((p) => p.id === quick), keep = st.projects.find((p) 
 ok(q1.due - q1.started === 3600e3 && q1.grace - q1.due === 5 * 3600e3 && keep.due - keep.started === 24 * 3600e3, "a brief logged after the change gets the new deadline and grace");
 await rpc("er_save_settings", { p_token: A, p_delivery: 24, p_grace: 48, p_target: 6, p_currency: "$", p_bonus: 50 });
 await rpc("er_delete_project", { p_token: A, p_project: quick });
+
+// ---- a new grace period reaches every brief still in progress straight away: ones being worked on, and ones
+// waiting with the admin (which could still be sent back). Received, reassigned and deleted briefs keep theirs.
+const gLate = (await rpc("er_log_brief", { p_token: TC, p_name: "Grace late", p_category: ads })).id;
+await sql("update app.projects set started_at = now() - interval '30 hours' where id = $1", [gLate]);     // 6 hours into its grace period
+const gWait = (await rpc("er_log_brief", { p_token: TC, p_name: "Grace waiting", p_category: ads })).id;
+await rpc("er_submit", { p_token: TC, p_project: gWait, p_link: "https://drive.google.com/file/d/gwait/view" });
+const gDone = (await rpc("er_log_brief", { p_token: TC, p_name: "Grace received", p_category: ads })).id;
+await rpc("er_submit", { p_token: TC, p_project: gDone, p_link: "https://drive.google.com/file/d/gdone/view" });
+await rpc("er_receive", { p_token: A, p_project: gDone, p_on: true });
+const gGone = (await rpc("er_log_brief", { p_token: TC, p_name: "Grace deleted", p_category: ads })).id;
+await rpc("er_delete_project", { p_token: A, p_project: gGone });
+const rowOf = async (id) => { const r = (await sql("select grace_hours, due_at, changed_at from app.projects where id = $1", [id])).rows[0]; return { grace: r.grace_hours, due: new Date(r.due_at).getTime(), changed: new Date(r.changed_at).getTime() }; };
+const inProgress = (await sql("select count(*)::int as n from app.projects where not deleted and (status = 'active' or (status = 'submitted' and received_at is null))")).rows[0].n;
+const lateBefore = await rowOf(gLate);
+const saved12 = await rpc("er_save_settings", { p_token: A, p_delivery: 24, p_grace: 12, p_target: 6, p_currency: "$", p_bonus: 50 });
+ok(saved12.ok === true && saved12.briefs === inProgress && inProgress >= 4, "a new grace period goes to every brief in progress, and the reply says how many", saved12.briefs + " of " + inProgress);
+st = await rpc("er_state", { p_token: TC });
+const gl = st.projects.find((p) => p.id === gLate), gw = st.projects.find((p) => p.id === gWait), gd = st.projects.find((p) => p.id === gDone);
+ok(gl.grace - gl.due === 12 * 3600e3 && gl.due - gl.started === 24 * 3600e3, "a brief in its grace period gets the new one at once, and keeps its deadline", String((gl.grace - gl.due) / 3600e3));
+ok(gw.grace - gw.due === 12 * 3600e3, "so does a brief waiting with the admin, in case it is sent back");
+ok(gd.grace - gd.due === 48 * 3600e3 && (await rowOf(gGone)).grace === 48 && (await rowOf(p2)).grace === 48, "a received, a deleted and a reassigned brief keep the grace period they had");
+const lateAfter = await rowOf(gLate);
+ok(lateAfter.changed > lateBefore.changed && lateAfter.due === lateBefore.due, "the brief is marked as changed, so every phone picks up the new grace period on its next check");
+const again12 = await rpc("er_save_settings", { p_token: A, p_delivery: 24, p_grace: 12, p_target: 7, p_currency: "$", p_bonus: 50 });
+ok(again12.briefs === 0 && (await rowOf(gLate)).changed === lateAfter.changed, "saving other settings leaves the briefs alone");
+await rpc("er_send_back", { p_token: A, p_project: gWait, p_note: "One more pass" });
+const gBack = (await rpc("er_state", { p_token: TC })).projects.find((p) => p.id === gWait);
+ok(gBack.status === "active" && gBack.grace - gBack.due === 12 * 3600e3, "a brief sent back after the change has the new grace period");
+await rpc("er_save_settings", { p_token: A, p_delivery: 24, p_grace: 0, p_target: 6, p_currency: "$", p_bonus: 50 });
+const g0 = (await rpc("er_state", { p_token: TC })).projects.find((p) => p.id === gLate);
+ok(g0.grace === g0.due, "with no grace period, a brief's grace ends at its deadline");
+// the database script brings briefs logged before this rule into line with Settings, and leaves the rest alone
+await rpc("er_save_settings", { p_token: A, p_delivery: 24, p_grace: 12, p_target: 6, p_currency: "$", p_bonus: 50 });
+await sql("update app.projects set grace_hours = 48 where id = $1 or id = $2", [gLate, gWait]);     // as if logged before the rule
+const backfill = fs.readFileSync(new URL("../db/schema.sql", import.meta.url), "utf8").match(/update app\.projects p set grace_hours = m\.grace_hours[^;]*;/);
+ok(!!backfill, "the database script has the statement that brings older briefs into line");
+if (backfill) await sql(backfill[0]);
+ok((await rowOf(gLate)).grace === 12 && (await rowOf(gWait)).grace === 12 && (await rowOf(gDone)).grace === 48 && (await rowOf(gGone)).grace === 48 && (await rowOf(p2)).grace === 48, "running it gives briefs in progress the grace period in Settings, and leaves finished ones alone");
+await rpc("er_save_settings", { p_token: A, p_delivery: 24, p_grace: 48, p_target: 6, p_currency: "$", p_bonus: 50 });
+ok((await rowOf(gLate)).grace === 48, "and setting it back takes them back");
+for (const id of [gLate, gWait, gDone]) await rpc("er_delete_project", { p_token: A, p_project: id });
 
 // ---- a retry on a bad connection must not log the same brief twice
 const d1 = await rpc("er_log_brief", { p_token: TC, p_name: "Double tap", p_category: ads });

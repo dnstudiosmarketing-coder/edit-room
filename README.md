@@ -8,6 +8,7 @@ A small web app for DN Studios' video editors and the people who run the team. (
 - Everyone on the team sees a leaderboard of on-time submissions; each editor sees what they have earned.
 - **Phone notifications**, once each person turns them on: an admin's phone pings when a video is submitted, an editor's when a video reaches its deadline and the grace period starts. They arrive even when the app is closed. On iPhone the app has to be added to the home screen first.
 - On a submitted video, **Mark received** glows until the admin presses it.
+- **Deadlines** are set in Settings: the delivery time, counted from the moment a brief is logged, and the grace period after it. Settings has a **Save changes** button in each panel. A new delivery time applies to briefs logged from then on, so no deadline that is already running moves; a new grace period applies straight away, to briefs already in progress too.
 - Once a video's deadline passes, its card shows the **grace period as a green battery** that drains in real time (for the editor on My work, and for an admin in the inbox and Projects), with the time left above it; it's empty, with a red outline, when the grace period is over. The charge flows out of it like a phone's fast-charge animation run backwards (kept still for anyone who asks their phone for reduced motion).
 - An admin can **send a reminder** from Settings, picking one of three: a new profile picture (every editor), payment details (editors who haven't added them) or late videos (editors with a video past its deadline, named in the message). Editors with notifications on get it on their phone, and their home screen asks too. The sheet says how many editors each one reaches and how many have notifications on; the same reminder can't go out twice within 10 minutes.
 - Tapping a picture (anyone's, for an admin; the leaderboard, for editors) shows it full size.
@@ -47,6 +48,8 @@ Every colour is a named value at the top of `styles.css`, once for light and onc
 ### The database, in short
 
 Every table sits in a private `app` schema that the web API does not expose. The app can only call the `er_*` functions in `public`; each one checks the caller's session token and then decides what that person may see or change. Passwords are stored as bcrypt hashes, sessions as hashes of a random token. Deadlines run on the database clock, so a phone with the wrong time changes nothing.
+
+Each brief carries its own delivery time and grace period (`due_hours`, `grace_hours` in `app.projects`), copied from Settings when it is logged. Saving Settings (`er_save_settings`) also gives the new grace period to every brief still in progress, including ones waiting with an admin, since those can be sent back; finished, reassigned and deleted briefs keep theirs.
 
 `config.js` holds the project's address and its *publishable* key. Both are meant to be public: on their own they only reach the functions above.
 

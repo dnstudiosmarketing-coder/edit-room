@@ -319,6 +319,7 @@ function leave(msg) {
   clearTimeout(syncTimer);
   state.phase = "login"; state.cursor = null; state.projects = new Map(); state.users = new Map(); state.featured = [];
   state.stats = { editors: new Map(), cats: new Map() }; state.horizon = null; resetHist();
+  setPanel = null;          // Settings start afresh for whoever signs in next, with no half-made changes left in them
   closeSheet(); closePlayer(); render();
   if (msg) toast(msg, true);
 }
@@ -1284,19 +1285,50 @@ function settingsPanel() {
   target.setAttribute("placeholder", "No target");
   const currency = h("input", { class: "input", id: "set-currency", type: "text", maxlength: "6", autocomplete: "off", placeholder: "₦" });
   const bonus = h("input", { class: "input", id: "set-bonus", type: "text", inputmode: "decimal", autocomplete: "off", placeholder: "No default" });
-  const save = async () => {
-    const d = Math.round(Number(delivery.value)), g = Math.round(Number(grace.value)), t = target.value.trim() === "" ? null : Math.round(Number(target.value));
-    const cur = currency.value.trim(), rawB = bonus.value.trim(), b = rawB ? parseAmount(rawB) : null;
-    if (!(d >= 1 && d <= 720)) { toast("Enter a delivery time between 1 and 720 hours.", true); return; }
-    if (!(g >= 0 && g <= 720) || grace.value.trim() === "") { toast("Enter a grace period between 0 and 720 hours.", true); return; }
-    if (t != null && !(t >= 1 && t <= 999)) { toast("Enter a weekly target between 1 and 999, or leave it empty.", true); return; }
-    if (rawB && b == null) { toast("Enter the bonus as a number, or leave it empty.", true); return; }
-    const c = state.config;
-    if (d === c.deliveryHours && g === c.graceHours && t === c.weeklyTarget && cur === c.currency && b === state.prefs.bonusAmount) return;
-    try { await run("er_save_settings", { p_delivery: d, p_grace: g, p_target: t, p_currency: cur, p_bonus: b }); toast("Saved"); }
-    catch (ex) { toast(errText(ex), true); }
+  // Deadlines, and pay and targets, each have a Save changes button that saves only what is in that panel. It
+  // lights up, with a note beside it, while a box in the panel differs from what is saved (fillSettings keeps
+  // a note of that on each box, and leaves alone a box someone has changed but not saved yet).
+  const savePanel = (id, heading, fields, read) => {
+    const btn = h("button", { class: "btn", type: "submit", id: id, "aria-describedby": heading }, "Save changes");
+    const note = h("span", { class: "unsaved", text: "Not saved yet", hidden: true });
+    const P = { fields: fields, btn: btn, note: note };
+    P.dirty = () => fields.some((el) => el.value.trim() !== (el.dataset.saved || ""));
+    P.node = h("form", { class: "panel", novalidate: true, onsubmit: async (e) => {
+      e.preventDefault();
+      if (btn.disabled) return;
+      const c = state.config, now = { d: c.deliveryHours, g: c.graceHours, t: c.weeklyTarget, cur: c.currency, b: state.prefs.bonusAmount };
+      const v = read(Object.assign({}, now));
+      if (!v) return;
+      for (const el of fields) el.value = v.show(el);     // as it will be saved: 12.0 is 12
+      showDirty();
+      if (v.d === now.d && v.g === now.g && v.t === now.t && v.cur === now.cur && v.b === now.b) { toast("No changes to save."); return; }
+      btn.disabled = true;
+      try {
+        await run("er_save_settings", { p_delivery: v.d, p_grace: v.g, p_target: v.t, p_currency: v.cur, p_bonus: v.b });
+        toast(v.g !== now.g ? "Changes saved. Briefs in progress now have " + (v.g ? "a " + v.g + "-hour grace period." : "no grace period.") : "Changes saved");
+      } catch (ex) { toast(errText(ex), true); }
+      btn.disabled = false;
+      showDirty();
+    } });
+    P.fill = (kids) => { add(P.node, kids); add(P.node, h("div", { class: "btn-row save" }, btn, note)); return P.node; };
+    return P;
   };
-  for (const el of [delivery, grace, target, currency, bonus]) el.addEventListener("change", save);
+  const bad = (el, msg) => { toast(msg, true); el.focus(); return null; };
+  const deadlines = savePanel("save-deadlines", "deadlines-title", [delivery, grace], (v) => {
+    const d = Math.round(Number(delivery.value)), g = Math.round(Number(grace.value));
+    if (delivery.value.trim() === "" || !(d >= 1 && d <= 720)) return bad(delivery, "Enter a delivery time between 1 and 720 hours.");
+    if (grace.value.trim() === "" || !(g >= 0 && g <= 720)) return bad(grace, "Enter a grace period between 0 and 720 hours.");
+    return Object.assign(v, { d: d, g: g, show: (el) => String(el === delivery ? d : g) });
+  });
+  const payPanel = savePanel("save-pay", "pay-title", [currency, bonus, target], (v) => {
+    const t = target.value.trim() === "" ? null : Math.round(Number(target.value)), rawB = bonus.value.trim(), b = rawB ? parseAmount(rawB) : null;
+    if (t != null && !(t >= 1 && t <= 999)) return bad(target, "Enter a weekly target between 1 and 999, or leave it empty.");
+    if (rawB && b == null) return bad(bonus, "Enter the bonus as a number, or leave it empty.");
+    const cur = currency.value.trim();
+    return Object.assign(v, { t: t, cur: cur, b: b, show: (el) => (el === currency ? cur : el === bonus ? (b == null ? "" : String(b)) : t == null ? "" : String(t)) });
+  });
+  const showDirty = () => { for (const P of [deadlines, payPanel]) { const d = P.dirty(); P.btn.classList.toggle("primary", d); P.note.hidden = !d; } };
+  for (const el of [delivery, grace, target, currency, bonus]) el.addEventListener("input", showDirty);
   const picStatus = h("p", { class: "hint", id: "pic-status" }), payStatus = h("p", { class: "hint", id: "pay-status" }), lateStatus = h("p", { class: "hint", id: "late-status" });
   const remBox = h("section", { class: "section" },
     h("h2", { class: "section-title", text: "Reminders" }),
@@ -1323,22 +1355,23 @@ function settingsPanel() {
         h("p", { class: "section-note", text: "Editors pick a category for every brief. Its pay is added to their earnings when you mark the video received." }),
         list, form),
       h("section", { class: "section" },
-        h("h2", { class: "section-title", text: "Deadlines" }),
-        h("div", { class: "panel" },
+        h("h2", { class: "section-title", id: "deadlines-title", text: "Deadlines" }),
+        deadlines.fill([
           h("div", { class: "field-grid" },
             h("div", { class: "field" }, h("label", { for: "set-delivery", text: "Delivery time (hours)" }), delivery, h("p", { class: "hint", text: "Counted from the moment an editor logs a brief. Alerts start when it runs out." })),
             h("div", { class: "field" }, h("label", { for: "set-grace", text: "Grace period (hours)" }), grace, h("p", { class: "hint", text: "When this also runs out, the project is flagged for you to reassign." }))),
-          h("p", { class: "hint", text: "A change applies to briefs logged from then on. Briefs already logged keep the deadline they started with." }))),
+          h("p", { class: "hint", text: "A new grace period applies straight away, to briefs already in progress too. A new delivery time applies to briefs logged from then on, so deadlines already running don't move." })])),
       h("section", { class: "section" },
-        h("h2", { class: "section-title", text: "Pay and targets" }),
-        h("div", { class: "panel" },
+        h("h2", { class: "section-title", id: "pay-title", text: "Pay and targets" }),
+        payPanel.fill([
           h("div", { class: "field-grid" },
             h("div", { class: "field" }, h("label", { for: "set-currency", text: "Currency symbol" }), currency),
             h("div", { class: "field" }, h("label", { for: "set-bonus", text: "Usual bonus amount" }), bonus, h("p", { class: "hint", text: "Filled in for you when you award a bonus. Only admins see it." })),
-            h("div", { class: "field" }, h("label", { for: "set-target", text: "Weekly target per editor (videos)" }), target, h("p", { class: "hint", text: "Optional. Weeks run Monday to Sunday." }))))),
+            h("div", { class: "field" }, h("label", { for: "set-target", text: "Weekly target per editor (videos)" }), target, h("p", { class: "hint", text: "Optional. Weeks run Monday to Sunday." })))])),
       remBox,
       tryBox),
     teamList: teamList, list: list, delivery: delivery, grace: grace, target: target, currency: currency, bonus: bonus, picStatus: picStatus, payStatus: payStatus, lateStatus: lateStatus,
+    showDirty: showDirty,
   };
   return setPanel;
 }
@@ -1358,11 +1391,17 @@ function fillSettings() {
       h("span", { class: "hint", text: c.rate != null ? money(c.rate) + " per video" : "No pay rate set" })),
     h("div", { class: "row-actions" }, h("button", { class: "btn small", type: "button", dataset: { fk: "catedit:" + c.id }, onclick: () => openCat(c) }, "Edit"))))
     : [h("li", { class: "rows-empty", text: "No categories yet. Add your first one below." })]);
-  const put = (el, v) => { if (document.activeElement !== el) el.value = v; };
+  // Each box follows the saved setting, unless it holds a change that hasn't been saved yet.
+  const put = (el, v) => {
+    const was = el.dataset.saved;
+    if ((was == null || el.value.trim() === was) && el.value !== v) el.value = v;
+    el.dataset.saved = v;
+  };
   put(S.delivery, String(cfg.deliveryHours)); put(S.grace, String(cfg.graceHours));
   put(S.target, cfg.weeklyTarget == null ? "" : String(cfg.weeklyTarget));
   put(S.currency, cfg.currency);
   put(S.bonus, state.prefs.bonusAmount == null ? "" : String(state.prefs.bonusAmount));
+  S.showDirty();
   const eds = Array.from(state.users.values()).filter((u) => u.role === "editor" && u.active), R = reminderTargets();
   const fresh = eds.filter((u) => u.has && u.avAt != null && cfg.picAsk != null && u.avAt >= cfg.picAsk).length;
   const last = (at) => (at ? " Last reminded " + stamp(at) + "." : "");

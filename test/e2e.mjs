@@ -120,13 +120,28 @@ try {
   await closed(admin);
   ok((await admin.locator(".rows .tape").count()) === 3, "a category can be removed from its Edit sheet");
   await admin.fill("#cat-new", "");
+  // each Settings panel has a Save changes button, which lights up while a change there isn't saved yet
+  const savePay = admin.locator("#save-pay"), payNote = admin.locator("#save-pay + .unsaved");
+  const lit = (loc) => loc.evaluate((b) => b.classList.contains("primary"));
+  ok(!(await lit(savePay)) && !(await payNote.isVisible()) && (await savePay.innerText()) === "Save changes", "with nothing changed, Save changes is there but quiet");
   await admin.fill("#set-currency", "$");
-  await admin.locator("#set-currency").blur();
-  await toast(admin, "Saved");
   await admin.fill("#set-target", "5");
-  await admin.locator("#set-target").blur();
   await admin.fill("#set-bonus", "25");
-  await admin.locator("#set-bonus").blur();
+  ok((await lit(savePay)) && (await payNote.innerText()) === "Not saved yet" && !(await lit(admin.locator("#save-deadlines"))), "a change lights up that panel's Save changes, and says it isn't saved yet");
+  await tab(admin, "inbox");
+  await tab(admin, "settings");
+  ok((await admin.inputValue("#set-currency")) === "$" && (await admin.inputValue("#set-target")) === "5" && (await admin.inputValue("#set-bonus")) === "25" && (await lit(savePay)), "a change that isn't saved yet is still there after going to another screen and back");
+  ok((await sql("select currency from app.meta")).rows[0].currency === "", "and nothing is saved until Save changes is pressed");
+  await admin.locator("#set-bonus").scrollIntoViewIfNeeded();
+  await look(admin, "02b-settings-unsaved", "settings with a change not saved yet");
+  await savePay.click();
+  await toast(admin, "Changes saved");
+  const meta1 = (await sql("select currency, weekly_target, bonus_default::float as bonus from app.meta")).rows[0];
+  ok(meta1.currency === "$" && meta1.weekly_target === 5 && meta1.bonus === 25 && !(await lit(savePay)) && !(await payNote.isVisible()), "Save changes saves them, and the button goes quiet again", JSON.stringify(meta1));
+  await admin.locator("#toast").waitFor({ state: "hidden" });
+  await admin.locator("#save-pay").click();
+  await toast(admin, "No changes to save.");
+  ok(true, "pressing it with nothing changed says so");
   await see(admin, "$15 per video", "pay rates show with the currency");
 
   const logins = {};
@@ -809,8 +824,9 @@ try {
   // a changed delivery time applies to new briefs
   await tab(admin, "settings");
   await admin.fill("#set-delivery", "12");
-  await admin.locator("#set-delivery").blur();
-  await toast(admin, "Saved");
+  await admin.locator("#save-deadlines").click();
+  await toast(admin, "Changes saved");
+  ok((await admin.locator("#toast").innerText()) === "Changes saved", "saving a new delivery time doesn't claim anything about the grace period", await admin.locator("#toast").innerText());
   await sync(ada);
   await tab(ada, "work");
   await ada.getByRole("button", { name: "Log a new brief" }).click();
@@ -820,9 +836,11 @@ try {
   await sheet(ada).getByRole("button", { name: "Log brief" }).click();
   await closed(ada);
   ok(/Due in (11h 5\dm|12h)/.test(await ada.locator("article.clip", { hasText: "Quick turnaround" }).innerText()), "a brief logged after the admin changes the delivery time gets the new deadline");
+  await admin.locator("#toast").waitFor({ state: "hidden" });
   await admin.fill("#set-delivery", "24");
-  await admin.locator("#set-delivery").blur();
-  await toast(admin, "Saved");
+  await admin.locator("#set-delivery").press("Enter");
+  await toast(admin, "Changes saved");
+  ok((await sql("select delivery_hours from app.meta")).rows[0].delivery_hours === 24, "pressing Enter in a box saves too");
   await sync(ada);
   await ada.waitForTimeout(300);
   ok(/Due in (11h 5\dm|12h)/.test(await ada.locator("article.clip", { hasText: "Quick turnaround" }).innerText()), "and keeps it when the setting changes again");
@@ -1160,6 +1178,35 @@ try {
   await admin.locator("article.clip", { hasText: "Reminder test brief" }).locator(".grace.over").waitFor();
   ok(true, "a video whose grace period is over shows the empty battery to the admin too");
   await pick(admin, "#f-status", "active");
+  // a new grace period, once saved in Settings, reaches the briefs already in progress
+  const graceLeft = (page, re) => page.waitForFunction((src) => {
+    const card = Array.from(document.querySelectorAll("article.clip")).find((a) => a.textContent.includes("Grace bar brief"));
+    const left = card && card.querySelector(".grace-left");
+    return !!left && new RegExp(src).test(left.textContent);
+  }, re.source);
+  await tab(admin, "settings");
+  await admin.locator("#toast").waitFor({ state: "hidden" });
+  await admin.fill("#set-grace", "24");
+  ok((await lit(admin.locator("#save-deadlines"))) && (await admin.locator("#save-deadlines + .unsaved").isVisible()) && !(await lit(admin.locator("#save-pay"))), "changing the grace period lights up Save changes under Deadlines only");
+  await admin.locator("#save-deadlines").scrollIntoViewIfNeeded();
+  await look(admin, "50-grace-unsaved", "a new grace period, not saved yet");
+  await admin.locator("#save-deadlines").click();
+  await toast(admin, "Changes saved. Briefs in progress now have a 24-hour grace period.");
+  ok(true, "saving it says briefs in progress now have the new grace period");
+  await sync(tp2);
+  await graceLeft(tp2, /^(12h|11h 5\dm) left$/);
+  ok(Math.abs((await levelOf(gb)) - 50) < 1.5 && /left of 24h$/.test(await gb.getAttribute("aria-label")), "the editor's battery follows on its next check: 12 hours into a 24-hour grace period, half is left", (await levelOf(gb)) + " / " + (await gb.getAttribute("aria-label")));
+  await tab(admin, "inbox");
+  await graceLeft(admin, /^(12h|11h 5\dm) left$/);
+  ok(Math.abs((await levelOf(inboxGrace)) - 50) < 1.5, "and so does the admin's", String(await levelOf(inboxGrace)));
+  await tab(admin, "settings");
+  await admin.locator("#toast").waitFor({ state: "hidden" });
+  await admin.fill("#set-grace", "48");
+  await admin.locator("#set-grace").press("Enter");
+  await toast(admin, "Changes saved. Briefs in progress now have a 48-hour grace period.");
+  await sync(tp2);
+  await graceLeft(tp2, /^(36h|35h 5\dm) left$/);
+  ok(Math.abs((await levelOf(gb)) - 75) < 1.5, "setting it back fills the battery back up", String(await levelOf(gb)));
   await tp2.context().close();
   // the offline helper shows what arrives, with the studio's badge, and buzzes (the lightweight test browser
   // can't show notifications at all, so this one check runs in the full one)

@@ -1012,10 +1012,13 @@ begin
   return json_build_object('ok', true);
 end $$;
 
--- A new delivery time or grace period applies to briefs logged from then on; ones already logged keep theirs.
+-- A new grace period applies straight away to every brief still in progress: the ones being worked on, and the
+-- ones waiting with an admin, which could still be sent back. Finished, reassigned and deleted ones keep theirs.
+-- A new delivery time applies to briefs logged from then on, so no deadline that is already running moves (and
+-- nobody's on-time record changes). Says how many briefs took the new grace period.
 create or replace function public.er_save_settings(p_token text, p_delivery int, p_grace int, p_target int default null, p_currency text default '', p_bonus numeric default null) returns json
 language plpgsql security definer set search_path = '' as $$
-declare u app.users;
+declare u app.users; n int;
 begin
   u := app.admin(p_token);
   if p_delivery is null or p_delivery not between 1 and 720 or p_grace is null or p_grace not between 0 and 720
@@ -1024,8 +1027,18 @@ begin
     raise exception 'invalid';
   end if;
   update app.meta set delivery_hours = p_delivery, grace_hours = p_grace, weekly_target = p_target, currency = btrim(coalesce(p_currency, '')), bonus_default = p_bonus where id;
-  return json_build_object('ok', true);
+  update app.projects set grace_hours = p_grace
+   where grace_hours <> p_grace and not deleted and (status = 'active' or (status = 'submitted' and received_at is null));
+  get diagnostics n = row_count;
+  return json_build_object('ok', true, 'briefs', n);
 end $$;
+
+-- Briefs in progress follow the grace period in Settings (er_save_settings keeps them in step). Until October
+-- 2026 a new grace period reached only briefs logged afterwards; this brings the ones logged before into line,
+-- and does nothing once they are.
+update app.projects p set grace_hours = m.grace_hours
+  from app.meta m
+ where p.grace_hours <> m.grace_hours and not p.deleted and (p.status = 'active' or (p.status = 'submitted' and p.received_at is null));
 
 create or replace function public.er_save_category(p_token text, p_id uuid, p_name text, p_rate numeric default null) returns json
 language plpgsql security definer set search_path = '' as $$

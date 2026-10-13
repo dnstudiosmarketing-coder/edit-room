@@ -247,6 +247,9 @@ button { cursor: pointer; touch-action: manipulation; }
 .btn-row > .grow { flex: 1 1 120px; }
 .btn-row > .full { flex: 1 1 100%; }
 .btn-row.tools { padding-top: 12px; border-top: 1px solid var(--line); }
+/* a Settings panel's Save changes button, and the note beside it while a change there isn't saved yet */
+.btn-row.save { align-items: center; column-gap: 14px; padding-top: 4px; }
+.unsaved { font-size: 14px; font-weight: 600; color: var(--ink-2); }
 
 .form { display: grid; gap: 16px; }
 .field { display: grid; gap: 6px; min-width: 0; }
