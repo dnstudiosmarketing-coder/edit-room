@@ -14,6 +14,7 @@ A small web app for DN Studios' video editors and the people who run the team. (
 - Tapping a picture (anyone's, for an admin; the leaderboard, for editors) shows it full size.
 - Each editor has a **Videos** page listing every video they have submitted, playable in the app; an admin can open anyone's from the Editors screen.
 - **Day or night**: under Your account (tap your name at the top), anyone can pick Day, Night, or Same as phone. The choice stays on that phone.
+- **Uploads to Google Drive**: once an admin connects the studio's Google Drive (Settings → Google Drive) and picks the folders editors may use, an editor submits by uploading the finished video straight into one of those folders, from their phone or computer. The folder named like the brief's category is chosen for them. The video goes from the editor's device to Google a piece at a time, with a progress bar; if the line drops it carries on where it stopped, and if the app is closed part way, choosing the same video again carries on too (for up to a week). When it's all there, the brief is submitted with the file's link and the file can be watched by anyone with its link, so it plays in the app. Pasting a Drive link still works, and is the only way while Drive isn't connected.
 - **Payment details**: each editor adds their full name (as on their bank account), phone number, bank and 10-digit account number under Your account, and sees a reminder on their home screen until they do. An admin finds them under **Profile** on the Editors screen, with a button that copies the account number; when an editor's bank or account number changed in the last 30 days, the profile says so and where pay went before. Only the editor and the admins can read them.
 
 It opens from a link on any phone or computer and can be added to the home screen like an app.
@@ -28,8 +29,9 @@ It opens from a link on any phone or computer and can be added to the home scree
 | The data | A Supabase project (`edit-room`, region us-west-1) | PostgreSQL. All rules live in `db/schema.sql`. |
 | Sign-in | The app's own usernames and passwords | Created by an admin inside the app. Supabase Auth is not used. |
 | Notifications | A Supabase Edge Function, `dn-push` (`supabase/functions/dn-push/`) | Sends Web Push messages. The database nudges it; a timer (pg_cron, every minute) catches anything missed and notices deadlines. |
+| Drive uploads | A Supabase Edge Function, `dn-drive` (`supabase/functions/dn-drive/`), and a Google Cloud project on the studio's Google account | Connects the studio's Drive and hands out upload addresses. The video itself goes from the editor's browser straight to Google. |
 
-Files at the top level (`index.html`, `app.js`, `theme.js`, `styles.css`, `fonts.css`, `fonts/`, `config.js`, `sw.js`, `manifest.webmanifest`, icons) are the app itself. `db/` holds the database script, `supabase/functions/dn-push/` the notification sender. `test/` holds the checks.
+Files at the top level (`index.html`, `app.js`, `theme.js`, `styles.css`, `fonts.css`, `fonts/`, `config.js`, `sw.js`, `manifest.webmanifest`, icons) are the app itself; `drive-folders.html` and `drive-folders.js` are the page where an admin picks Drive folders in Google's own picker. `db/` holds the database script, `supabase/functions/dn-push/` the notification sender and `supabase/functions/dn-drive/` the Drive uploader. `test/` holds the checks.
 
 ### Notifications, in short
 
@@ -38,6 +40,16 @@ A phone that allows notifications leaves its push address in `app.push_subs` (be
 Nothing secret passes through anyone's hands. The nudge carries `app.meta.push_secret`, made inside the database; the sender checks it against the same row. The sender makes its own signing keys on its first run and keeps them in `app.meta`; phones get only the public half, through `er_state`. The sender connects to the database with `SUPABASE_DB_URL`, which Supabase gives every edge function. It is deployed with JWT checks off, because it checks the secret itself.
 
 On the live project, `app.meta.push_url` holds the sender's address and `app.meta.push_contact` the contact shown to push services; both are left empty in `db/schema.sql`, so a local or test database never sends anything.
+
+### Google Drive uploads, in short
+
+The app asks Google for Drive's narrowest permission, `drive.file`: it can see the folders an admin picks in Google's folder picker and the files it puts there, and nothing else in the Drive. Google calls that permission non-sensitive, so the studio's Google Cloud project needs no review by Google.
+
+- **Connecting.** Settings → Connect Google Drive asks `dn-drive` for Google's sign-in address, with a one-time code (`app.drive_states`, good for 15 minutes) tying Google's answer to that admin. Google sends the admin back to `dn-drive`, which trades the answer for a lasting key (Google's refresh token) and keeps it in `app.drive`, then sends the admin back to the app (`?drive=connected`, or why not). Connecting again or disconnecting closes the old connection; the row stays. If Google ends it (someone takes the app's access away in their Google account), the next call notices, the connection is marked ended, and Settings asks to connect again.
+- **Folders.** Add folders opens `drive-folders.html`, a page of its own so the rest of the app can keep refusing outside scripts. Picking folders there is what lets the app put files in them. `dn-drive` checks each one with Google before it joins `app.drive_folders`; taking one off the list leaves it in Drive.
+- **An upload.** `dn-drive` checks the brief is the editor's and still in progress, asks Google for an upload address in the chosen folder (sending the editor page's origin, so Google lets that page send to it) and records it in `app.uploads`. The browser sends 8 MB pieces straight to Google; Google says after each how much it has. After a dropped line the browser asks `dn-drive` how much arrived and carries on; the address lasts a week, and the phone keeps it (`editroom.upload.<brief>`) so closing the app doesn't lose the upload. When it's all there, `dn-drive` checks the file in Drive is that upload's (by a mark it put on the file, its folder and its size), lets anyone with the link view it, and submits the brief with `er_submit`, so the admin is pinged as for any submission. The file is named after the brief and the editor, like `Proxan video 13 (Ada Obi).mp4`.
+
+What Google issued the studio is kept in two places. The OAuth client's secret is an Edge Function secret, `GOOGLE_CLIENT_SECRET`, so the database alone opens nothing. The rest isn't secret and is kept in `app.meta`: `google_client_id` (the OAuth client, type Web application), `google_api_key` (an API key restricted to the Google Picker API and to `https://dnstudiosmarketing-coder.github.io/*` and `https://docs.google.com/*`) and `google_app_id` (the Cloud project's number); the last two are for the folder picker. Function settings of the same names (`GOOGLE_CLIENT_ID`, `GOOGLE_API_KEY`, `GOOGLE_APP_ID`) take their place if set. `dn-drive` works out its own address from the `SUPABASE_URL` Supabase gives it (`https://nzrsxjmkucceqakusjyw.supabase.co/functions/v1/dn-drive`), or takes `DRIVE_SELF_URL`. In Google Cloud, that address is the client's authorized redirect URI, `nzrsxjmkucceqakusjyw.supabase.co` is an authorized domain, `https://dnstudiosmarketing-coder.github.io` an authorized JavaScript origin, the Google Drive API and Google Picker API are turned on, and the app is published ("In production"): one left in Testing loses its connection after 7 days. Without the client's id and secret, Connect Google Drive says Drive isn't set up yet.
 
 ### The look, in short
 
@@ -66,7 +78,9 @@ Nothing in the database ever removes a row. Sessions are revoked, projects and l
 
 If `db/schema.sql` changed, apply the changed statements to the Supabase project as a migration. The file is written so the whole of it can be run again safely. If a function's list of arguments changes, the old version has to be removed by hand first, or the web API will see two functions with one name.
 
-If `supabase/functions/dn-push/` changed, deploy it again as the `dn-push` edge function, with JWT checks off.
+If `supabase/functions/dn-push/` changed, deploy it again as the `dn-push` edge function, with JWT checks off. The same goes for `supabase/functions/dn-drive/` and the `dn-drive` edge function.
+
+`drive-folders.html` and `drive-folders.js` are left out of the offline helper's list in `sw.js` on purpose: Google's picker needs a connection anyway. They load `theme.js`, `fonts.css` and `styles.css` with the same `?v=` number as `index.html`; raise theirs too.
 
 ## Running the checks
 
@@ -82,6 +96,12 @@ The notification sender is checked end to end against the real stack, with a loc
 
 ```
 ER_BACKEND=real POSTGREST=/path/to/postgrest node push.test.mjs
+```
+
+The Drive upload is checked the same way, against the real stack, with Google stood in for by `google-fake.mjs` (sign-in, Drive's file calls and resumable uploads that answer a browser the way Google's do, and can drop the line part way through a piece), in code and in a real browser:
+
+```
+ER_BACKEND=real POSTGREST=/path/to/postgrest node drive.test.mjs
 ```
 
 The browser run needs Playwright: `npm install playwright && npx playwright install chromium` (or point `GLOBAL_MODULES` at a folder that already has it).
@@ -110,4 +130,5 @@ ER_BACKEND=real POSTGREST=/path/to/postgrest node deploy-shape.mjs   # pages in 
 - The `pg_net` extension lets the database nudge the notification sender; `pg_cron` runs `app.notice_tick()` every minute (job `dn-notices`). To see what was sent: `select kind, title, result, created_at from app.outbox order by created_at desc limit 20;` and, for reminders, the same from `app.reminders`.
 - pg_cron writes one line to its own log, `cron.job_run_details`, for every run: about 1,440 a day, very roughly 80 MB a year. That is pg_cron's diary, not the team's records. If the database ever nears the free plan's size limit, clear the old lines in the SQL editor: `delete from cron.job_run_details where end_time < now() - interval '7 days';`
 - **Notifications stopped?** Check the job is there (`select * from cron.job`), that `app.meta.push_url` is set, and the `dn-push` function's logs in the Supabase dashboard.
+- **Uploads stopped?** Settings → Google Drive says if Google ended the connection; Connect again fixes it. Otherwise check the `dn-drive` function's logs, that its secrets are set, and that the Google Cloud project is still published. What happened to each upload is in `app.uploads` (`result`), and every connection in `app.drive`.
 - The font (Barlow) is served from `fonts/` under the SIL Open Font License; the licence text is in that folder.

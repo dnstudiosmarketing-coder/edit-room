@@ -220,12 +220,84 @@ create index if not exists reminders_sent_by on app.reminders(sent_by);
 alter table app.meta add column if not exists details_ask_at timestamptz;      -- when an admin last sent the payment details reminder
 alter table app.meta add column if not exists late_ask_at timestamptz;         -- and the late videos one
 
+-- Uploads to Google Drive. An admin connects the studio's Google Drive in Settings and picks the folders
+-- editors may upload to; an editor then uploads a finished video from their phone or computer straight into
+-- one of them, and the brief is submitted with the file's link. Only the dn-drive function talks to Google,
+-- with Drive's narrowest permission ("drive.file"): the folders the admin picked and the files the app put
+-- there, nothing else. The connection's long-lived key from Google (refresh_token) stays in this schema, out
+-- of reach of the web API; connecting again or disconnecting closes the old connection, and the row stays.
+create table if not exists app.drive (
+  id uuid primary key default gen_random_uuid(),
+  email text check (email is null or char_length(email) <= 320),       -- the Google account it belongs to
+  refresh_token text not null check (char_length(refresh_token) between 10 and 2048),
+  connected_by uuid not null references app.users(id),
+  connected_at timestamptz not null default now(),
+  ended_at timestamptz,
+  ended_by uuid references app.users(id),                              -- empty when Google ended it
+  end_note text check (end_note is null or char_length(end_note) <= 200)
+);
+create unique index if not exists drive_live on app.drive((true)) where ended_at is null;
+create index if not exists drive_connected_by on app.drive(connected_by);
+create index if not exists drive_ended_by on app.drive(ended_by);
+
+-- The folders editors may upload to. Taking one off the list stamps removed_at; the file in Drive is untouched.
+create table if not exists app.drive_folders (
+  id uuid primary key default gen_random_uuid(),
+  folder_id text not null check (folder_id ~ '^[A-Za-z0-9_-]{10,100}$'),  -- Drive's own id for it
+  name text not null check (char_length(name) between 1 and 200),
+  added_by uuid not null references app.users(id),
+  added_at timestamptz not null default now(),
+  removed_at timestamptz,
+  removed_by uuid references app.users(id)
+);
+create unique index if not exists drive_folders_live on app.drive_folders(folder_id) where removed_at is null;
+create index if not exists drive_folders_added_by on app.drive_folders(added_by);
+create index if not exists drive_folders_removed_by on app.drive_folders(removed_by);
+
+-- One-time codes that tie Google's answer to the admin who asked to connect (good for 15 minutes, once).
+create table if not exists app.drive_states (
+  state_hash bytea primary key,
+  user_id uuid not null references app.users(id),
+  back_to text not null check (char_length(back_to) <= 300),          -- the app's address, to send the admin back to
+  created_at timestamptz not null default now(),
+  used_at timestamptz
+);
+create index if not exists drive_states_user on app.drive_states(user_id, created_at desc);
+
+-- Each upload: whose, for which brief, into which folder, and how it ended. session_url is Google's address
+-- for sending this file, good for a week, so an upload cut off part way can carry on where it stopped.
+create table if not exists app.uploads (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references app.projects(id),
+  user_id uuid not null references app.users(id),
+  folder uuid not null references app.drive_folders(id),
+  file_name text not null check (char_length(file_name) between 1 and 300),
+  size bigint not null check (size between 1 and 53687091200),         -- up to 50 GB
+  mime text not null check (char_length(mime) between 3 and 100),
+  session_url text check (session_url is null or char_length(session_url) <= 2000),
+  created_at timestamptz not null default now(),
+  file_id text check (file_id is null or char_length(file_id) <= 200),
+  link text check (link is null or char_length(link) <= 600),
+  done_at timestamptz,
+  result text check (result is null or char_length(result) <= 300)
+);
+create index if not exists uploads_project on app.uploads(project_id);
+create index if not exists uploads_user on app.uploads(user_id, created_at desc);
+create index if not exists uploads_folder on app.uploads(folder);
+-- What Google issued the studio for this, none of it secret: the OAuth client's id, and the API key and Cloud
+-- project number Google's folder picker needs (the key only works from the app's pages, for the picker). The
+-- client's secret is kept apart, as a secret of the dn-drive function, so this database alone opens nothing.
+alter table app.meta add column if not exists google_client_id text check (google_client_id is null or google_client_id ~ '^[A-Za-z0-9._-]{10,200}$');
+alter table app.meta add column if not exists google_api_key text check (google_api_key is null or google_api_key ~ '^[A-Za-z0-9_-]{20,100}$');
+alter table app.meta add column if not exists google_app_id text check (google_app_id is null or google_app_id ~ '^[0-9]{6,20}$');
+
 -- Row level security is on for every table, with a single rule that lets nobody through. The er_* functions
 -- run as the tables' owner, which the rule does not apply to; any other route to the data is refused.
 do $$
 declare t text;
 begin
-  foreach t in array array['meta', 'users', 'sessions', 'categories', 'projects', 'bonuses', 'featured', 'push_subs', 'outbox', 'details', 'reminders'] loop
+  foreach t in array array['meta', 'users', 'sessions', 'categories', 'projects', 'bonuses', 'featured', 'push_subs', 'outbox', 'details', 'reminders',
+                           'drive', 'drive_folders', 'drive_states', 'uploads'] loop
     execute format('alter table app.%I enable row level security', t);
     if not exists (select 1 from pg_policies where schemaname = 'app' and tablename = t and policyname = 'no_direct_access') then
       execute format('create policy no_direct_access on app.%I for all to public using (false) with check (false)', t);
@@ -363,6 +435,21 @@ create or replace function app.details_of(p_user uuid) returns json language sql
     from app.details d where d.user_id = p_user
    order by d.created_at desc, d.id desc
    limit 1
+$$;
+
+-- What the app is told about Google Drive: whether it's connected, and the folders editors may upload to
+-- (editors only see them while it is). Only admins are told which Google account it is, and whether Google
+-- itself ended the last connection, so they know to connect again.
+create or replace function app.drive_info(p_admin boolean) returns json language sql stable set search_path = '' as $$
+  with last as (select d.* from app.drive d order by d.connected_at desc, d.id desc limit 1)
+  select json_build_object(
+    'on', coalesce((select l.ended_at is null from last l), false),
+    'email', case when p_admin then (select l.email from last l where l.ended_at is null) end,
+    'lost', case when p_admin then coalesce((select l.ended_at is not null and l.ended_by is null from last l), false) end,
+    'folders', case when p_admin or exists (select 1 from last l where l.ended_at is null)
+                    then coalesce((select json_agg(json_build_object('id', f.id, 'name', f.name) order by lower(f.name), f.id)
+                                     from app.drive_folders f where f.removed_at is null), '[]'::json)
+                    else '[]'::json end)
 $$;
 
 -- ---------------------------------------------------------------- phone notifications (private)
@@ -786,7 +873,8 @@ begin
                             'avAt', app.ms(u.avatar_at), 'phones', (select count(*) from app.push_subs s where s.user_id = u.id and s.gone_at is null),
                             'details', app.details_of(u.id)),
     'settings', json_build_object('delivery', m.delivery_hours, 'grace', m.grace_hours, 'target', m.weekly_target, 'currency', m.currency, 'tz', m.tz, 'bonus', case when adm then m.bonus_default end,
-                                  'push', m.vapid_public, 'picAsk', app.ms(m.pic_ask_at), 'detailsAsk', app.ms(m.details_ask_at), 'lateAsk', app.ms(m.late_ask_at)),
+                                  'push', m.vapid_public, 'picAsk', app.ms(m.pic_ask_at), 'detailsAsk', app.ms(m.details_ask_at), 'lateAsk', app.ms(m.late_ask_at),
+                                  'drive', app.drive_info(adm)),
     'cats', j_cats, 'users', j_users, 'weeks', j_weeks, 'month', app.ms(mo),
     'board', json_build_object('week', j_bw, 'month', j_bm, 'awards', j_aw), 'featured', j_feat,
     'bonuses', j_bonuses, 'totals', j_totals, 'stats', j_stats, 'horizon', case when adm and since is null then horizon end,
@@ -1289,6 +1377,152 @@ create or replace function public.er_ask_pictures(p_token text) returns json
 language sql security definer set search_path = '' as $$
   select public.er_remind(p_token, 'picture')
 $$;
+
+-- ---------------------------------------------------------------- Google Drive uploads
+-- The dn-drive function calls the app.drive_* functions below over its own database connection; the web API
+-- can't reach them. Each one that acts for someone checks their session token first, as the er_* ones do.
+
+-- An admin asks to connect: a one-time code for Google to hand back, tied to them and to where they came from.
+create or replace function app.drive_begin(p_token text, p_back text) returns text
+language plpgsql set search_path = '' as $$
+declare u app.users; v text := encode(extensions.gen_random_bytes(24), 'hex');
+begin
+  u := app.admin(p_token);
+  if p_back is null or char_length(p_back) > 300 or p_back !~ '^https?://[^[:space:]]+$' then raise exception 'invalid'; end if;
+  if (select count(*) from app.drive_states s where s.user_id = u.id and s.created_at > now() - interval '1 hour') >= 20 then raise exception 'too_many'; end if;
+  insert into app.drive_states(state_hash, user_id, back_to) values (sha256(convert_to(v, 'UTF8')), u.id, p_back);
+  return v;
+end $$;
+
+-- Google's answer comes back with that code: it works once, within 15 minutes, for someone who is still an admin.
+create or replace function app.drive_take(p_state text) returns table(who uuid, back text)
+language sql set search_path = '' as $$
+  update app.drive_states s set used_at = now()
+    from app.users x
+   where s.state_hash = sha256(convert_to(coalesce(p_state, ''), 'UTF8')) and s.used_at is null and s.created_at > now() - interval '15 minutes'
+     and x.id = s.user_id and x.active and x.role = 'admin' and x.removed_at is null
+  returning s.user_id, s.back_to
+$$;
+
+-- The connection Google handed over; it replaces any earlier one.
+create or replace function app.drive_link(p_user uuid, p_email text, p_refresh text) returns uuid
+language plpgsql set search_path = '' as $$
+declare v_id uuid;
+begin
+  if not exists (select 1 from app.users x where x.id = p_user and x.active and x.role = 'admin' and x.removed_at is null) then raise exception 'forbidden'; end if;
+  update app.drive set ended_at = now(), ended_by = p_user, end_note = 'replaced by a newer connection' where ended_at is null;
+  insert into app.drive(email, refresh_token, connected_by) values (left(p_email, 320), p_refresh, p_user) returning id into v_id;
+  return v_id;
+end $$;
+
+-- What Google issued the studio (see app.meta), for the function.
+create or replace function app.drive_config() returns table(client_id text, api_key text, app_id text)
+language sql stable set search_path = '' as $$
+  select m.google_client_id, m.google_api_key, m.google_app_id from app.meta m
+$$;
+
+-- The live connection, which the function trades with Google for a key that lasts an hour.
+create or replace function app.drive_key() returns table(conn uuid, refresh text, account text)
+language sql stable set search_path = '' as $$
+  select d.id, d.refresh_token, d.email from app.drive d where d.ended_at is null
+$$;
+
+-- Google says the connection no longer works: its owner took the app's access away, or it lapsed.
+create or replace function app.drive_lost(p_id uuid, p_why text) returns void
+language sql set search_path = '' as $$
+  update app.drive set ended_at = now(), end_note = left(coalesce(p_why, 'Google ended the connection'), 200) where id = p_id and ended_at is null
+$$;
+
+-- An admin disconnects. The key is handed back so the function can ask Google to forget it as well.
+create or replace function app.drive_unlink(p_token text) returns text
+language plpgsql set search_path = '' as $$
+declare u app.users; v text;
+begin
+  u := app.admin(p_token);
+  update app.drive set ended_at = now(), ended_by = u.id, end_note = 'disconnected' where ended_at is null returning refresh_token into v;
+  return v;
+end $$;
+
+-- Folders an admin picked in Google's folder picker, already checked with Google by the function: [{id, name}].
+-- A folder already on the list keeps its place and takes the name it has in Drive now.
+create or replace function app.drive_add_folders(p_token text, p_folders jsonb) returns int
+language plpgsql set search_path = '' as $$
+declare u app.users; n int;
+begin
+  u := app.admin(p_token);
+  if p_folders is null or jsonb_typeof(p_folders) <> 'array' or jsonb_array_length(p_folders) > 50 then raise exception 'invalid'; end if;
+  update app.drive_folders f set name = left(btrim(e->>'name'), 200)
+    from jsonb_array_elements(p_folders) e
+   where f.folder_id = e->>'id' and f.removed_at is null and btrim(coalesce(e->>'name', '')) <> '' and f.name <> left(btrim(e->>'name'), 200);
+  insert into app.drive_folders(folder_id, name, added_by)
+  select distinct on (e->>'id') e->>'id', left(btrim(e->>'name'), 200), u.id
+    from jsonb_array_elements(p_folders) e
+   where coalesce(e->>'id', '') ~ '^[A-Za-z0-9_-]{10,100}$' and btrim(coalesce(e->>'name', '')) <> ''
+     and not exists (select 1 from app.drive_folders f where f.folder_id = e->>'id' and f.removed_at is null);
+  get diagnostics n = row_count;
+  if (select count(*) from app.drive_folders f where f.removed_at is null) > 100 then raise exception 'full'; end if;
+  return n;
+end $$;
+
+-- Someone starts an upload: for their own brief, still in progress, into a folder on the list, while Drive is
+-- connected. The file is named after the brief and the editor, so it reads well among the others in Drive.
+create or replace function app.drive_start(p_token text, p_project uuid, p_folder uuid, p_size bigint, p_mime text, p_ext text) returns json
+language plpgsql set search_path = '' as $$
+declare u app.users; p app.projects; f app.drive_folders; v_name text; v_id uuid; v_mime text; v_ext text;
+begin
+  u := app.who(p_token);
+  select * into p from app.projects where id = p_project and editor_id = u.id and status = 'active' and not deleted;
+  if not found then raise exception 'not_found'; end if;
+  select * into f from app.drive_folders where id = p_folder and removed_at is null;
+  if not found then raise exception 'no_folder'; end if;
+  if not exists (select 1 from app.drive where ended_at is null) then raise exception 'drive_off'; end if;
+  if p_size is null or p_size < 1 or p_size > 53687091200 then raise exception 'too_big'; end if;
+  v_mime := lower(btrim(coalesce(p_mime, '')));
+  if v_mime = '' then v_mime := 'application/octet-stream'; end if;
+  if v_mime !~ '^(video/[a-z0-9.+-]{1,60}|application/octet-stream)$' then raise exception 'not_video'; end if;
+  v_ext := lower(coalesce(substring(coalesce(p_ext, '') from '^\.?([A-Za-z0-9]{1,8})$'), ''));
+  if (select count(*) from app.uploads x where x.user_id = u.id and x.created_at > now() - interval '1 day') >= 40 then raise exception 'too_many'; end if;
+  v_name := left(p.name, 200) || ' (' || left(u.name, 40) || ')' || case when v_ext <> '' then '.' || v_ext else '' end;
+  insert into app.uploads(project_id, user_id, folder, file_name, size, mime) values (p.id, u.id, f.id, v_name, p_size, v_mime) returning id into v_id;
+  return json_build_object('upload', v_id, 'name', v_name, 'folder', f.folder_id, 'mime', v_mime, 'brief', p.name, 'editor', u.name);
+end $$;
+
+create or replace function app.drive_session(p_upload uuid, p_url text) returns void
+language sql set search_path = '' as $$
+  update app.uploads set session_url = p_url where id = p_upload and done_at is null
+$$;
+
+-- One of the caller's own uploads, for carrying on with it or finishing it.
+create or replace function app.drive_upload(p_token text, p_upload uuid) returns json
+language plpgsql set search_path = '' as $$
+declare u app.users; x app.uploads; f app.drive_folders;
+begin
+  u := app.who(p_token);
+  select * into x from app.uploads where id = p_upload and user_id = u.id;
+  if not found then raise exception 'not_found'; end if;
+  select * into f from app.drive_folders where id = x.folder;
+  return json_build_object('upload', x.id, 'project', x.project_id, 'folder', f.folder_id, 'size', x.size, 'session', x.session_url,
+                           'done', x.done_at is not null, 'link', x.link, 'fresh', x.created_at > now() - interval '6 days');
+end $$;
+
+-- How an upload ended: the file in Drive, and its link once the brief was submitted with it.
+create or replace function app.drive_done(p_upload uuid, p_file text, p_link text, p_result text) returns void
+language sql set search_path = '' as $$
+  update app.uploads set file_id = coalesce(left(p_file, 200), file_id), link = coalesce(left(p_link, 600), link), result = left(p_result, 300),
+         done_at = case when p_link is not null then now() else done_at end
+   where id = p_upload
+$$;
+
+-- An admin takes a folder off the list editors upload to. The folder and what's in it stay in Drive.
+create or replace function public.er_drive_remove_folder(p_token text, p_folder uuid) returns json
+language plpgsql security definer set search_path = '' as $$
+declare u app.users;
+begin
+  u := app.admin(p_token);
+  update app.drive_folders set removed_at = now(), removed_by = u.id where id = p_folder and removed_at is null;
+  if not found then raise exception 'not_found'; end if;
+  return json_build_object('ok', true);
+end $$;
 
 -- The timer, where the database has one (the live project). Locally this does nothing. Once a minute is
 -- soon enough for a deadline, and pg_cron writes a line to cron.job_run_details for every run.

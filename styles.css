@@ -245,6 +245,7 @@ button { cursor: pointer; touch-action: manipulation; }
 }
 .btn-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .btn-row > .grow { flex: 1 1 120px; }
+.btn-row > .wide { flex: 2 1 200px; }      /* a main action with a longer name, beside a short one */
 .btn-row > .full { flex: 1 1 100%; }
 .btn-row.tools { padding-top: 12px; border-top: 1px solid var(--line); }
 /* a Settings panel's Save changes button, and the note beside it while a change there isn't saved yet */
@@ -279,6 +280,15 @@ select.input { appearance: none; -webkit-appearance: none; padding-right: 42px; 
 .option-name { font-weight: 600; overflow-wrap: anywhere; }
 .option:has(input:disabled) { cursor: default; border-style: dashed; }
 .option:has(input:disabled) .option-name { color: var(--ink-3); }
+/* a video on its way to Google Drive: its name, how far it has got, and roughly how long is left */
+.upload { display: grid; gap: 10px; padding: 14px; border-radius: 14px; background: var(--inset); }
+.upload-name { font-weight: 600; overflow-wrap: anywhere; }
+.upload-meter { height: 10px; }
+.upload-meter > i { transition: width .4s linear; }
+.upload-line { font-size: 14.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+@media (prefers-reduced-motion: reduce) { .upload-meter > i { transition: none; } }
+/* the folder picker page: Google's picker opens over it */
+.pick { display: grid; gap: 12px; max-width: 560px; margin: 24px auto 0; }
 /* the reminders in Settings: each one's name over how it stands */
 .rem-list { display: grid; gap: 12px; }
 .rem-list > li { display: grid; gap: 2px; }

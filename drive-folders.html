@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- Google's folder picker runs here, on a page of its own, so the rest of the app can keep refusing outside scripts. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://apis.google.com https://*.gstatic.com; style-src 'self' 'unsafe-inline' https://*.gstatic.com https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https://nzrsxjmkucceqakusjyw.supabase.co https://*.googleapis.com https://*.google.com; frame-src https://docs.google.com https://drive.google.com https://*.google.com; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<meta name="theme-color" content="#E9E9E9" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1C1C1C" media="(prefers-color-scheme: dark)">
+<title>Choose Drive folders</title>
+<link rel="icon" type="image/svg+xml" href="icon.svg">
+<script src="theme.js?v=13"></script>
+<link rel="stylesheet" href="fonts.css?v=13">
+<link rel="stylesheet" href="styles.css?v=13">
+</head>
+<body>
+<header class="top">
+  <div class="wrap top-row">
+    <h1 class="brand"><span class="brand-mark">DN</span> Studios</h1>
+  </div>
+</header>
+<main class="wrap main">
+  <section class="pick" aria-labelledby="pick-title">
+    <h2 class="section-title" id="pick-title">Choose Drive folders</h2>
+    <div class="panel">
+      <p id="pick-status" role="status">Opening your Google Drive…</p>
+      <p class="hint">Pick the folders editors can upload finished videos to. You can choose several at once.</p>
+      <div class="btn-row">
+        <button class="btn primary" type="button" id="pick-again" hidden>Open Google Drive again</button>
+        <a class="btn" href="./" id="pick-back">Back to Settings</a>
+      </div>
+    </div>
+  </section>
+</main>
+<noscript><p class="wrap">This page needs JavaScript switched on in your browser.</p></noscript>
+<script src="config.js?v=13"></script>
+<script src="drive-folders.js?v=13"></script>
+</body>
+</html>

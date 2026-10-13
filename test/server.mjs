@@ -20,7 +20,10 @@ function readBody(req) {
   });
 }
 
-export async function startServer(port = 0) {
+// opts.functions maps a path to a function that takes a web Request and gives back a Response, the way an
+// edge function does (the Drive upload test mounts dn-drive at /functions/v1/dn-drive). opts.html, if given,
+// rewrites each page as it is served (that test points the page's security policy at its stand-in Google).
+export async function startServer(port = 0, opts = {}) {
   const { rpc, sql, raw, close: closeDb } = await createDb();
   const flags = { down: false, delay: 0 };
   const calls = [];
@@ -28,6 +31,16 @@ export async function startServer(port = 0) {
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, "http://x");
+      const fn = opts.functions && opts.functions[url.pathname];
+      if (fn) {
+        if (flags.down) { req.socket.destroy(); return; }
+        const body = req.method === "GET" || req.method === "HEAD" ? undefined : Buffer.from(await readBody(req), "utf8");
+        const out = await fn(new Request("http://" + req.headers.host + req.url, { method: req.method, headers: req.headers, body }));
+        const headers = {};
+        out.headers.forEach((v, k) => { headers[k] = v; });
+        res.writeHead(out.status, headers);
+        return res.end(Buffer.from(await out.arrayBuffer()));
+      }
       if (req.method === "POST" && url.pathname.startsWith("/rest/v1/rpc/")) {
         if (flags.down) { req.socket.destroy(); return; }
         const fn = url.pathname.slice("/rest/v1/rpc/".length);
@@ -63,6 +76,7 @@ export async function startServer(port = 0) {
       if (/^\/(test|db|\.git)(\/|$)/.test(rel)) return send(res, 404, "Not found", "text/plain");
       const file = path.join(SITE, rel);
       if (!file.startsWith(SITE + path.sep) || !fs.existsSync(file) || !fs.statSync(file).isFile()) return send(res, 404, "Not found", "text/plain");
+      if (opts.html && path.extname(file) === ".html") return send(res, 200, opts.html(fs.readFileSync(file, "utf8"), rel), TYPES[".html"]);
       return send(res, 200, fs.readFileSync(file), TYPES[path.extname(file)] || "application/octet-stream");
     } catch (e) {
       try { send(res, 500, { message: String(e && e.message) }); } catch (x) { /* already answered */ }

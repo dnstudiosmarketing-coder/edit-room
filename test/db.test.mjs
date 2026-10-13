@@ -538,6 +538,81 @@ for (let i = 0; i < 10; i++) await det(TT, { p_name: "Tunde Bello", p_account: "
 await fails(det(TT, { p_name: "Tunde Bello", p_account: "2000000000" }), "too_many", "a login can change its details at most 10 times a day");
 ok((await sql("select count(*)::int as n from app.details where user_id = $1", [tunde])).rows[0].n === 10 && (await sql("select count(*)::int as n from app.details where user_id = $1", [ada])).rows[0].n === 4, "every change stays on record");
 
+// ---- Google Drive: an admin connects it and picks folders; editors upload into them (the dn-drive function
+// calls the app.drive_* functions; Google itself is checked in drive.test.mjs)
+const one = async (text, params) => (await sql(text, params)).rows[0];
+let dv = (await rpc("er_state", { p_token: A })).settings.drive;
+ok(dv && dv.on === false && dv.lost === false && dv.folders.length === 0 && dv.email === null, "before it's connected, Drive is off and has no folders", JSON.stringify(dv));
+await fails(sql("select app.drive_begin($1, $2)", [TA, "https://dn.example/edit-room/"]), "forbidden", "only an admin can connect Google Drive");
+await fails(sql("select app.drive_begin($1, $2)", [A, "javascript:alert(1)"]), "invalid", "and only to come back to a real web address");
+const st1 = (await one("select app.drive_begin($1, $2) as s", [A, "https://dn.example/edit-room/"])).s;
+ok(/^[0-9a-f]{48}$/.test(st1), "connecting starts with a one-time code for Google to hand back");
+const took = (await sql("select * from app.drive_take($1)", [st1])).rows;
+ok(took.length === 1 && took[0].who === adminId && took[0].back === "https://dn.example/edit-room/", "Google's answer is tied to the admin who asked, and to where they came from", JSON.stringify(took));
+ok((await sql("select * from app.drive_take($1)", [st1])).rows.length === 0 && (await sql("select * from app.drive_take($1)", ["0".repeat(48)])).rows.length === 0, "the code works once, and a made-up one not at all");
+const st2 = (await one("select app.drive_begin($1, $2) as s", [A, "https://dn.example/edit-room/"])).s;
+await sql("update app.drive_states set created_at = now() - interval '16 minutes' where state_hash = sha256(convert_to($1, 'UTF8'))", [st2]);
+ok((await sql("select * from app.drive_take($1)", [st2])).rows.length === 0, "and only for 15 minutes");
+await fails(sql("select app.drive_link($1, $2, $3)", [ada, "ada@example.com", "refresh-token-ada"]), "forbidden", "a connection can only be an admin's");
+const c1 = (await one("select app.drive_link($1, $2, $3) as id", [adminId, "studio@example.com", "refresh-token-one"])).id;
+dv = (await rpc("er_state", { p_token: A })).settings.drive;
+ok(dv.on === true && dv.email === "studio@example.com" && dv.lost === false, "once connected, the admin sees which Google account it is");
+let edv = (await rpc("er_state", { p_token: TA })).settings.drive;
+ok(edv.on === true && edv.email === null && edv.lost === null && edv.folders.length === 0, "editors are told it's on, but not whose account it is", JSON.stringify(edv));
+const c2 = (await one("select app.drive_link($1, $2, $3) as id", [adminId, "studio@example.com", "refresh-token-two"])).id;
+const conns = (await sql("select id, ended_at is null as live, end_note from app.drive order by connected_at, id")).rows;
+const key = (await sql("select * from app.drive_key()")).rows;
+ok(conns.length === 2 && conns.find((c) => c.id === c1).end_note === "replaced by a newer connection" && conns.find((c) => c.id === c2).live && key.length === 1 && key[0].conn === c2 && key[0].refresh === "refresh-token-two", "connecting again replaces the old connection, which stays on record", JSON.stringify(conns));
+await fails(sql("select app.drive_add_folders($1, $2::jsonb)", [TA, "[]"]), "forbidden", "only an admin picks the folders");
+const picked = [{ id: "1AbCdEfGhIjKlMnOpQr", name: "Proxan" }, { id: "1ZyXwVuTsRqPoNmLkJi", name: " Menoprime " }, { id: "bad id!", name: "Nope" }, { id: "1QqQqQqQqQqQqQqQqQq", name: "  " }];
+ok((await one("select app.drive_add_folders($1, $2::jsonb) as n", [A, JSON.stringify(picked)])).n === 2, "folders that look right are added; ones without a proper id or name are not");
+ok((await one("select app.drive_add_folders($1, $2::jsonb) as n", [A, JSON.stringify([{ id: "1AbCdEfGhIjKlMnOpQr", name: "Proxan videos" }])])).n === 0, "picking a folder again doesn't add it twice");
+dv = (await rpc("er_state", { p_token: A })).settings.drive;
+edv = (await rpc("er_state", { p_token: TA })).settings.drive;
+ok(dv.folders.map((f) => f.name).join() === "Menoprime,Proxan videos" && JSON.stringify(edv.folders) === JSON.stringify(dv.folders) && dv.folders.every((f) => /^[0-9a-f-]{36}$/.test(f.id)), "everyone sees the folders by name, and a folder takes its new name from Drive", JSON.stringify(dv.folders));
+const fProxan = dv.folders.find((f) => f.name === "Proxan videos").id, fMeno = dv.folders.find((f) => f.name === "Menoprime").id;
+ok(!JSON.stringify(edv).includes("1ZyXwVuTsRqPoNmLkJi"), "the app is never told Drive's own folder ids");
+await fails(rpc("er_drive_remove_folder", { p_token: TA, p_folder: fProxan }), "forbidden", "an editor can't take a folder off the list");
+await rpc("er_drive_remove_folder", { p_token: A, p_folder: fProxan });
+await fails(rpc("er_drive_remove_folder", { p_token: A, p_folder: fProxan }), "not_found", "a folder taken off the list is gone from it");
+ok((await rpc("er_state", { p_token: TA })).settings.drive.folders.map((f) => f.name).join() === "Menoprime", "editors no longer see a folder taken off the list");
+// starting an upload
+const db1 = (await rpc("er_log_brief", { p_token: TA, p_name: "Drive upload brief", p_category: ads })).id;
+const start = (tok, project, folder, size, mime, ext) => one("select app.drive_start($1, $2, $3, $4, $5, $6) as s", [tok, project, folder, size, mime, ext]);
+await fails(start(TT, db1, fMeno, 1000, "video/mp4", "mp4"), "not_found", "nobody can upload to someone else's brief");
+await fails(start(TA, db1, fProxan, 1000, "video/mp4", "mp4"), "no_folder", "or into a folder that's off the list");
+await fails(start(TA, db1, fMeno, 60e9, "video/mp4", "mp4"), "too_big", "a file over 50 GB is refused");
+await fails(start(TA, db1, fMeno, 1000, "image/png", "png"), "not_video", "and so is a file that isn't a video");
+const s1 = (await start(TA, db1, fMeno, 123456789, "Video/MP4", ".MP4")).s;
+ok(s1.upload && s1.folder === "1ZyXwVuTsRqPoNmLkJi" && /^Drive upload brief \(.+\)\.mp4$/.test(s1.name) && s1.mime === "video/mp4", "an upload is named after the brief and its editor, for the folder in Drive", JSON.stringify(s1));
+ok((await start(TA, db1, fMeno, 5, "", "")).s.mime === "application/octet-stream", "a file the phone gives no type for is still taken");
+await sql("select app.drive_session($1, $2)", [s1.upload, "https://upload.example/session/1"]);
+const u1 = (await one("select app.drive_upload($1, $2) as u", [TA, s1.upload])).u;
+ok(u1.project === db1 && u1.size === 123456789 && u1.session === "https://upload.example/session/1" && u1.done === false && u1.fresh === true && u1.folder === "1ZyXwVuTsRqPoNmLkJi", "the uploader can pick it up again where it stopped", JSON.stringify(u1));
+await fails(sql("select app.drive_upload($1, $2)", [TT, s1.upload]), "not_found", "nobody else can carry on someone's upload");
+await sql("select app.drive_done($1, $2, $3, $4)", [s1.upload, "file-1", "https://drive.google.com/file/d/file-1/view", "submitted"]);
+ok((await one("select app.drive_upload($1, $2) as u", [TA, s1.upload])).u.done === true, "and how it ended is kept");
+// disconnecting, and Google ending a connection
+await fails(sql("select app.drive_unlink($1)", [TA]), "forbidden", "only an admin can disconnect Drive");
+ok((await one("select app.drive_unlink($1) as r", [A])).r === "refresh-token-two", "disconnecting hands back the key, so Google can be told to forget it");
+edv = (await rpc("er_state", { p_token: TA })).settings.drive;
+ok(edv.on === false && edv.folders.length === 0 && (await rpc("er_state", { p_token: A })).settings.drive.folders.length === 1, "once disconnected, editors see no folders; the admin keeps the list");
+await fails(start(TA, db1, fMeno, 1000, "video/mp4", "mp4"), "drive_off", "and nobody can start an upload");
+const c3 = (await one("select app.drive_link($1, $2, $3) as id", [adminId, "studio@example.com", "refresh-token-three"])).id;
+await sql("select app.drive_lost($1, $2)", [c3, "Google said: invalid_grant"]);
+dv = (await rpc("er_state", { p_token: A })).settings.drive;
+ok(dv.on === false && dv.lost === true, "when Google ends the connection, the admin is told so they can connect again");
+await sql("select app.drive_link($1, $2, $3)", [adminId, "studio@example.com", "refresh-token-four"]);
+dv = (await rpc("er_state", { p_token: A })).settings.drive;
+ok(dv.on === true && dv.lost === false, "and connecting again puts it right");
+await fails(sql("update app.meta set google_api_key = 'has spaces in it, not a key' where id"), "check", "only something shaped like a Google API key is kept");
+await sql("update app.meta set google_client_id = '123456789012-abc.apps.googleusercontent.com', google_api_key = 'AIzaSyA-0123456789abcdefghijklmnopqrstu', google_app_id = '123456789012' where id");
+const gcfg = (await sql("select * from app.drive_config()")).rows[0];
+ok(gcfg.client_id === "123456789012-abc.apps.googleusercontent.com" && gcfg.api_key.startsWith("AIza") && gcfg.app_id === "123456789012" && !JSON.stringify(await rpc("er_state", { p_token: A })).includes("AIza"), "what Google issued is kept for the function, and never sent to the app");
+for (let i = 0; i < 38; i++) await start(TA, db1, fMeno, 1000, "video/mp4", "mp4");
+await fails(start(TA, db1, fMeno, 1000, "video/mp4", "mp4"), "too_many", "one login can start at most 40 uploads a day");
+await rpc("er_delete_project", { p_token: A, p_project: db1 });
+
 // ---- switching a login off, roles, lockout
 const admin2 =(await rpc("er_add_user", { p_token: A, p_name: "Kemi Admin", p_username: "kemi", p_password: "kemi-pass-1", p_role: "admin" })).id;
 const TK = (await rpc("er_login", { p_username: "kemi", p_password: "kemi-pass-1" })).token;
@@ -597,7 +672,8 @@ await rpc("er_logout", { p_token: A });
 await fails(rpc("er_state", { p_token: A }), "auth", "signing out ends the session");
 
 // ---- the tables themselves cannot be reached
-for (const q of ["select * from app.users", "select * from app.projects", "select * from app.featured", "select * from app.outbox", "select * from app.push_subs", "select * from app.details", "select app.details_of(null)","select app.push_keys()", "select app.push_claim(5)", "update app.meta set delivery_hours = 1", "select app.who('x')", "select app.password('aaaaaaaa')", "select app.featured_now()"]) {
+for (const q of ["select * from app.users", "select * from app.projects", "select * from app.featured", "select * from app.outbox", "select * from app.push_subs", "select * from app.details", "select app.details_of(null)","select app.push_keys()", "select app.push_claim(5)", "update app.meta set delivery_hours = 1", "select app.who('x')", "select app.password('aaaaaaaa')", "select app.featured_now()",
+                  "select * from app.drive", "select * from app.uploads", "select * from app.drive_key()", "select app.drive_begin('x', 'https://x.example/')", "select * from app.drive_config()"]) {
   await fails(asAnon(q), "permission denied", "direct access is refused: " + q);
 }
 const pub = await sql("select count(*)::int as n from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname like 'er\\_%' and has_function_privilege('anon', p.oid, 'execute')");

@@ -11,6 +11,7 @@ if (window.top !== window.self) {      // never run inside a frame on someone el
 
 const CFG = window.EDIT_ROOM_CONFIG || {};
 const API = String(CFG.url || "").replace(/\/+$/, "") + "/rest/v1/rpc/";
+const DRIVE = String(CFG.url || "").replace(/\/+$/, "") + "/functions/v1/dn-drive";        // the Google Drive upload function
 const DAY = 864e5, HOUR = 36e5, MIN = 6e4;
 const STAGES = ["Started", "Rough cut", "Polishing"];
 const STAGE_AT = ["16.667%", "50%", "83.333%"];
@@ -27,7 +28,7 @@ const state = {
   online: true, token: null, skew: 0, cursor: null, lastFull: 0, wantFull: false,
   me: { id: null, name: "", username: "", role: "editor", owner: false, av: 0, has: false },
   isAdmin: false,
-  config: { categories: [], weeklyTarget: null, deliveryHours: 24, graceHours: 48, currency: "", tz: "UTC" },
+  config: { categories: [], weeklyTarget: null, deliveryHours: 24, graceHours: 48, currency: "", tz: "UTC", drive: { on: false, email: null, lost: false, folders: [] } },
   prefs: { bonusAmount: null },
   cats: new Map(), users: new Map(), projects: new Map(), bonuses: new Map(),
   board: { week: [], month: [], awards: [] }, weeks: [0, 0, 0, 0, 0, 0], month: 0, totals: { videos: 0, bonus: 0, month: 0 },
@@ -157,6 +158,25 @@ async function call(fn, args) {
   try { return await api(fn, Object.assign({ p_token: state.token }, args || {})); }
   catch (e) { if (e.code === "auth") leave("You've been signed out. Sign in again."); throw e; }
 }
+// The Google Drive upload function (supabase/functions/dn-drive). It answers { error: code } when it refuses,
+// with the same codes the database uses where they mean the same thing.
+async function driveCall(action, args) {
+  const stop = new AbortController(), timer = setTimeout(() => stop.abort(), 30000);
+  let res;
+  try {
+    res = await fetch(DRIVE, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({ action: action, token: state.token }, args || {})),
+      cache: "no-store", credentials: "omit", referrerPolicy: "no-referrer", signal: stop.signal });
+  } catch (e) { throw new ApiError("offline", 0); }
+  finally { clearTimeout(timer); }
+  let body = null;
+  try { body = await res.json(); } catch (e) { /* an empty or unreadable reply */ }
+  if (!res.ok || !body || body.error) {
+    const code = body && typeof body.error === "string" ? body.error : "server";
+    if (code === "auth") leave("You've been signed out. Sign in again.");
+    throw new ApiError(code, res.status);
+  }
+  return body;
+}
 async function run(fn, args) {       // do something, then pull the result back in
   const r = await call(fn, args);
   await sync();
@@ -191,6 +211,21 @@ const ERRORS = {
   bad_account: "Enter your 10-digit account number.",
   too_many: "You've changed your details a lot today. Try again tomorrow.",
 };
+// What can go wrong with Google Drive, said the same way wherever it comes up.
+const DRIVE_ERRORS = {
+  not_set_up: "Google Drive isn't set up for this app yet.",
+  drive_off: "Google Drive isn't connected right now. Paste a Drive link instead, or ask your admin.",
+  drive_lost: "Google ended the Drive connection, so uploads are paused. Your admin needs to connect it again in Settings.",
+  no_folder: "That folder can't be used any more. Pick another one, or ask your admin.",
+  too_big: "That file is too big. Videos can be up to 50 GB.",
+  not_video: "That isn't a video file. Choose the finished video.",
+  too_many: "You've started a lot of uploads today. Try again tomorrow, or paste a Drive link instead.",
+  expired: "That upload went too long without finishing. Start it again.",
+  not_done: "The video didn't arrive in full. Upload it again.",
+  google: "Google Drive didn't answer as expected. Try again in a minute.",
+  offline: "Can't reach Google Drive. Check your connection and try again.",
+};
+const driveErr = (e) => DRIVE_ERRORS[e && e.code] || errText(e);
 const errText = (e) => ERRORS[e && e.code] || "That didn't work. Try again in a moment.";
 async function act(btn, fn, okMsg) {
   if (btn) btn.disabled = true;
@@ -203,6 +238,14 @@ async function act(btn, fn, okMsg) {
 function normDetails(d) {
   if (!d || typeof d !== "object" || !/^[0-9]{10}$/.test(String(d.account))) return null;
   return { name: str(d.name, 80), phone: str(d.phone, 20), bank: str(d.bank, 60), account: String(d.account), at: num(d.at) };
+}
+// Google Drive as the server describes it: connected or not, and the folders editors may upload to. Only an
+// admin is told the account's address, and whether Google ended the last connection.
+function normDrive(d) {
+  const x = d && typeof d === "object" ? d : {};
+  const folders = (Array.isArray(x.folders) ? x.folders : []).filter((f) => f && typeof f.id === "string" && /^[0-9a-f-]{36}$/.test(f.id)).slice(0, 100)
+    .map((f) => ({ id: f.id, name: str(f.name, 200) || "Untitled folder" }));
+  return { on: x.on === true, email: str(x.email, 320) || null, lost: x.lost === true, folders: folders };
 }
 function normProject(r) {
   return {
@@ -231,7 +274,8 @@ function applyState(d) {
     if (!cat.archived) active.push(cat);
   }
   state.config = { categories: active, weeklyTarget: num(s.target), deliveryHours: num(s.delivery) || 24, graceHours: num(s.grace) == null ? 48 : num(s.grace), currency: str(s.currency, 6), tz: str(s.tz, 64) || "UTC",
-    push: typeof s.push === "string" && /^[A-Za-z0-9_-]{86,88}$/.test(s.push) ? s.push : null, picAsk: num(s.picAsk), detailsAsk: num(s.detailsAsk), lateAsk: num(s.lateAsk) };
+    push: typeof s.push === "string" && /^[A-Za-z0-9_-]{86,88}$/.test(s.push) ? s.push : null, picAsk: num(s.picAsk), detailsAsk: num(s.detailsAsk), lateAsk: num(s.lateAsk),
+    drive: normDrive(s.drive) };
   state.prefs = { bonusAmount: amount(s.bonus) };
   state.users = new Map();
   for (const u of Array.isArray(d.users) ? d.users : []) {
@@ -312,7 +356,30 @@ async function enter(token) {
     if (EDITOR_TABS.some((x) => x[0] === e)) ui.etab = e;
   } catch (e) { /* start on the first tab */ }
   authPanel = null;
+  driveReturn();
   render(); plan(); loadPics(); pushRefresh();
+}
+// Coming back from Google (connecting Drive) or from the folder picker page: say how it went, on Settings,
+// and take the note off the address so a reload doesn't say it again.
+function driveReturn() {
+  let q;
+  try { q = new URLSearchParams(location.search); } catch (e) { return; }
+  const r = q.get("drive");
+  if (!r) return;
+  try { history.replaceState(null, "", location.pathname); } catch (e) { /* the note stays in the address */ }
+  if (!state.isAdmin) return;
+  const n = Number(q.get("n")) || 0, usable = Number(q.get("u")) || 0;
+  const added = n === 1 ? "1 folder added. Editors can upload to it now." : n + " folders added. Editors can upload to them now.";
+  const msg = {
+    connected: ["Google Drive connected. Now add the folders editors can upload to.", false],
+    cancelled: ["Google Drive wasn't connected, because the Google sign-in was cancelled.", true],
+    noaccess: ["Google Drive wasn't connected. On Google's screen, tick the box that lets DN Studios use your Drive files, then try again.", true],
+    expired: ["That Google sign-in took too long. Press Connect Google Drive again.", true],
+    failed: ["Google Drive couldn't be connected. Try again in a minute.", true],
+    folders: [n ? added : usable ? "Those folders were already on the list." : "None of those folders could be used. Pick folders you can add files to.", !n && !usable],
+  }[r];
+  ui.view = "admin"; ui.tab = "settings";
+  if (msg) setTimeout(() => toast(msg[0], msg[1]), 0);
 }
 function leave(msg) {
   saveToken(null);
@@ -320,7 +387,8 @@ function leave(msg) {
   state.phase = "login"; state.cursor = null; state.projects = new Map(); state.users = new Map(); state.featured = [];
   state.stats = { editors: new Map(), cats: new Map() }; state.horizon = null; resetHist();
   setPanel = null;          // Settings start afresh for whoever signs in next, with no half-made changes left in them
-  closeSheet(); closePlayer(); render();
+  if (activeUpload) activeUpload.stop();
+  closeSheet(true); closePlayer(); render();
   if (msg) toast(msg, true);
 }
 let picBusy = false;
@@ -867,7 +935,7 @@ function editorCard(x) {
     p.update ? quote("Your last update", p.update) : null,
     metaRow(x),
     h("div", { class: "btn-row" },
-      h("button", { class: "btn primary full", type: "button", dataset: { fk: "submit:" + p.id }, onclick: () => openSubmit(p) }, "Submit with Drive link"),
+      h("button", { class: "btn primary full", type: "button", dataset: { fk: "submit:" + p.id }, onclick: () => openSubmit(p) }, state.config.drive.on && state.config.drive.folders.length ? "Submit video" : "Submit with Drive link"),
       h("button", { class: "btn grow", type: "button", dataset: { fk: "upd:" + p.id }, onclick: () => openUpdate(p) }, "Add update")));
 }
 function doneCard(x) {
@@ -1329,6 +1397,8 @@ function settingsPanel() {
   });
   const showDirty = () => { for (const P of [deadlines, payPanel]) { const d = P.dirty(); P.btn.classList.toggle("primary", d); P.note.hidden = !d; } };
   for (const el of [delivery, grace, target, currency, bonus]) el.addEventListener("input", showDirty);
+  const drive = h("div", { class: "panel", id: "drive-panel" });
+  const driveSection = h("section", { class: "section" }, h("h2", { class: "section-title", text: "Google Drive" }), drive);
   const picStatus = h("p", { class: "hint", id: "pic-status" }), payStatus = h("p", { class: "hint", id: "pay-status" }), lateStatus = h("p", { class: "hint", id: "late-status" });
   const remBox = h("section", { class: "section" },
     h("h2", { class: "section-title", text: "Reminders" }),
@@ -1368,12 +1438,53 @@ function settingsPanel() {
             h("div", { class: "field" }, h("label", { for: "set-currency", text: "Currency symbol" }), currency),
             h("div", { class: "field" }, h("label", { for: "set-bonus", text: "Usual bonus amount" }), bonus, h("p", { class: "hint", text: "Filled in for you when you award a bonus. Only admins see it." })),
             h("div", { class: "field" }, h("label", { for: "set-target", text: "Weekly target per editor (videos)" }), target, h("p", { class: "hint", text: "Optional. Weeks run Monday to Sunday." })))])),
+      driveSection,
       remBox,
       tryBox),
     teamList: teamList, list: list, delivery: delivery, grace: grace, target: target, currency: currency, bonus: bonus, picStatus: picStatus, payStatus: payStatus, lateStatus: lateStatus,
-    showDirty: showDirty,
+    showDirty: showDirty, drive: drive,
   };
   return setPanel;
+}
+// Settings: the studio's Google Drive, and the folders editors may upload to.
+function driveSettings() {
+  const d = state.config.drive;
+  if (!d.on) {
+    return [
+      h("p", { text: d.lost ? "Google ended the Drive connection, so editors can't upload right now. Connect it again to carry on; the folder list is kept."
+        : "Connect the studio's Google Drive and editors can upload finished videos straight into folders you choose, instead of sending links. The app can only see those folders and the videos it puts there." }),
+      d.lost && d.folders.length ? h("p", { class: "hint", text: "Folders on the list: " + d.folders.map((f) => f.name).join(", ") + "." }) : null,
+      h("div", { class: "btn-row" }, h("button", { class: "btn primary", type: "button", id: "drive-connect", dataset: { fk: "drive-connect" }, onclick: (e) => driveConnect(e.currentTarget) }, d.lost ? "Connect again" : "Connect Google Drive"))];
+  }
+  const rows = d.folders.length ? d.folders.map((f) => h("li", null,
+    h("div", { class: "row-main" }, h("span", { class: "row-title", text: f.name })),
+    h("div", { class: "row-actions" }, h("button", { class: "btn small", type: "button", dataset: { fk: "dfolder:" + f.id }, "aria-label": "Remove " + f.name, onclick: (e) => act(e.currentTarget, () => run("er_drive_remove_folder", { p_folder: f.id }), "Folder taken off the list. It stays in your Drive.") }, "Remove"))))
+    : [h("li", { class: "rows-empty", text: "No folders yet. Add the folders editors should upload to." })];
+  return [
+    h("p", null, "Connected to ", h("strong", { text: d.email || "your Google account" }), ". Editors can upload to these folders:"),
+    h("ul", { class: "rows" }, rows),
+    h("p", { class: "hint", text: "Anyone with an uploaded video's link can watch it, like the links editors send now, so it plays in the app. Adding folders works best on a computer." }),
+    h("div", { class: "btn-row" },
+      h("a", { class: "btn primary", id: "drive-add", href: "drive-folders.html", dataset: { fk: "drive-add" } }, "Add folders"),
+      h("button", { class: "btn", type: "button", id: "drive-off", dataset: { fk: "drive-off" }, onclick: () => openDriveOff() }, "Disconnect"))];
+}
+async function driveConnect(btn) {
+  btn.disabled = true;
+  try {
+    const r = await driveCall("connect", { back: location.origin + location.pathname });
+    location.href = r.url;            // Google's own sign-in; it sends the admin back here
+  } catch (e) { toast(driveErr(e), true); btn.disabled = false; }
+}
+function openDriveOff() {
+  formSheet({
+    title: "Disconnect Google Drive", submit: "Disconnect", danger: true,
+    body: [h("p", { text: "Editors won't be able to upload until you connect it again. Videos already uploaded stay in your Drive, and the folder list is kept." })],
+    run: async () => {
+      try { await driveCall("disconnect"); } catch (e) { throw new Oops(driveErr(e)); }
+      await sync();
+      return "Google Drive disconnected";
+    },
+  });
 }
 function teamRow(u) {
   const me = state.me, manage = u.id !== me.id && !u.owner && (u.role !== "admin" || me.owner);
@@ -1406,6 +1517,7 @@ function fillSettings() {
   const last = (at) => (at ? " Last reminded " + stamp(at) + "." : "");
   S.picStatus.textContent = (eds.length - R.picture.ids.length) + " of " + eds.length + " editors have a picture." + last(cfg.picAsk);
   S.payStatus.textContent = (eds.length - R.details.ids.length) + " of " + eds.length + " editors have added theirs." + last(cfg.detailsAsk);
+  S.drive.replaceChildren.apply(S.drive, driveSettings().filter(Boolean));
   S.lateStatus.textContent = (R.overdue.videos ? plural(R.overdue.videos, "video", "videos") + " past the deadline, from " + plural(R.overdue.ids.length, "editor", "editors") + "." : "No videos are past their deadline.") + last(cfg.lateAsk);
 }
 
@@ -1434,11 +1546,12 @@ function sheetClosed() {
   if (el) el.focus({ preventScroll: true });
   returnEl = null; returnKey = null;
 }
-function closeSheet() {
-  if (!sheet.open) return;
+function closeSheet(force) {
+  if (!sheet.open || (sheetHold && force !== true)) return;
   try { sheet.close(); } catch (e) { sheet.removeAttribute("open"); sheetClosed(); }
 }
 sheet.addEventListener("close", sheetClosed);
+sheet.addEventListener("cancel", (e) => { if (sheetHold) e.preventDefault(); });
 sheet.addEventListener("click", (e) => { if (e.target === sheet) closeSheet(); });
 
 // A featured video plays here, on a black screen of its own, in Drive's player. The page's security rules
@@ -1544,7 +1657,236 @@ function openBrief() {
     },
   });
 }
+// Submitting a finished video. With the studio's Google Drive connected, the editor uploads it straight into a
+// folder there; pasting a Drive link always works too.
 function openSubmit(p) {
+  const d = state.config.drive;
+  if (!(d.on && d.folders.length)) return openLinkSubmit(p);
+  let mode = "upload", chosen = null;
+  const before = savedUpload(p.id);
+  const modeBtn = (m, label) => h("button", { type: "button", "aria-pressed": String(m === mode), dataset: { mode: m }, onclick: () => setMode(m) }, label);
+  const seg = h("div", { class: "seg", role: "group", "aria-label": "How to send the video" }, modeBtn("upload", "Upload the video"), modeBtn("link", "Paste a link"));
+  // uploading
+  const folder = h("select", { class: "input", id: "s-folder" }, h("option", { value: "", text: "Choose a folder" }), d.folders.map((f) => h("option", { value: f.id, text: f.name })));
+  folder.value = before && d.folders.some((f) => f.id === before.folder) ? before.folder : guessFolder(p, d.folders);
+  const file = h("input", { class: "vh", id: "s-file", type: "file", accept: "video/*", "aria-label": "Choose the video", tabindex: "-1" });
+  const choose = h("button", { class: "btn", type: "button", id: "s-choose", onclick: () => file.click() }, "Choose the video");
+  const info = h("p", { class: "hint", id: "s-file-info", text: before ? "You started uploading " + before.name + " (" + bytes(before.size) + "). Choose the same video to carry on from where it stopped."
+    : "The finished video, straight from your phone or computer." });
+  file.addEventListener("change", () => {
+    chosen = file.files && file.files[0] ? file.files[0] : null;
+    if (!chosen) return;
+    choose.textContent = "Choose another video";
+    info.textContent = chosen.name + ", " + bytes(chosen.size) + (sameFile(savedUpload(p.id), chosen) ? ". It carries on from where the last upload stopped." : ".");
+    err.hidden = true;
+  });
+  const uploadPane = h("div", { class: "form" }, field("Folder in your admin's Google Drive", folder),
+    h("div", { class: "field" }, h("label", { for: "s-file", text: "Video" }), h("div", { class: "btn-row" }, choose), info, file));
+  // pasting a link
+  const link = h("input", { class: "input", id: "s-link", type: "url", inputmode: "url", autocomplete: "off", autocapitalize: "off", spellcheck: "false", placeholder: "https://drive.google.com/…" });
+  const warn = h("p", { class: "warnline", hidden: true, text: "This doesn't look like a Google Drive link. You can still send it." });
+  link.addEventListener("input", () => { const r = readLink(link.value); warn.hidden = !(r && !r.google); });
+  const linkPane = h("div", { class: "form", hidden: true }, field("Google Drive link", link, "Paste the share link to the finished video, and check that your admin has access to the file. The link can't be changed after you submit."), warn);
+  const note = h("textarea", { class: "input", id: "s-note", maxlength: "300", rows: "3" });
+  // how the upload is going
+  const fill = h("i"), meter = h("div", { class: "meter upload-meter", role: "progressbar", "aria-label": "Upload progress", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": "0" }, fill);
+  const upName = h("p", { class: "upload-name" }), upLine = h("p", { class: "upload-line", id: "s-progress" });
+  const progress = h("div", { class: "upload", hidden: true }, upName, meter, upLine,
+    h("p", { class: "hint", text: "Keep this screen open until it finishes. If the connection drops, it carries on from where it stopped." }));
+  const err = h("p", { class: "error", role: "alert", hidden: true });
+  const go = h("button", { class: "btn primary grow wide", type: "submit", id: "s-go" }, "Upload and submit");
+  const cancel = h("button", { class: "btn grow", type: "button", id: "s-cancel", onclick: () => (activeUpload ? activeUpload.stop() : closeSheet()) }, "Cancel");
+  const fields = h("div", { class: "form" }, seg, uploadPane, linkPane, field("Note for your admin (optional)", note));
+  const form = h("form", { class: "form", novalidate: true, oninput: () => { err.hidden = true; }, onsubmit: (e) => { e.preventDefault(); submit(); } },
+    h("p", null, h("strong", { text: p.name })), fields, progress, err, h("div", { class: "btn-row" }, go, cancel));
+  function setMode(m) {
+    mode = m;
+    for (const b of seg.children) b.setAttribute("aria-pressed", String(b.dataset.mode === m));
+    uploadPane.hidden = m !== "upload"; linkPane.hidden = m !== "link";
+    go.textContent = m === "upload" ? "Upload and submit" : "Submit project";
+    err.hidden = true;
+  }
+  const fail = (msg) => { err.textContent = msg; err.hidden = false; };
+  async function submit() {
+    if (activeUpload || go.disabled) return;
+    err.hidden = true;
+    if (mode === "link") {
+      const r = readLink(link.value);
+      if (!r) return fail("Paste the full Google Drive link to your finished video.");
+      go.disabled = true;
+      try { await run("er_submit", { p_project: p.id, p_link: r.href, p_note: note.value.trim() }); closeSheet(); toast("Submitted. It's now in your admin's inbox."); }
+      catch (ex) { fail(errText(ex)); go.disabled = false; }
+      return;
+    }
+    if (!folder.value) return fail("Choose the folder to upload to.");
+    if (!chosen) return fail("Choose the video to upload.");
+    try { localStorage.setItem("editroom.driveFolder", folder.value); } catch (e) { /* the folder isn't remembered for next time */ }
+    await upload(chosen, folder.value);
+  }
+  async function upload(f, where) {
+    const total = f.size, ctl = new AbortController();
+    let sent = 0, since = Date.now(), from = 0;
+    const show = (n, words) => {
+      if (n != null) sent = n;
+      const pct = Math.min(100, Math.floor((100 * sent) / total));
+      fill.style.width = pct + "%";
+      meter.setAttribute("aria-valuenow", String(pct));
+      upLine.textContent = words || bytes(sent) + " of " + bytes(total) + " uploaded (" + pct + "%)" + timeLeft();
+    };
+    const timeLeft = () => {
+      const secs = (Date.now() - since) / 1000, rate = (sent - from) / secs;
+      if (secs < 8 || !(rate > 0)) return "";
+      const left = (total - sent) / rate;
+      return left >= 90 ? ", about " + Math.round(left / 60) + " min left" : left > 15 ? ", about a minute left" : "";
+    };
+    activeUpload = { stop: () => ctl.abort() };
+    sheetHold = true; holdAwake(true);
+    fields.hidden = true; progress.hidden = false; go.hidden = true; err.hidden = true; cancel.textContent = "Stop upload";
+    upName.textContent = f.name + ", " + bytes(total);
+    show(0, "Getting ready…");
+    try {
+      // carry on with the upload this video already started, if Google still has it; otherwise start one
+      let up = null, offset = 0;
+      const prev = savedUpload(p.id);
+      if (prev && sameFile(prev, f) && prev.folder === where) {
+        try {
+          const st = await driveCall("status", { upload: prev.upload });
+          up = prev; offset = st.done || st.complete ? total : Number(st.offset) || 0;
+        } catch (e) {
+          if (e.code === "offline") throw e;
+          keepUpload(p.id, null);
+        }
+      }
+      if (!up) {
+        const r = await driveCall("start", { project: p.id, folder: where, size: total, type: f.type || "", ext: (/\.([A-Za-z0-9]{1,8})$/.exec(f.name) || [])[1] || "" });
+        up = { upload: r.upload, url: r.url, name: f.name, size: total, modified: f.lastModified, folder: where, at: Date.now() };
+        keepUpload(p.id, up);
+      }
+      from = offset; since = Date.now();
+      show(offset);
+      const made = await sendPieces(up, f, offset, (n) => show(n), () => show(null, "The connection dropped. Trying again…"), ctl.signal);
+      show(total, "Checking the video in Drive…");
+      await driveCall("finish", { upload: up.upload, file: made || undefined, note: note.value.trim() });
+      keepUpload(p.id, null);
+      activeUpload = null; sheetHold = false; holdAwake(false);
+      closeSheet(true);
+      toast("Uploaded and submitted. The video is in your admin's Google Drive.");
+      sync();
+    } catch (e) {
+      activeUpload = null; sheetHold = false; holdAwake(false);
+      if (!form.isConnected) return;            // the sheet has gone (signed out)
+      fields.hidden = false; progress.hidden = true; go.hidden = false; cancel.textContent = "Cancel";
+      if (e.code === "expired") keepUpload(p.id, null);
+      if (e.code === "stopped") {
+        go.textContent = "Carry on uploading";
+        info.textContent = "Upload stopped at " + bytes(sent) + " of " + bytes(total) + ". Press Carry on uploading, or come back later and choose the same video.";
+        return;
+      }
+      go.textContent = "Try again";
+      fail(driveErr(e));
+    }
+  }
+  openSheet("Submit project", [form]);
+}
+const UPLOAD_PIECE = 8 * 1024 * 1024;        // a video goes to Google a piece at a time; Google asks for multiples of 256 KB
+let activeUpload = null, sheetHold = false;   // while a video uploads, its sheet stays open until the upload is stopped
+// The upload this brief started on this phone, kept so it can carry on after the app is closed. Google keeps
+// an unfinished upload for a week.
+const upKey = (pid) => "editroom.upload." + pid;
+function savedUpload(pid) {
+  try {
+    const v = JSON.parse(localStorage.getItem(upKey(pid)) || "null");
+    return v && typeof v.upload === "string" && typeof v.url === "string" && Date.now() - Number(v.at) < 6 * DAY ? v : null;
+  } catch (e) { return null; }
+}
+function keepUpload(pid, v) {
+  try { if (v) localStorage.setItem(upKey(pid), JSON.stringify(v)); else localStorage.removeItem(upKey(pid)); }
+  catch (e) { /* carrying on after the app is closed won't be offered */ }
+}
+const sameFile = (v, f) => !!v && !!f && v.name === f.name && v.size === f.size && v.modified === f.lastModified;
+function bytes(n) {
+  if (n < 1e6) return (n > 0 ? Math.max(1, Math.round(n / 1e3)) : 0) + " KB";
+  if (n < 1e9) return (n < 1e7 ? (n / 1e6).toFixed(1) : Math.round(n / 1e6)) + " MB";
+  return (n / 1e9).toFixed(n < 1e10 ? 2 : 1) + " GB";
+}
+// The folder named like the brief's category, else the one this editor used last, else none: they choose.
+function guessFolder(p, folders) {
+  const cat = catOf(p).name.toLowerCase();
+  const byCat = folders.find((f) => f.name.toLowerCase() === cat) || folders.find((f) => cat.length > 2 && f.name.toLowerCase().includes(cat));
+  if (byCat && catOf(p).id) return byCat.id;
+  let last = null;
+  try { last = localStorage.getItem("editroom.driveFolder"); } catch (e) { /* nothing remembered */ }
+  return folders.some((f) => f.id === last) ? last : "";
+}
+// Sends the video from where Google's copy ends, a piece at a time. Each piece says where it starts; Google
+// answers 308 with how much it has, or 200 once it has the lot. When the line drops, it waits a little longer
+// each time, asks how much arrived, and carries on from there.
+async function sendPieces(up, f, offset, onSent, onWait, signal) {
+  let tries = 0;
+  for (;;) {
+    if (signal.aborted) throw new ApiError("stopped", 0);
+    if (offset >= f.size) return null;            // Google has it all; the function finds the file
+    const end = Math.min(offset + UPLOAD_PIECE, f.size), at = offset;
+    let r = null;
+    try { r = await putPiece(up.url, f.slice(at, end), at, f.size, (n) => onSent(at + n), signal); }
+    catch (e) { if (e.code === "stopped") throw e; }
+    if (r && r.status === 308) {
+      tries = 0;
+      const m = /bytes=0-(\d+)/.exec(r.range || "");
+      offset = m ? Number(m[1]) + 1 : end;
+      onSent(offset);
+      continue;
+    }
+    if (r && (r.status === 200 || r.status === 201)) {
+      let made = null;
+      try { made = JSON.parse(r.text); } catch (e) { /* the function will find it */ }
+      return made && typeof made.id === "string" ? made.id : null;
+    }
+    if (r && (r.status === 404 || r.status === 410)) throw new ApiError("expired", r.status);
+    if (++tries > 8) throw new ApiError(r ? "google" : "offline", r ? r.status : 0);
+    onWait(tries);
+    await pause(Math.min(30000, 1000 * 2 ** tries), signal);
+    try {
+      const st = await driveCall("status", { upload: up.upload });
+      offset = st.done || st.complete ? f.size : Number(st.offset) || 0;
+    } catch (e) {
+      if (e.code !== "offline" && e.code !== "google" && e.code !== "server") throw e;      // still no line: try the piece again
+    }
+  }
+}
+function putPiece(url, blob, from, total, onSent, signal) {
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    const quit = () => x.abort();
+    x.open("PUT", url);
+    x.timeout = 180000;
+    x.setRequestHeader("Content-Range", "bytes " + from + "-" + (from + blob.size - 1) + "/" + total);
+    x.upload.onprogress = (e) => onSent(e.loaded);
+    x.onload = () => { signal.removeEventListener("abort", quit); resolve({ status: x.status, range: x.getResponseHeader("Range"), text: x.responseText }); };
+    x.onerror = x.ontimeout = () => { signal.removeEventListener("abort", quit); reject(new ApiError("offline", 0)); };
+    x.onabort = () => reject(new ApiError("stopped", 0));
+    signal.addEventListener("abort", quit, { once: true });
+    x.send(blob);
+  });
+}
+const pause = (ms, signal) => new Promise((resolve, reject) => {
+  const t = setTimeout(resolve, ms);
+  signal.addEventListener("abort", () => { clearTimeout(t); reject(new ApiError("stopped", 0)); }, { once: true });
+});
+// Keeps the screen on while a video uploads, where the phone allows it; a sleeping phone stops sending.
+let wakeLock = null, wantAwake = false;
+async function holdAwake(on) {
+  wantAwake = on;
+  try {
+    if (on && !wakeLock && navigator.wakeLock && document.visibilityState === "visible") {
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => { wakeLock = null; });
+    } else if (!on && wakeLock) { const l = wakeLock; wakeLock = null; await l.release(); }
+  } catch (e) { /* the screen may sleep; the upload carries on when it's back */ }
+}
+document.addEventListener("visibilitychange", () => { if (wantAwake && document.visibilityState === "visible") holdAwake(true); });
+window.addEventListener("beforeunload", (e) => { if (sheetHold) { e.preventDefault(); e.returnValue = ""; } });
+function openLinkSubmit(p) {
   const link = h("input", { class: "input", id: "s-link", type: "url", inputmode: "url", autocomplete: "off", autocapitalize: "off", spellcheck: "false", placeholder: "https://drive.google.com/…" });
   const warn = h("p", { class: "warnline", hidden: true, text: "This doesn't look like a Google Drive link. You can still send it." });
   const note = h("textarea", { class: "input", id: "s-note", maxlength: "300", rows: "3" });

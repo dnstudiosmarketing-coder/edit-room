@@ -47,7 +47,7 @@ const site = await listen((req, res) => {
   if (/^\/(test|db|\.git)\//.test(rel) || !file.startsWith(SITE + path.sep) || !fs.existsSync(file) || !fs.statSync(file).isFile()) { missing.push(rel); res.writeHead(404); return res.end("Not found"); }
   let body = fs.readFileSync(file);
   // the page only allows calls to its own address and the live database; let it reach this run's stand-in instead
-  if (rel === "/index.html") body = Buffer.from(body.toString("utf8").replace(/connect-src 'self' https:\/\/[a-z0-9.-]+;/, "connect-src 'self' " + apiUrl + ";"));
+  if (rel === "/index.html") body = Buffer.from(body.toString("utf8").replace(/connect-src 'self' https:\/\/[a-z0-9-]+\.supabase\.co/, "connect-src 'self' " + apiUrl));
   res.writeHead(200, { "Content-Type": TYPES[path.extname(file)] || "application/octet-stream", "Cache-Control": "max-age=600" });
   res.end(body);
 });
