@@ -453,9 +453,10 @@ function trackBlock(p, editable) {
     : h("div", { class: "stage-labels", "aria-hidden": "true" }, STAGES.map((s, i) => h("span", { class: p.stage === i + 1 ? "now" : null, text: s })));
   return h("div", { class: "timeline" }, track, row);
 }
-// Once the deadline has passed, the grace period drains like a phone battery: green, with charge flowing out
-// to the left, shrinking in step with the time that's left. The bar keeps draining between redraws, and the
-// flow keeps its place when the screen is drawn again. Empty, with a red outline, once it's over.
+// Once the deadline has passed, the grace period drains like a phone battery, on the editor's card and on the
+// admin's: green, with charge flowing out to the left, shrinking in step with the time that's left. The bar
+// keeps draining between redraws, and the flow keeps its place when the screen is drawn again. Empty, with a
+// red outline, once it's over.
 function graceBar(x) {
   const f = x.f, total = f.graceEnd - f.deadline;
   if (x.p.status !== "active" || f.phase === "ontrack" || !(total > 0)) return null;
@@ -1018,6 +1019,7 @@ function pastCard(x) {
     h("div", { class: "clip-top" }, tape(cat), h("span", { class: "pills" }, statusPills(x, true))),
     h("h3", { class: "clip-title", text: p.name }),
     person(uid),
+    graceBar(x),
     trackBlock(p, false),
     p.update ? quote("Latest update", p.update) : null,
     metaRow(x),
@@ -1039,6 +1041,7 @@ function adminCard(x) {
     p.from ? h("p", { class: "hint", text: "Reassigned from " + displayName(p.from) }) : null,
     p.status === "reassigned" && p.movedTo ? h("p", { class: "hint", text: "Now with " + displayName(p.movedTo) }) : null,
     p.status === "active" && p.backAt ? quote("Sent back " + ago(p.backAt), p.backNote || "No reason given.") : null,
+    graceBar(x),
     p.status === "active" ? trackBlock(p, false) : null,
     p.status === "active" && p.update ? quote("Latest update", p.update) : null,
     p.status === "submitted" && p.note ? quote("Note from the editor", p.note) : null,

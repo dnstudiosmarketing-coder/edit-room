@@ -1142,6 +1142,24 @@ try {
   await look(tp2, "48-grace-bar", "the grace period battery");
   const overBar = tp2.locator("article.clip", { hasText: "Reminder test brief" }).locator(".grace.over");
   ok((await overBar.count()) === 1 && /Over/.test(await overBar.innerText()) && (await overBar.locator(".grace-fill").evaluate((f) => f.getBoundingClientRect().width)) === 0, "once the grace period is over, the battery is empty and says so");
+  // the admin sees the same battery, in the inbox and in Projects
+  const levelOf = (loc) => loc.evaluate((g) => { const f = g.querySelector(".grace-fill"), b = g.querySelector(".grace-batt"), cs = getComputedStyle(b); return 100 * f.getBoundingClientRect().width / (b.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)); });
+  await sync(admin);
+  await tab(admin, "inbox");
+  const inboxGrace = admin.locator("article.clip", { hasText: "Grace bar brief" }).locator(".grace");
+  await inboxGrace.waitFor();
+  ok(Math.abs((await levelOf(inboxGrace)) - 75) < 1.5 && /left$/.test(await inboxGrace.locator(".grace-left").innerText()), "the admin's inbox shows the same battery on a video past its deadline", String(await levelOf(inboxGrace)));
+  await admin.locator("article.clip", { hasText: "Grace bar brief" }).scrollIntoViewIfNeeded();
+  await look(admin, "49-grace-admin", "the grace battery for the admin");
+  await tab(admin, "projects");
+  await pick(admin, "#f-status", "late");
+  const projGrace = admin.locator("article.clip", { hasText: "Grace bar brief" }).locator(".grace");
+  await projGrace.waitFor();
+  ok(Math.abs((await levelOf(projGrace)) - 75) < 1.5, "and so does Projects", String(await levelOf(projGrace)));
+  await pick(admin, "#f-status", "over");
+  await admin.locator("article.clip", { hasText: "Reminder test brief" }).locator(".grace.over").waitFor();
+  ok(true, "a video whose grace period is over shows the empty battery to the admin too");
+  await pick(admin, "#f-status", "active");
   await tp2.context().close();
   // the offline helper shows what arrives, with the studio's badge, and buzzes (the lightweight test browser
   // can't show notifications at all, so this one check runs in the full one)
