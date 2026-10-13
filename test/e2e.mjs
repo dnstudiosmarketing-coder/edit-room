@@ -1191,7 +1191,7 @@ try {
   await admin.locator("#save-deadlines").scrollIntoViewIfNeeded();
   await look(admin, "50-grace-unsaved", "a new grace period, not saved yet");
   await admin.locator("#save-deadlines").click();
-  await toast(admin, "Changes saved. Briefs in progress now have a 24-hour grace period.");
+  await toast(admin, "Changes saved. Briefs in progress now have a grace period of 24 hours.");
   ok(true, "saving it says briefs in progress now have the new grace period");
   await sync(tp2);
   await graceLeft(tp2, /^(12h|11h 5\dm) left$/);
@@ -1203,7 +1203,7 @@ try {
   await admin.locator("#toast").waitFor({ state: "hidden" });
   await admin.fill("#set-grace", "48");
   await admin.locator("#set-grace").press("Enter");
-  await toast(admin, "Changes saved. Briefs in progress now have a 48-hour grace period.");
+  await toast(admin, "Changes saved. Briefs in progress now have a grace period of 48 hours.");
   await sync(tp2);
   await graceLeft(tp2, /^(36h|35h 5\dm) left$/);
   ok(Math.abs((await levelOf(gb)) - 75) < 1.5, "setting it back fills the battery back up", String(await levelOf(gb)));

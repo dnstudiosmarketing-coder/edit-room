@@ -1305,7 +1305,7 @@ function settingsPanel() {
       btn.disabled = true;
       try {
         await run("er_save_settings", { p_delivery: v.d, p_grace: v.g, p_target: v.t, p_currency: v.cur, p_bonus: v.b });
-        toast(v.g !== now.g ? "Changes saved. Briefs in progress now have " + (v.g ? "a " + v.g + "-hour grace period." : "no grace period.") : "Changes saved");
+        toast(v.g !== now.g ? "Changes saved. Briefs in progress now have " + (v.g ? "a grace period of " + plural(v.g, "hour", "hours") + "." : "no grace period.") : "Changes saved");
       } catch (ex) { toast(errText(ex), true); }
       btn.disabled = false;
       showDirty();
