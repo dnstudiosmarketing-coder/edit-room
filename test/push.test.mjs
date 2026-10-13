@@ -103,6 +103,12 @@ try {
   body = await r.json();
   const dl = received.filter((x) => x.path.startsWith("/ok/")).map((x) => { try { return JSON.parse(readAs(adaPhone, x.body)); } catch (e) { return null; } }).find(Boolean);
   ok(body.sent === 1 && dl && dl.title === "Deadline passed: Fuel prices explained" && /48-hour grace period/.test(dl.body), "when a deadline passes, the editor's phone is told the grace period has started", JSON.stringify(dl));
+  // a reminder the admin picks in Settings goes out the same way
+  const rm = await db.rpc("er_remind", { p_token: A, p_kind: "details" });
+  r = await call(secret);
+  body = await r.json();
+  const remMsg = received.filter((x) => x.path.startsWith("/ok/")).map((x) => { try { return JSON.parse(readAs(adaPhone, x.body)); } catch (e) { return null; } }).filter(Boolean).find((n) => n.tag === "details");
+  ok(rm.phones === 1 && body.sent === 1 && remMsg && remMsg.title === "Add your payment details" && (await db.sql("select result from app.reminders where kind = 'details'")).rows[0].result === "delivered to 1 phone", "a reminder from the admin reaches the editor's phone, and its delivery is recorded", JSON.stringify(remMsg));
   await db.sql("update app.push_subs set endpoint = replace(endpoint, '/ok/', '/busy/') where user_id = $1", [ids.ada]);
   await db.rpc("er_test_push", { p_token: TA });
   r = await call(secret);
@@ -111,7 +117,7 @@ try {
   ok(body.failed === 1 && busy.waiting && /^will try again: push service said 503 try later$/.test(busy.result) && busy.tries === 1, "a push service that is busy gets the ping again later", JSON.stringify(busy));
   r = await call(secret);
   ok((await r.json()).notices === 0, "not straight away, though");
-  ok(oldSub && received.length === 4, "every message went where it should, and nowhere else (two for the submission, one deadline, one busy try)", received.length + " messages");
+  ok(oldSub && received.length === 5, "every message went where it should, and nowhere else (two for the submission, one deadline, one reminder, one busy try)", received.length + " messages");
 } catch (e) {
   ok(false, "the run stopped early", String(e && e.stack).split("\n").slice(0, 4).join(" / "));
 }

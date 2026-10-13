@@ -504,14 +504,20 @@ try {
   ok(/From bonuses/.test(await ada.locator("#view").innerText()) && /Top performer, week of/.test(await ada.locator("#view").innerText()), "the bonus is added to the editor's earnings");
   await look(ada, "26-earnings-bonus", "earnings with a bonus");
 
-  /* ------------------------------------------------------------ asking everyone for a new picture */
+  /* ------------------------------------------------------------ reminders, starting with a new picture */
   await tab(admin, "settings");
   ok(/^You haven't asked yet\. 0 of 3 editors have a picture\.$/.test(await admin.locator("#pic-status").innerText()), "settings say how many editors have a picture", await admin.locator("#pic-status").innerText());
-  await admin.locator("#ask-pics").click();
-  await sheet(admin).getByRole("button", { name: "Ask everyone" }).waitFor();
-  await look(admin, "26b-ask-pictures", "ask everyone for a picture");
-  await sheet(admin).getByRole("button", { name: "Ask everyone" }).click();
-  await toast(admin, "Asked 3 editors. None of them has notifications on yet.");
+  ok(/^0 of 3 editors have added theirs\.$/.test(await admin.locator("#pay-status").innerText()), "and how many have added payment details", await admin.locator("#pay-status").innerText());
+  await admin.locator("#send-reminder").click();
+  await sheet(admin).getByRole("button", { name: "Send reminder" }).waitFor();
+  ok((await sheet(admin).locator('input[name="rem-kind"]').count()) === 3 && /All 3 editors\./.test(await sheet(admin).innerText()) && /The 3 editors who haven't added theirs\./.test(await sheet(admin).innerText()), "the admin picks from three reminders, each saying who it's for", (await sheet(admin).innerText()).replace(/\n/g, " | "));
+  await look(admin, "26b-reminders", "send a reminder");
+  await sheet(admin).getByRole("button", { name: "Send reminder" }).click();
+  await sheet(admin).getByText("Pick the reminder to send.").waitFor();
+  ok((await sql("select count(*)::int as n from app.reminders")).rows[0].n === 0 && (await sql("select pic_ask_at from app.meta")).rows[0].pic_ask_at === null, "nothing is sent until one is picked");
+  await sheet(admin).locator("label.option", { hasText: "New profile picture" }).click();
+  await sheet(admin).getByRole("button", { name: "Send reminder" }).click();
+  await toast(admin, "Sent to 3 editors. None of them has notifications on yet.");
   await closed(admin);
   ok(/^Asked .+\. 0 of 3 editors have chosen a new picture since\.$/.test(await admin.locator("#pic-status").innerText()), "the admin sees when they asked and how many have answered", await admin.locator("#pic-status").innerText());
   await tab(ada, "work");
@@ -1063,6 +1069,52 @@ try {
   ok((await phonesOf("sam")).length === 0, "and that phone stops getting the admin's notifications");
   await pa.context().close();
   await pe.context().close();
+
+  /* ------------------------------------------------------------ reminders: payment details and late videos */
+  const tp2 = await pushPhone("push tunde", ["tunde.bello", newPw]);
+  await tp2.locator("#who").click();
+  await sheet(tp2).getByRole("button", { name: "Turn on notifications" }).click();
+  await toast(tp2, "Notifications are on for this phone.");
+  await sheet(tp2).getByRole("button", { name: "Cancel" }).click();
+  await closed(tp2);
+  await tab(tp2, "work");
+  await tp2.getByRole("button", { name: "Log a new brief" }).click();
+  await tp2.fill("#b-name", "Reminder test brief");
+  await tp2.selectOption("#b-cat", { label: "Ads" });
+  await sheet(tp2).getByRole("button", { name: "Log brief" }).click();
+  await closed(tp2);
+  const tundeId = (await sql("select id from app.users where username = 'tunde.bello'")).rows[0].id;
+  await sql("update app.projects set started_at = now() - interval '200 hours' where editor_id = $1 and name = 'Reminder test brief'", [tundeId]);
+  const lateNow = (await sql("select p.editor_id, count(*)::int as n from app.projects p join app.users x on x.id = p.editor_id where p.status = 'active' and not p.deleted and p.due_at <= now() and x.active and x.removed_at is null group by p.editor_id")).rows;
+  const tundeLate = lateNow.find((r) => r.editor_id === tundeId);
+  await sync(admin);
+  await tab(admin, "settings");
+  await admin.locator("#late-status", { hasText: "past the deadline" }).waitFor();
+  await admin.locator("#send-reminder").click();
+  await sheet(admin).locator("label.option", { hasText: "Submit late videos" }).click();
+  await sheet(admin).getByRole("button", { name: "Send reminder" }).click();
+  await toast(admin, lateNow.length === 1 ? "Sent to 1 editor. They have notifications on." : "Sent to " + lateNow.length + " editors. 1 of them has notifications on.");
+  await closed(admin);
+  const lateRem = (await sql("select r.title, r.body, x.username from app.reminders r join app.users x on x.id = r.user_id where r.kind = 'overdue'")).rows;
+  ok(lateRem.length === 1 && lateRem[0].username === "tunde.bello" && lateRem[0].title === (tundeLate.n === 1 ? "Submit your video: Reminder test brief" : "Submit your " + tundeLate.n + " late videos"), "the late videos reminder reaches the editor whose video is past its deadline, and names it", JSON.stringify(lateRem));
+  await admin.locator("#send-reminder").click();
+  const payOpt = sheet(admin).locator("label.option", { hasText: "Payment details" });
+  ok(/The 2 editors who haven't added theirs\./.test(await payOpt.innerText()) && /1 of them has notifications on\./.test(await payOpt.innerText()), "the payment details reminder is for the editors who haven't added theirs, and says how many will get a ping", (await payOpt.innerText()).replace(/\n/g, " | "));
+  ok(/Last sent/.test(await sheet(admin).locator("label.option", { hasText: "Submit late videos" }).innerText()), "each reminder says when it was last sent");
+  await payOpt.click();
+  await sheet(admin).getByRole("button", { name: "Send reminder" }).click();
+  await toast(admin, "Sent to 2 editors. 1 of them has notifications on.");
+  await closed(admin);
+  ok((await sql("select count(*)::int as n from app.reminders r join app.users x on x.id = r.user_id where r.kind = 'details' and x.username = 'tunde.bello'")).rows[0].n === 1, "and the editor with notifications on gets it on their phone");
+  await admin.locator("#send-reminder").click();
+  await sheet(admin).locator("label.option", { hasText: "Payment details" }).click();
+  await sheet(admin).getByRole("button", { name: "Send reminder" }).click();
+  await toast(admin, "You sent that reminder a few minutes ago, so nothing new went out.");
+  await closed(admin);
+  ok((await sql("select count(*)::int as n from app.reminders where kind = 'details'")).rows[0].n === 1, "sending the same reminder again straight away sends nothing new");
+  ok(/Last reminded/.test(await admin.locator("#pay-status").innerText()) && /Last reminded/.test(await admin.locator("#late-status").innerText()), "Settings show when each reminder last went out");
+  await look(admin, "47-reminders-settings", "reminders in Settings");
+  await tp2.context().close();
   // the offline helper shows what arrives, with the studio's badge, and buzzes (the lightweight test browser
   // can't show notifications at all, so this one check runs in the full one)
   const full = await chromium.launch({ channel: "chromium" });

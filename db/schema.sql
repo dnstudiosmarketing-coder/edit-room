@@ -198,12 +198,34 @@ create table if not exists app.details (
 );
 create index if not exists details_user on app.details(user_id, created_at desc);
 
+-- Reminders an admin sends from Settings: a new profile picture, payment details, late videos. They wait and
+-- go out like the automatic notifications in app.outbox (the sender takes from both) and are kept the same
+-- way. They have a table of their own because app.outbox's list of kinds is fixed.
+create table if not exists app.reminders (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references app.users(id),
+  kind text not null check (kind in ('picture', 'details', 'overdue')),
+  sent_by uuid references app.users(id),              -- the admin who sent it
+  title text not null check (char_length(title) <= 120),
+  body text not null check (char_length(body) <= 300),
+  created_at timestamptz not null default now(),
+  claimed_at timestamptz,
+  sent_at timestamptz,
+  tries int not null default 0,
+  result text
+);
+create index if not exists reminders_pending on app.reminders(created_at) where sent_at is null;
+create index if not exists reminders_user on app.reminders(user_id);
+create index if not exists reminders_sent_by on app.reminders(sent_by);
+alter table app.meta add column if not exists details_ask_at timestamptz;      -- when an admin last sent the payment details reminder
+alter table app.meta add column if not exists late_ask_at timestamptz;         -- and the late videos one
+
 -- Row level security is on for every table, with a single rule that lets nobody through. The er_* functions
 -- run as the tables' owner, which the rule does not apply to; any other route to the data is refused.
 do $$
 declare t text;
 begin
-  foreach t in array array['meta', 'users', 'sessions', 'categories', 'projects', 'bonuses', 'featured', 'push_subs', 'outbox', 'details'] loop
+  foreach t in array array['meta', 'users', 'sessions', 'categories', 'projects', 'bonuses', 'featured', 'push_subs', 'outbox', 'details', 'reminders'] loop
     execute format('alter table app.%I enable row level security', t);
     if not exists (select 1 from pg_policies where schemaname = 'app' and tablename = t and policyname = 'no_direct_access') then
       execute format('create policy no_direct_access on app.%I for all to public using (false) with check (false)', t);
@@ -387,7 +409,8 @@ begin
   if current_setting('app.poked', true) = '1' then return; end if;
   select * into m from app.meta;
   if m.push_url is null or m.push_secret is null or to_regprocedure('net.http_post(text,jsonb,jsonb,jsonb,integer)') is null then return; end if;
-  if not exists (select 1 from app.outbox o where o.sent_at is null and (o.claimed_at is null or o.claimed_at < now() - interval '2 minutes')) then return; end if;
+  if not exists (select 1 from app.outbox o where o.sent_at is null and (o.claimed_at is null or o.claimed_at < now() - interval '2 minutes'))
+     and not exists (select 1 from app.reminders r where r.sent_at is null and (r.claimed_at is null or r.claimed_at < now() - interval '2 minutes')) then return; end if;
   perform set_config('app.poked', '1', true);
   execute 'select net.http_post(url := $1, body := $2, headers := $3, timeout_milliseconds := 20000)'
     using m.push_url, '{}'::jsonb, jsonb_build_object('Content-Type', 'application/json', 'x-push-secret', m.push_secret);
@@ -400,6 +423,7 @@ begin
   return null;
 end $$;
 create or replace trigger outbox_poke after insert on app.outbox for each statement execute function app.outbox_poke();
+create or replace trigger reminders_poke after insert on app.reminders for each statement execute function app.outbox_poke();
 
 -- Run by the timer every minute: notice deadlines that just passed, and nudge the sender about anything
 -- still waiting (a phone that was off, a push service that was busy).
@@ -428,31 +452,43 @@ language sql set search_path = '' as $$
    where id and vapid_public is null and p_public ~ '^[A-Za-z0-9_-]{86,88}$' and p_private ~ '^[A-Za-z0-9_-]{42,44}$'
 $$;
 
--- Hands the sender a batch of waiting notifications, one row per phone (no phone: one row with no address).
--- Rows taken stay with that sender for 2 minutes; two senders never get the same notification.
+-- Hands the sender a batch of waiting notifications and reminders, one row per phone (no phone: one row with
+-- no address). Rows taken stay with that sender for 2 minutes; two senders never get the same one.
 create or replace function app.push_claim(p_limit int default 100)
 returns table (notice uuid, kind text, project uuid, title text, body text, sub uuid, endpoint text, p256dh text, auth text)
 language plpgsql set search_path = '' as $$
 #variable_conflict use_column
+declare lim int := greatest(1, least(coalesce(p_limit, 100), 500));
 begin
   return query
   with picked as (
     select o.id from app.outbox o
      where o.sent_at is null and (o.claimed_at is null or o.claimed_at < now() - interval '2 minutes')
      order by o.created_at
-     limit greatest(1, least(coalesce(p_limit, 100), 500))
+     limit lim
      for update skip locked),
   marked as (
     update app.outbox o set claimed_at = now(), tries = o.tries + 1
       from picked where o.id = picked.id
-    returning o.id as nid, o.user_id as uid, o.kind as k, o.project_id as pid, o.title as t, o.body as b)
+    returning o.id as nid, o.user_id as uid, o.kind as k, o.project_id as pid, o.title as t, o.body as b),
+  picked_r as (
+    select r.id from app.reminders r
+     where r.sent_at is null and (r.claimed_at is null or r.claimed_at < now() - interval '2 minutes')
+     order by r.created_at
+     limit lim
+     for update skip locked),
+  marked_r as (
+    update app.reminders r set claimed_at = now(), tries = r.tries + 1
+      from picked_r where r.id = picked_r.id
+    returning r.id as nid, r.user_id as uid, r.kind as k, null::uuid as pid, r.title as t, r.body as b),
+  both_ as (select * from marked union all select * from marked_r)
   select m.nid, m.k, m.pid, m.t, m.b, s.id, s.endpoint, s.p256dh, s.auth
-    from marked m left join app.push_subs s on s.user_id = m.uid and s.gone_at is null
+    from both_ m left join app.push_subs s on s.user_id = m.uid and s.gone_at is null
    order by m.nid;
 end $$;
 
--- What happened to one notification. Delivered to any phone, or nobody left to deliver to: done. Refused
--- for another reason: tried again later, five times at most.
+-- What happened to one notification or reminder. Delivered to any phone, or nobody left to deliver to: done.
+-- Refused for another reason: tried again later, five times at most.
 create or replace function app.push_report(p_notice uuid, p_ok uuid[], p_gone uuid[], p_failed int, p_note text default null) returns void
 language plpgsql set search_path = '' as $$
 declare n_ok int := coalesce(array_length(p_ok, 1), 0); n_fail int := greatest(coalesce(p_failed, 0), 0);
@@ -466,6 +502,13 @@ begin
                        when o.tries >= 5 then left('gave up: ' || coalesce(p_note, 'refused'), 200)
                        else left('will try again: ' || coalesce(p_note, 'refused'), 200) end
    where o.id = p_notice and o.sent_at is null;
+  update app.reminders r
+     set sent_at = case when n_ok > 0 or n_fail = 0 or r.tries >= 5 then now() end,
+         result = case when n_ok > 0 then 'delivered to ' || n_ok || case when n_ok = 1 then ' phone' else ' phones' end
+                       when n_fail = 0 then 'no phones'
+                       when r.tries >= 5 then left('gave up: ' || coalesce(p_note, 'refused'), 200)
+                       else left('will try again: ' || coalesce(p_note, 'refused'), 200) end
+   where r.id = p_notice and r.sent_at is null;
 end $$;
 
 -- ---------------------------------------------------------------- sign-in
@@ -743,7 +786,7 @@ begin
                             'avAt', app.ms(u.avatar_at), 'phones', (select count(*) from app.push_subs s where s.user_id = u.id and s.gone_at is null),
                             'details', app.details_of(u.id)),
     'settings', json_build_object('delivery', m.delivery_hours, 'grace', m.grace_hours, 'target', m.weekly_target, 'currency', m.currency, 'tz', m.tz, 'bonus', case when adm then m.bonus_default end,
-                                  'push', m.vapid_public, 'picAsk', app.ms(m.pic_ask_at)),
+                                  'push', m.vapid_public, 'picAsk', app.ms(m.pic_ask_at), 'detailsAsk', app.ms(m.details_ask_at), 'lateAsk', app.ms(m.late_ask_at)),
     'cats', j_cats, 'users', j_users, 'weeks', j_weeks, 'month', app.ms(mo),
     'board', json_build_object('week', j_bw, 'month', j_bm, 'awards', j_aw), 'featured', j_feat,
     'bonuses', j_bonuses, 'totals', j_totals, 'stats', j_stats, 'horizon', case when adm and since is null then horizon end,
@@ -1176,22 +1219,62 @@ begin
   return json_build_object('ok', true, 'phones', k, 'queued', n);
 end $$;
 
--- An admin asks every editor for a new picture: a notification to each phone that allows them, and a
--- reminder on each editor's home screen until they choose one. Asking twice within 10 minutes sends nothing new.
-create or replace function public.er_ask_pictures(p_token text) returns json
+-- An admin sends one of three reminders, each to the editors it concerns:
+--   picture   every editor: a new profile picture (their home screen also asks until they choose one)
+--   details   editors who haven't added payment details (their home screen asks for them too)
+--   overdue   editors with videos past their deadline, named in the message
+-- Editors with notifications on get it on their phone ("phones" counts them). The same reminder sent again
+-- within 10 minutes sends nothing new, and one that concerns nobody sends nothing at all.
+create or replace function public.er_remind(p_token text, p_kind text) returns json
 language plpgsql security definer set search_path = '' as $$
-declare u app.users; m app.meta; ids uuid[]; n int := 0;
+declare u app.users; m app.meta; last timestamptz; ids uuid[]; n int := 0;
 begin
   u := app.admin(p_token);
+  if p_kind is null or p_kind not in ('picture', 'details', 'overdue') then raise exception 'invalid'; end if;
   select * into m from app.meta;
-  select coalesce(array_agg(x.id), '{}') into ids from app.users x where x.role = 'editor' and x.active and x.removed_at is null;
-  if m.pic_ask_at is not null and m.pic_ask_at > now() - interval '10 minutes' then
-    return json_build_object('ok', true, 'editors', coalesce(array_length(ids, 1), 0), 'phones', 0, 'again', true);
+  if p_kind = 'picture' then
+    last := m.pic_ask_at;
+    select coalesce(array_agg(x.id), '{}') into ids from app.users x where x.role = 'editor' and x.active and x.removed_at is null;
+  elsif p_kind = 'details' then
+    last := m.details_ask_at;
+    select coalesce(array_agg(x.id), '{}') into ids from app.users x where x.role = 'editor' and x.active and x.removed_at is null
+       and not exists (select 1 from app.details d where d.user_id = x.id);
+  else
+    last := m.late_ask_at;
+    select coalesce(array_agg(distinct p.editor_id), '{}') into ids from app.projects p join app.users x on x.id = p.editor_id
+     where p.status = 'active' and not p.deleted and p.due_at <= now() and x.active and x.removed_at is null;
   end if;
-  update app.meta set pic_ask_at = now() where id;
-  n := app.notify_many(ids, 'picture', null, 'New profile picture, please', 'Your admin asked everyone to update their profile picture. Tap to add yours.');
-  return json_build_object('ok', true, 'editors', coalesce(array_length(ids, 1), 0), 'phones', n);
+  if coalesce(array_length(ids, 1), 0) = 0 then return json_build_object('ok', true, 'editors', 0, 'phones', 0); end if;
+  if last is not null and last > now() - interval '10 minutes' then
+    return json_build_object('ok', true, 'editors', array_length(ids, 1), 'phones', 0, 'again', true);
+  end if;
+  update app.meta set pic_ask_at = case when p_kind = 'picture' then now() else pic_ask_at end,
+                      details_ask_at = case when p_kind = 'details' then now() else details_ask_at end,
+                      late_ask_at = case when p_kind = 'overdue' then now() else late_ask_at end
+   where id;
+  insert into app.reminders(user_id, kind, sent_by, title, body)
+  select x.id, p_kind, u.id, t.title, t.body
+    from app.users x
+    cross join lateral (
+      select case p_kind when 'picture' then 'New profile picture, please'
+                         when 'details' then 'Add your payment details'
+                         else case when l.n = 1 then 'Submit your video: ' || left(l.name, 90) else 'Submit your ' || l.n || ' late videos' end end as title,
+             case p_kind when 'picture' then 'Your admin asked everyone to update their profile picture. Tap to add yours.'
+                         when 'details' then 'Your admin needs your full name, phone number and bank account to pay you. Tap to add them.'
+                         else case when l.n = 1 then 'It''s past its deadline. Submit it as soon as you can.'
+                                   else 'They''re past their deadline, starting with ' || left(l.name, 80) || '. Submit them as soon as you can.' end end as body
+        from (select count(*)::int as n, (array_agg(p.name order by p.due_at))[1] as name
+                from app.projects p where p.editor_id = x.id and p.status = 'active' and not p.deleted and p.due_at <= now()) l) t
+   where x.id = any(ids) and exists (select 1 from app.push_subs s where s.user_id = x.id and s.gone_at is null);
+  get diagnostics n = row_count;
+  return json_build_object('ok', true, 'editors', array_length(ids, 1), 'phones', n);
 end $$;
+
+-- Asking everyone for a new picture, as copies of the app from before reminders still do.
+create or replace function public.er_ask_pictures(p_token text) returns json
+language sql security definer set search_path = '' as $$
+  select public.er_remind(p_token, 'picture')
+$$;
 
 -- The timer, where the database has one (the live project). Locally this does nothing. Once a minute is
 -- soon enough for a deadline, and pg_cron writes a line to cron.job_run_details for every run.

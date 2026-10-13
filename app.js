@@ -231,7 +231,7 @@ function applyState(d) {
     if (!cat.archived) active.push(cat);
   }
   state.config = { categories: active, weeklyTarget: num(s.target), deliveryHours: num(s.delivery) || 24, graceHours: num(s.grace) == null ? 48 : num(s.grace), currency: str(s.currency, 6), tz: str(s.tz, 64) || "UTC",
-    push: typeof s.push === "string" && /^[A-Za-z0-9_-]{86,88}$/.test(s.push) ? s.push : null, picAsk: num(s.picAsk) };
+    push: typeof s.push === "string" && /^[A-Za-z0-9_-]{86,88}$/.test(s.push) ? s.push : null, picAsk: num(s.picAsk), detailsAsk: num(s.detailsAsk), lateAsk: num(s.lateAsk) };
   state.prefs = { bonusAmount: amount(s.bonus) };
   state.users = new Map();
   for (const u of Array.isArray(d.users) ? d.users : []) {
@@ -1275,13 +1275,16 @@ function settingsPanel() {
     catch (ex) { toast(errText(ex), true); }
   };
   for (const el of [delivery, grace, target, currency, bonus]) el.addEventListener("change", save);
-  const picStatus = h("p", { class: "hint", id: "pic-status" });
-  const picBox = h("section", { class: "section" },
-    h("h2", { class: "section-title", text: "Profile pictures" }),
+  const picStatus = h("p", { class: "hint", id: "pic-status" }), payStatus = h("p", { class: "hint", id: "pay-status" }), lateStatus = h("p", { class: "hint", id: "late-status" });
+  const remBox = h("section", { class: "section" },
+    h("h2", { class: "section-title", text: "Reminders" }),
     h("div", { class: "panel" },
-      h("p", null, "Ask every editor to update their profile picture. Each one gets a reminder on their home screen until they choose a new one, and a notification if they've turned notifications on."),
-      picStatus,
-      h("div", { class: "btn-row" }, h("button", { class: "btn", type: "button", id: "ask-pics", onclick: () => openAskPictures() }, "Ask everyone for a new picture"))));
+      h("p", null, "Remind editors to update their profile picture, add their payment details, or submit videos that are past their deadline. Anyone with notifications on gets it on their phone, and everyone sees it on their home screen."),
+      h("ul", { class: "rem-list" },
+        h("li", null, h("span", { class: "row-title", text: "Profile picture" }), picStatus),
+        h("li", null, h("span", { class: "row-title", text: "Payment details" }), payStatus),
+        h("li", null, h("span", { class: "row-title", text: "Late videos" }), lateStatus)),
+      h("div", { class: "btn-row" }, h("button", { class: "btn", type: "button", id: "send-reminder", onclick: () => openRemind() }, "Send a reminder"))));
   const tryBox = h("section", { class: "section" },
     h("h2", { class: "section-title", text: "Try the editor screen" }),
     h("div", { class: "panel" },
@@ -1311,9 +1314,9 @@ function settingsPanel() {
             h("div", { class: "field" }, h("label", { for: "set-currency", text: "Currency symbol" }), currency),
             h("div", { class: "field" }, h("label", { for: "set-bonus", text: "Usual bonus amount" }), bonus, h("p", { class: "hint", text: "Filled in for you when you award a bonus. Only admins see it." })),
             h("div", { class: "field" }, h("label", { for: "set-target", text: "Weekly target per editor (videos)" }), target, h("p", { class: "hint", text: "Optional. Weeks run Monday to Sunday." }))))),
-      picBox,
+      remBox,
       tryBox),
-    teamList: teamList, list: list, delivery: delivery, grace: grace, target: target, currency: currency, bonus: bonus, picStatus: picStatus,
+    teamList: teamList, list: list, delivery: delivery, grace: grace, target: target, currency: currency, bonus: bonus, picStatus: picStatus, payStatus: payStatus, lateStatus: lateStatus,
   };
   return setPanel;
 }
@@ -1338,10 +1341,13 @@ function fillSettings() {
   put(S.target, cfg.weeklyTarget == null ? "" : String(cfg.weeklyTarget));
   put(S.currency, cfg.currency);
   put(S.bonus, state.prefs.bonusAmount == null ? "" : String(state.prefs.bonusAmount));
-  const eds = Array.from(state.users.values()).filter((u) => u.role === "editor" && u.active);
+  const eds = Array.from(state.users.values()).filter((u) => u.role === "editor" && u.active), R = reminderTargets();
   const fresh = eds.filter((u) => u.has && u.avAt != null && cfg.picAsk != null && u.avAt >= cfg.picAsk).length;
+  const last = (at) => (at ? " Last reminded " + stamp(at) + "." : "");
   S.picStatus.textContent = cfg.picAsk == null ? "You haven't asked yet. " + eds.filter((u) => u.has).length + " of " + eds.length + " editors have a picture."
     : "Asked " + stamp(cfg.picAsk) + ". " + fresh + " of " + eds.length + " editors have chosen a new picture since.";
+  S.payStatus.textContent = (eds.length - R.details.ids.length) + " of " + eds.length + " editors have added theirs." + last(cfg.detailsAsk);
+  S.lateStatus.textContent = (R.overdue.videos ? plural(R.overdue.videos, "video", "videos") + " past the deadline, from " + plural(R.overdue.ids.length, "editor", "editors") + "." : "No videos are past their deadline.") + last(cfg.lateAsk);
 }
 
 /* ---------- dialogs ---------- */
@@ -1687,14 +1693,50 @@ function openVideos(uid) {
   draw();
   if (!done) page();
 }
-function openAskPictures() {
+// Who each reminder would reach right now, from what the admin's app already has. The server works it out
+// again when one is sent.
+function reminderTargets() {
+  const eds = Array.from(state.users.values()).filter((u) => u.role === "editor" && u.active), late = new Map();
+  for (const x of collect()) {
+    const u = state.users.get(x.uid);
+    if (x.p.status === "active" && x.f.phase !== "ontrack" && u && u.active) late.set(x.uid, (late.get(x.uid) || 0) + 1);
+  }
+  const reach = (ids) => ({ ids: ids, phones: ids.filter((id) => { const u = state.users.get(id); return u && u.push; }).length });
+  return {
+    picture: reach(eds.map((u) => u.id)),
+    details: reach(eds.filter((u) => !u.pay).map((u) => u.id)),
+    overdue: Object.assign(reach(Array.from(late.keys())), { videos: Array.from(late.values()).reduce((a, b) => a + b, 0) }),
+  };
+}
+const phonesOn = (n, ph) => n === 1 ? (ph ? "They have notifications on." : "They haven't turned notifications on yet.")
+  : ph ? ph + " of them " + (ph === 1 ? "has" : "have") + " notifications on." : "None of them has notifications on yet.";
+function openRemind() {
+  const T = reminderTargets(), cfg = state.config, eds = (n) => (n === 1 ? "The 1 editor" : "The " + n + " editors");
+  const choices = [
+    ["picture", "New profile picture", T.picture, (n) => (n === 1 ? "Your 1 editor." : "All " + n + " editors.") + " Each sees a note on their home screen until they choose a new picture.", cfg.picAsk, "There are no editors yet."],
+    ["details", "Payment details", T.details, (n) => eds(n) + " who haven't added theirs.", cfg.detailsAsk, "Every editor has added their payment details."],
+    ["overdue", "Submit late videos", T.overdue, (n) => eds(n) + " with " + plural(T.overdue.videos, "video", "videos") + " past the deadline.", cfg.lateAsk, "No videos are past their deadline right now."]];
+  const opts = choices.map(([kind, name, t, who, last, none]) => {
+    const n = t.ids.length;
+    return h("label", { class: "option" },
+      h("input", { type: "radio", name: "rem-kind", id: "rem-" + kind, value: kind, disabled: n === 0 }),
+      h("span", { class: "option-main" },
+        h("span", { class: "option-name", text: name }),
+        h("span", { class: "hint", text: n ? who(n) : none }),
+        n ? h("span", { class: "hint", text: phonesOn(n, t.phones) + (last ? " Last sent " + stamp(last) + "." : "") }) : null));
+  });
   formSheet({
-    title: "Ask everyone for a new picture", submit: "Ask everyone",
-    body: [h("p", { text: "Every editor gets a reminder on their home screen until they choose a new profile picture, and a notification if they've turned notifications on." })],
+    title: "Send a reminder", submit: "Send reminder",
+    body: [
+      h("p", { text: "Pick one. Editors with notifications on get it on their phone, and everyone it's for sees it on their home screen." }),
+      h("div", { class: "options", role: "radiogroup", "aria-label": "Reminder" }, opts)],
     run: async () => {
-      const r = await run("er_ask_pictures");
-      if (r && r.again) return "You asked a few minutes ago, so nothing new was sent.";
-      return "Asked " + plural((r && r.editors) || 0, "editor", "editors") + ". " + ((r && r.phones) ? plural(r.phones, "phone", "phones") + " got a notification." : "None of them has notifications on yet.");
+      const pick = sheet.querySelector('input[name="rem-kind"]:checked');
+      if (!pick) throw new Oops("Pick the reminder to send.");
+      const r = await run("er_remind", { p_kind: pick.value }), n = (r && r.editors) || 0, ph = (r && r.phones) || 0;
+      if (r && r.again) return "You sent that reminder a few minutes ago, so nothing new went out.";
+      if (!n) return "Nobody needs that reminder right now.";
+      return n === 1 ? "Sent to 1 editor. " + phonesOn(1, ph) : "Sent to " + n + " editors. " + phonesOn(n, ph);
     },
   });
 }

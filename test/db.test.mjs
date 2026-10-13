@@ -389,15 +389,36 @@ await sql("select app.push_keys_set($1, $2)", ["B" + "z".repeat(86), "q".repeat(
 st = await rpc("er_state", { p_token: TA });
 ok(st.settings.push === PUB && !JSON.stringify(st).includes(PRIV) && (await sql("select private_key from app.push_keys()")).rows[0].private_key === PRIV, "the first keys stay, and only the public one reaches phones");
 
-// asking everyone for a new picture
+// reminders an admin picks in Settings, each to the editors it concerns: a new picture (asked the old way
+// here, as copies of the app from before reminders do), payment details, late videos
+const rem = async (kind) => (await sql("select r.*, x.name as who from app.reminders r join app.users x on x.id = r.user_id where r.kind = $1 order by r.created_at, r.id", [kind])).rows;
 await fails(rpc("er_ask_pictures", { p_token: TA }), "forbidden", "only an admin can ask everyone for a picture");
+await fails(rpc("er_remind", { p_token: TA, p_kind: "details" }), "forbidden", "only an admin sends reminders");
+await fails(rpc("er_remind", { p_token: A, p_kind: "bogus" }), "invalid", "and only the three kinds there are");
 let ask = await rpc("er_ask_pictures", { p_token: A });
-ob = await outbox("picture");
-ok(ask.editors === 3 && ask.phones === 1 && ob.length === 1 && ob[0].who === "Tunde Bello" && ob[0].title === "New profile picture, please", "every editor is asked; those with notifications on get a ping", JSON.stringify(ask));
-ask = await rpc("er_ask_pictures", { p_token: A });
-ok(ask.again === true && (await outbox("picture")).length === 1, "asking twice within ten minutes sends nothing new");
+let rows = await rem("picture");
+ok(ask.editors === 3 && ask.phones === 1 && rows.length === 1 && rows[0].who === "Tunde Bello" && rows[0].title === "New profile picture, please" && rows[0].sent_by === adminId, "every editor is asked for a picture; those with notifications on get a ping", JSON.stringify(ask));
+ask = await rpc("er_remind", { p_token: A, p_kind: "picture" });
+ok(ask.again === true && (await rem("picture")).length === 1, "asking twice within ten minutes sends nothing new");
 st = await rpc("er_state", { p_token: TT });
 ok(st.settings.picAsk > 0 && st.me.avAt === null, "editors see when they were asked, and that they haven't chosen a picture since");
+let rm = await rpc("er_remind", { p_token: A, p_kind: "details" });
+rows = await rem("details");
+ok(rm.editors === 3 && rm.phones === 1 && rows.length === 1 && rows[0].who === "Tunde Bello" && rows[0].title === "Add your payment details" && /bank account/.test(rows[0].body), "the payment details reminder goes to editors who haven't added theirs", JSON.stringify(rm));
+ok((await rpc("er_remind", { p_token: A, p_kind: "details" })).again === true && (await rem("details")).length === 1, "and isn't sent twice within ten minutes");
+const lateBy = (await sql("select p.editor_id, count(*)::int as n from app.projects p join app.users x on x.id = p.editor_id where p.status = 'active' and not p.deleted and p.due_at <= now() and x.active and x.removed_at is null group by p.editor_id")).rows;
+const tLate = lateBy.find((r) => r.editor_id === tunde);
+rm = await rpc("er_remind", { p_token: A, p_kind: "overdue" });
+rows = await rem("overdue");
+ok(lateBy.length >= 2 && tLate && tLate.n >= 2 && rm.editors === lateBy.length && rm.phones === 1 && rows.length === 1 && rows[0].who === "Tunde Bello", "the late videos reminder goes to every editor with a video past its deadline", JSON.stringify({ rm, lateBy }));
+ok(rows[0].title === "Submit your " + tLate.n + " late videos" && /starting with Long overdue brief\./.test(rows[0].body), "and names how many, starting with the one most overdue", rows[0].title + " / " + rows[0].body);
+st = await rpc("er_state", { p_token: A });
+ok(st.settings.detailsAsk > 0 && st.settings.lateAsk > 0 && st.settings.lateAsk >= st.settings.detailsAsk, "the admin can see when each reminder was last sent");
+// reminders go out the same way as the automatic notifications
+batch = (await sql("select * from app.push_claim(100)")).rows;
+ok(batch.length === 3 && batch.every((r) => r.endpoint === EP(3) && r.project === null) && ["details", "overdue", "picture"].every((k) => batch.some((r) => r.kind === k)), "the sender gets the reminders with the phone each one goes to", JSON.stringify(batch.map((r) => [r.kind, r.title])));
+for (const r of batch) await sql("select app.push_report($1, array[$2]::uuid[], '{}'::uuid[], 0)", [r.notice, r.sub]);
+ok((await sql("select count(*)::int as n from app.reminders where sent_at is not null and result = 'delivered to 1 phone'")).rows[0].n === 3 && (await sql("select * from app.push_claim(100)")).rows.length === 0, "and their delivery is recorded");
 const THUMB = "data:image/jpeg;base64," + "A".repeat(400), FULL = "data:image/jpeg;base64," + "B".repeat(4000);
 await fails(rpc("er_set_picture", { p_token: TT, p_avatar: "<svg onload=alert(1)>" }), "bad_picture", "a new picture must be an image");
 await fails(rpc("er_set_picture", { p_token: TT, p_avatar: THUMB, p_full: "javascript:alert(1)" }), "bad_picture", "and so must its larger copy");

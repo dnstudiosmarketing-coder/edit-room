@@ -260,6 +260,11 @@ select.input { appearance: none; -webkit-appearance: none; padding-right: 42px; 
 .option input { width: 20px; height: 20px; margin: 0; accent-color: var(--ink); }
 .option-main { display: grid; gap: 2px; min-width: 0; }
 .option-name { font-weight: 600; overflow-wrap: anywhere; }
+.option:has(input:disabled) { cursor: default; border-style: dashed; }
+.option:has(input:disabled) .option-name { color: var(--ink-3); }
+/* the reminders in Settings: each one's name over how it stands */
+.rem-list { display: grid; gap: 12px; }
+.rem-list > li { display: grid; gap: 2px; }
 .cred { margin: 0; padding: 14px; border-radius: 13px; background: var(--inset); font: 500 15px/1.65 var(--font); white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; -webkit-user-select: all; }
 .pic-row { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
 .install { display: grid; gap: 6px; justify-items: start; padding-inline: 4px; }
