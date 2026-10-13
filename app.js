@@ -728,8 +728,8 @@ function notifyBox() {
 }
 // An editor is reminded to add payment details until they have.
 const detailsMissing = () => state.me.role === "editor" && !state.me.details;
-// An editor's reminder stays until they choose a picture after the admin asked.
-const pictureAsked = () => state.me.role === "editor" && state.config.picAsk != null && !(state.me.has && state.me.avAt != null && state.me.avAt >= state.config.picAsk);
+// Once the admin has sent the profile picture reminder, an editor without a picture is asked for one until they add it.
+const pictureAsked = () => state.me.role === "editor" && state.config.picAsk != null && !state.me.has;
 // Keeps a glowing button's pulse in step across the screen redrawing every few seconds.
 function glow(el) { el.style.animationDelay = -(Date.now() % 2000) + "ms"; return el; }
 
@@ -810,9 +810,9 @@ function viewWork(all) {
     h("span", { text: "Your admin moved this script to another editor." }),
     h("button", { class: "btn small", type: "button", dataset: { fk: "ack:" + x.p.id }, onclick: (e) => act(e.currentTarget, () => run("er_ack_moved", { p_project: x.p.id })) }, "Got it")));
   if (pictureAsked()) notices.push(h("div", { class: "notice gold" },
-    h("strong", { text: "New profile picture, please" }),
-    h("span", { text: "Your admin asked everyone to update their profile picture. It shows next to your name on the leaderboard." }),
-    h("button", { class: "btn small primary", type: "button", dataset: { fk: "newpic" }, onclick: () => openAccount(true) }, "Update my picture")));
+    h("strong", { text: "Add a profile picture" }),
+    h("span", { text: "Your admin asked you to add one. It shows next to your name on the leaderboard." }),
+    h("button", { class: "btn small primary", type: "button", dataset: { fk: "newpic" }, onclick: () => openAccount(true) }, "Add my picture")));
   if (detailsMissing()) notices.push(h("div", { class: "notice gold" },
     h("strong", { text: "Add your payment details" }),
     h("span", { text: "Your admin needs your full name, phone number and bank account to pay you." }),
@@ -1333,7 +1333,7 @@ function settingsPanel() {
   const remBox = h("section", { class: "section" },
     h("h2", { class: "section-title", text: "Reminders" }),
     h("div", { class: "panel" },
-      h("p", null, "Remind editors to update their profile picture, add their payment details, or submit videos that are past their deadline. Anyone with notifications on gets it on their phone, and everyone sees it on their home screen."),
+      h("p", null, "Remind editors to add a profile picture, add their payment details, or submit videos that are past their deadline. Each reminder goes only to the editors who haven't done it yet: to their phone if they have notifications on, and to their home screen until it's done."),
       h("ul", { class: "rem-list" },
         h("li", null, h("span", { class: "row-title", text: "Profile picture" }), picStatus),
         h("li", null, h("span", { class: "row-title", text: "Payment details" }), payStatus),
@@ -1403,10 +1403,8 @@ function fillSettings() {
   put(S.bonus, state.prefs.bonusAmount == null ? "" : String(state.prefs.bonusAmount));
   S.showDirty();
   const eds = Array.from(state.users.values()).filter((u) => u.role === "editor" && u.active), R = reminderTargets();
-  const fresh = eds.filter((u) => u.has && u.avAt != null && cfg.picAsk != null && u.avAt >= cfg.picAsk).length;
   const last = (at) => (at ? " Last reminded " + stamp(at) + "." : "");
-  S.picStatus.textContent = cfg.picAsk == null ? "You haven't asked yet. " + eds.filter((u) => u.has).length + " of " + eds.length + " editors have a picture."
-    : "Asked " + stamp(cfg.picAsk) + ". " + fresh + " of " + eds.length + " editors have chosen a new picture since.";
+  S.picStatus.textContent = (eds.length - R.picture.ids.length) + " of " + eds.length + " editors have a picture." + last(cfg.picAsk);
   S.payStatus.textContent = (eds.length - R.details.ids.length) + " of " + eds.length + " editors have added theirs." + last(cfg.detailsAsk);
   S.lateStatus.textContent = (R.overdue.videos ? plural(R.overdue.videos, "video", "videos") + " past the deadline, from " + plural(R.overdue.ids.length, "editor", "editors") + "." : "No videos are past their deadline.") + last(cfg.lateAsk);
 }
@@ -1764,7 +1762,7 @@ function reminderTargets() {
   }
   const reach = (ids) => ({ ids: ids, phones: ids.filter((id) => { const u = state.users.get(id); return u && u.push; }).length });
   return {
-    picture: reach(eds.map((u) => u.id)),
+    picture: reach(eds.filter((u) => !u.has).map((u) => u.id)),
     details: reach(eds.filter((u) => !u.pay).map((u) => u.id)),
     overdue: Object.assign(reach(Array.from(late.keys())), { videos: Array.from(late.values()).reduce((a, b) => a + b, 0) }),
   };
@@ -1774,7 +1772,7 @@ const phonesOn = (n, ph) => n === 1 ? (ph ? "They have notifications on." : "The
 function openRemind() {
   const T = reminderTargets(), cfg = state.config, eds = (n) => (n === 1 ? "The 1 editor" : "The " + n + " editors");
   const choices = [
-    ["picture", "New profile picture", T.picture, (n) => (n === 1 ? "Your 1 editor." : "All " + n + " editors.") + " Each sees a note on their home screen until they choose a new picture.", cfg.picAsk, "There are no editors yet."],
+    ["picture", "Profile picture", T.picture, (n) => eds(n) + " who don't have a picture yet.", cfg.picAsk, "Every editor has a picture."],
     ["details", "Payment details", T.details, (n) => eds(n) + " who haven't added theirs.", cfg.detailsAsk, "Every editor has added their payment details."],
     ["overdue", "Submit late videos", T.overdue, (n) => eds(n) + " with " + plural(T.overdue.videos, "video", "videos") + " past the deadline.", cfg.lateAsk, "No videos are past their deadline right now."]];
   const opts = choices.map(([kind, name, t, who, last, none]) => {
@@ -1789,7 +1787,7 @@ function openRemind() {
   formSheet({
     title: "Send a reminder", submit: "Send reminder",
     body: [
-      h("p", { text: "Pick one. Editors with notifications on get it on their phone, and everyone it's for sees it on their home screen." }),
+      h("p", { text: "Pick one. It goes only to the editors who haven't done it yet. Those with notifications on get it on their phone, and each of them sees it on their home screen." }),
       h("div", { class: "options", role: "radiogroup", "aria-label": "Reminder" }, opts)],
     run: async () => {
       const pick = sheet.querySelector('input[name="rem-kind"]:checked');

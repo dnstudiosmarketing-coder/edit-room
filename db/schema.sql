@@ -135,7 +135,7 @@ create index if not exists featured_picked_by on app.featured(picked_by);
 alter table app.users add column if not exists avatar_at timestamptz;          -- when the person last chose a picture
 alter table app.users add column if not exists avatar_full text check (avatar_full is null or char_length(avatar_full) <= 600000);
 alter table app.users add column if not exists avatar_full_ver int;
-alter table app.meta add column if not exists pic_ask_at timestamptz;          -- when an admin last asked every editor for a new picture
+alter table app.meta add column if not exists pic_ask_at timestamptz;          -- when an admin last sent the profile picture reminder
 
 -- Phone notifications. Each phone that allows them leaves its push address here; the address belongs to
 -- whoever is signed in on that phone. A phone that is signed out, turned off, or reported gone by its push
@@ -1232,8 +1232,8 @@ begin
   return json_build_object('ok', true, 'phones', k, 'queued', n);
 end $$;
 
--- An admin sends one of three reminders, each to the editors it concerns:
---   picture   every editor: a new profile picture (their home screen also asks until they choose one)
+-- An admin sends one of three reminders, each only to the editors who still have to do what it asks:
+--   picture   editors without a profile picture (their home screen asks for one too, until they add it)
 --   details   editors who haven't added payment details (their home screen asks for them too)
 --   overdue   editors with videos past their deadline, named in the message
 -- Editors with notifications on get it on their phone ("phones" counts them). The same reminder sent again
@@ -1247,7 +1247,8 @@ begin
   select * into m from app.meta;
   if p_kind = 'picture' then
     last := m.pic_ask_at;
-    select coalesce(array_agg(x.id), '{}') into ids from app.users x where x.role = 'editor' and x.active and x.removed_at is null;
+    select coalesce(array_agg(x.id), '{}') into ids from app.users x where x.role = 'editor' and x.active and x.removed_at is null
+       and x.avatar is null;
   elsif p_kind = 'details' then
     last := m.details_ask_at;
     select coalesce(array_agg(x.id), '{}') into ids from app.users x where x.role = 'editor' and x.active and x.removed_at is null
@@ -1269,10 +1270,10 @@ begin
   select x.id, p_kind, u.id, t.title, t.body
     from app.users x
     cross join lateral (
-      select case p_kind when 'picture' then 'New profile picture, please'
+      select case p_kind when 'picture' then 'Add a profile picture'
                          when 'details' then 'Add your payment details'
                          else case when l.n = 1 then 'Submit your video: ' || left(l.name, 90) else 'Submit your ' || l.n || ' late videos' end end as title,
-             case p_kind when 'picture' then 'Your admin asked everyone to update their profile picture. Tap to add yours.'
+             case p_kind when 'picture' then 'Your admin asked you to add one. It shows next to your name on the leaderboard. Tap to add it.'
                          when 'details' then 'Your admin needs your full name, phone number and bank account to pay you. Tap to add them.'
                          else case when l.n = 1 then 'It''s past its deadline. Submit it as soon as you can.'
                                    else 'They''re past their deadline, starting with ' || left(l.name, 80) || '. Submit them as soon as you can.' end end as body
@@ -1283,7 +1284,7 @@ begin
   return json_build_object('ok', true, 'editors', array_length(ids, 1), 'phones', n);
 end $$;
 
--- Asking everyone for a new picture, as copies of the app from before reminders still do.
+-- The profile picture reminder, as copies of the app from before reminders still ask for it.
 create or replace function public.er_ask_pictures(p_token text) returns json
 language sql security definer set search_path = '' as $$
   select public.er_remind(p_token, 'picture')

@@ -432,15 +432,21 @@ await sql("select app.push_keys_set($1, $2)", ["B" + "z".repeat(86), "q".repeat(
 st = await rpc("er_state", { p_token: TA });
 ok(st.settings.push === PUB && !JSON.stringify(st).includes(PRIV) && (await sql("select private_key from app.push_keys()")).rows[0].private_key === PRIV, "the first keys stay, and only the public one reaches phones");
 
-// reminders an admin picks in Settings, each to the editors it concerns: a new picture (asked the old way
-// here, as copies of the app from before reminders do), payment details, late videos
+// reminders an admin picks in Settings, each only to the editors who still have to do what it asks: a profile
+// picture (asked the old way here, as copies of the app from before reminders do), payment details, late videos
 const rem = async (kind) => (await sql("select r.*, x.name as who from app.reminders r join app.users x on x.id = r.user_id where r.kind = $1 order by r.created_at, r.id", [kind])).rows;
-await fails(rpc("er_ask_pictures", { p_token: TA }), "forbidden", "only an admin can ask everyone for a picture");
+await fails(rpc("er_ask_pictures", { p_token: TA }), "forbidden", "only an admin can ask for pictures");
 await fails(rpc("er_remind", { p_token: TA, p_kind: "details" }), "forbidden", "only an admin sends reminders");
 await fails(rpc("er_remind", { p_token: A, p_kind: "bogus" }), "invalid", "and only the three kinds there are");
+await push(TC, 4);                                                                   // Chidi has notifications on,
+await rpc("er_set_picture", { p_token: TC, p_avatar: "data:image/jpeg;base64," + "E".repeat(400) });     // and a picture already
 let ask = await rpc("er_ask_pictures", { p_token: A });
 let rows = await rem("picture");
-ok(ask.editors === 3 && ask.phones === 1 && rows.length === 1 && rows[0].who === "Tunde Bello" && rows[0].title === "New profile picture, please" && rows[0].sent_by === adminId, "every editor is asked for a picture; those with notifications on get a ping", JSON.stringify(ask));
+ok(ask.editors === 2 && ask.phones === 1 && rows.length === 1 && rows[0].who === "Tunde Bello" && rows[0].title === "Add a profile picture" && /next to your name/.test(rows[0].body) && rows[0].sent_by === adminId, "the picture reminder goes only to editors without a picture; those with notifications on get a ping", JSON.stringify(ask));
+ok(!rows.some((r) => r.who === "Chidi Nwosu"), "an editor who already has a picture isn't pinged, even with notifications on");
+ok((await rpc("er_state", { p_token: TC })).me.has === true && (await rpc("er_state", { p_token: TA })).me.has === false, "and the app can tell who still needs to add one");
+await rpc("er_drop_push", { p_token: TC, p_endpoint: EP(4) });
+await rpc("er_set_picture", { p_token: TC, p_avatar: "" });
 ask = await rpc("er_remind", { p_token: A, p_kind: "picture" });
 ok(ask.again === true && (await rem("picture")).length === 1, "asking twice within ten minutes sends nothing new");
 st = await rpc("er_state", { p_token: TT });
@@ -476,6 +482,13 @@ big = await rpc("er_avatar_full", { p_token: TA, p_user: tunde });
 ok(big.full === false && big.url === "data:image/jpeg;base64,DDDD" && (await sql("select avatar_full from app.users where id = $1", [tunde])).rows[0].avatar_full === null, "a picture set the old way drops the outdated large copy");
 await rpc("er_set_picture", { p_token: TT, p_avatar: "" });
 ok((await rpc("er_avatar_full", { p_token: TA, p_user: tunde })).url === null && (await rpc("er_state", { p_token: TT })).me.has === false, "a picture can be removed");
+// once every editor has a picture, the picture reminder has nobody to go to
+for (const t of [TA, TT, TC]) await rpc("er_set_picture", { p_token: t, p_avatar: "data:image/jpeg;base64," + "F".repeat(400) });
+await sql("update app.meta set pic_ask_at = now() - interval '11 minutes'");
+const askedAt = (await sql("select pic_ask_at from app.meta")).rows[0].pic_ask_at;
+ask = await rpc("er_remind", { p_token: A, p_kind: "picture" });
+ok(ask.editors === 0 && ask.phones === 0 && !ask.again && (await rem("picture")).length === 1 && new Date((await sql("select pic_ask_at from app.meta")).rows[0].pic_ask_at).getTime() === new Date(askedAt).getTime(), "when every editor has a picture, the reminder sends nothing to anyone", JSON.stringify(ask));
+for (const t of [TA, TT, TC]) await rpc("er_set_picture", { p_token: t, p_avatar: "" });
 await fails(rpc("er_avatar_full", { p_token: "x".repeat(64), p_user: tunde }), "auth", "pictures are only for people signed in");
 
 // every video an editor has submitted, a page at a time, for the admin's list

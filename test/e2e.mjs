@@ -521,23 +521,23 @@ try {
 
   /* ------------------------------------------------------------ reminders, starting with a new picture */
   await tab(admin, "settings");
-  ok(/^You haven't asked yet\. 0 of 3 editors have a picture\.$/.test(await admin.locator("#pic-status").innerText()), "settings say how many editors have a picture", await admin.locator("#pic-status").innerText());
+  ok(/^0 of 3 editors have a picture\.$/.test(await admin.locator("#pic-status").innerText()), "settings say how many editors have a picture", await admin.locator("#pic-status").innerText());
   ok(/^0 of 3 editors have added theirs\.$/.test(await admin.locator("#pay-status").innerText()), "and how many have added payment details", await admin.locator("#pay-status").innerText());
   await admin.locator("#send-reminder").click();
   await sheet(admin).getByRole("button", { name: "Send reminder" }).waitFor();
-  ok((await sheet(admin).locator('input[name="rem-kind"]').count()) === 3 && /All 3 editors\./.test(await sheet(admin).innerText()) && /The 3 editors who haven't added theirs\./.test(await sheet(admin).innerText()), "the admin picks from three reminders, each saying who it's for", (await sheet(admin).innerText()).replace(/\n/g, " | "));
+  ok((await sheet(admin).locator('input[name="rem-kind"]').count()) === 3 && /The 3 editors who don't have a picture yet\./.test(await sheet(admin).innerText()) && /The 3 editors who haven't added theirs\./.test(await sheet(admin).innerText()), "the admin picks from three reminders, each saying who it's for", (await sheet(admin).innerText()).replace(/\n/g, " | "));
   await look(admin, "26b-reminders", "send a reminder");
   await sheet(admin).getByRole("button", { name: "Send reminder" }).click();
   await sheet(admin).getByText("Pick the reminder to send.").waitFor();
   ok((await sql("select count(*)::int as n from app.reminders")).rows[0].n === 0 && (await sql("select pic_ask_at from app.meta")).rows[0].pic_ask_at === null, "nothing is sent until one is picked");
-  await sheet(admin).locator("label.option", { hasText: "New profile picture" }).click();
+  await sheet(admin).locator("label.option", { hasText: "Profile picture" }).click();
   await sheet(admin).getByRole("button", { name: "Send reminder" }).click();
   await toast(admin, "Sent to 3 editors. None of them has notifications on yet.");
   await closed(admin);
-  ok(/^Asked .+\. 0 of 3 editors have chosen a new picture since\.$/.test(await admin.locator("#pic-status").innerText()), "the admin sees when they asked and how many have answered", await admin.locator("#pic-status").innerText());
+  ok(/^0 of 3 editors have a picture\. Last reminded .+\.$/.test(await admin.locator("#pic-status").innerText()), "the admin sees when they asked and how many have a picture", await admin.locator("#pic-status").innerText());
   await tab(ada, "work");
   await sync(ada);
-  await see(ada, "New profile picture, please", "every editor is asked on their home screen");
+  await see(ada, "Add a profile picture", "an editor without a picture is asked on their home screen");
   await look(ada, "26c-picture-asked", "editor asked for a new picture");
   // an editor's own list of everything they've submitted
   await ada.getByRole("button", { name: "All my videos" }).click();
@@ -551,7 +551,7 @@ try {
 
   /* ------------------------------------------------------------ account: picture, name, password, sign out */
   const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAEAAAAAoCAIAAADBrGu+AAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAPUlEQVRYw+3PQQkAAAgEsItjRMMaxgw+hcEKLNP1WgQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQELhYkk9jT5G7+yQAAAABJRU5ErkJggg==", "base64");      // a small orange picture
-  await ada.getByRole("button", { name: "Update my picture" }).click();
+  await ada.getByRole("button", { name: "Add my picture" }).click();
   await sheet(ada).getByText("Your account").waitFor();
   ok((await ada.evaluate(() => document.activeElement && document.activeElement.id)) === "ac-choose", "the reminder's button goes straight to choosing a picture");
   ok((await ada.locator("#ac-name").count()) === 0 && /Your name is set by your admin/.test(await sheet(ada).innerText()) && !(await sheet(ada).getByRole("button", { name: "Remove" }).isVisible()), "an editor can set a picture but not change their own name");
@@ -563,12 +563,12 @@ try {
   await closed(ada);
   await ada.locator("#who img.avatar").waitFor();
   ok(true, "the picture is saved and shows in the header");
-  await gone(ada, "New profile picture, please", "choosing a picture clears the reminder");
+  await gone(ada, "Add a profile picture", "adding a picture clears the reminder");
   const stored = (await sql("select avatar_full, avatar_full_ver = avatar_ver as current from app.users where username = 'ada.obi'")).rows[0];
   ok(/^data:image\/jpeg;base64,/.test(stored.avatar_full || "") && stored.current, "a larger copy of the whole picture is kept for tapping on", (stored.avatar_full || "").length + " characters");
   await sync(admin);
-  await admin.locator("#pic-status", { hasText: "1 of 3 editors have chosen a new picture since." }).waitFor();
-  ok(/^Asked .+\. 1 of 3 editors have chosen a new picture since\.$/.test(await admin.locator("#pic-status").innerText()), "the admin sees the editor has answered", await admin.locator("#pic-status").innerText());
+  await admin.locator("#pic-status", { hasText: "1 of 3 editors have a picture." }).waitFor();
+  ok(/^1 of 3 editors have a picture\. Last reminded .+\.$/.test(await admin.locator("#pic-status").innerText()), "the admin sees the editor has added one", await admin.locator("#pic-status").innerText());
   await tab(admin, "editors");
   await admin.locator("article.clip", { hasText: "Ada Obi" }).locator("img.avatar").waitFor();
   ok(true, "the admin sees the editor's picture");
@@ -802,7 +802,10 @@ try {
   const adaHist = admin.locator("article.clip", { hasText: "Ada O." });
   await adaHist.locator(".spark").waitFor();
   const bars = await adaHist.locator(".spark .bar").evaluateAll((els) => els.filter((b) => b.children.length > 0).length);
-  ok(bars >= 5 && /8\d%/.test(await adaHist.innerText()), "each editor's six weeks and on-time rate cover work older than what is loaded", bars + " weeks with bars; " + (await adaHist.locator(".facts").innerText()).replace(/\n/g, " "));
+  // the rate the server should give, worked out here the same way (which videos fall in the last four weeks moves with the clock)
+  const four = (await sql("select count(*) filter (where p.submitted_at <= p.due_at)::int as on_n, count(*)::int as n from app.projects p, app.meta m where p.editor_id = $1 and p.status = 'submitted' and not p.deleted and p.submitted_at >= (date_trunc('week', now() at time zone m.tz) - interval '21 days') at time zone m.tz", [adaId])).rows[0];
+  const rate4 = Math.round((four.on_n / four.n) * 100) + "%", facts = (await adaHist.locator(".facts").innerText()).replace(/\s+/g, " ");
+  ok(bars >= 5 && four.n > 20 && four.on_n < four.n && facts.includes("On time, last 4 weeks " + rate4), "each editor's six weeks and on-time rate cover work older than what is loaded", bars + " weeks with bars; expected " + rate4 + " of " + four.n + "; " + facts);
   await adaHist.locator(".spark .bar").nth(3).click();
   await adaHist.locator(".readout b").waitFor();
   ok(/videos? in the week of .*: \d+ on time, \d+ late\./.test(await adaHist.locator(".readout").innerText()), "tapping a week's bar gives that week's numbers", await adaHist.locator(".readout").innerText());
@@ -1131,6 +1134,30 @@ try {
   await closed(admin);
   ok((await sql("select count(*)::int as n from app.reminders where kind = 'details'")).rows[0].n === 1, "sending the same reminder again straight away sends nothing new");
   ok(/Last reminded/.test(await admin.locator("#pay-status").innerText()) && /Last reminded/.test(await admin.locator("#late-status").innerText()), "Settings show when each reminder last went out");
+  // an editor who already has a picture isn't asked for one again, on their phone or on their home screen
+  await tp2.locator("#who").click();
+  await sheet(tp2).getByText("Your account").waitFor();
+  await tp2.setInputFiles("#ac-file", { name: "me.png", mimeType: "image/png", buffer: png });
+  await tp2.locator("#ac-pic img").waitFor();
+  await sheet(tp2).getByRole("button", { name: "Save picture" }).click();
+  await closed(tp2);
+  await tp2.locator("#who img.avatar").waitFor();
+  await sql("update app.meta set pic_ask_at = now() - interval '11 minutes'");       // the last picture reminder went out a while ago
+  await sync(admin);
+  await admin.locator("#pic-status", { hasText: "1 of 3 editors have a picture." }).waitFor();
+  await admin.locator("#send-reminder").click();
+  const picOpt = sheet(admin).locator("label.option", { hasText: "Profile picture" });
+  ok(/The 2 editors who don't have a picture yet\./.test(await picOpt.innerText()) && /None of them has notifications on yet\./.test(await picOpt.innerText()), "the picture reminder is only for the editors without a picture", (await picOpt.innerText()).replace(/\n/g, " | "));
+  await picOpt.click();
+  await sheet(admin).getByRole("button", { name: "Send reminder" }).click();
+  await toast(admin, "Sent to 2 editors. None of them has notifications on yet.");
+  await closed(admin);
+  ok((await sql("select count(*)::int as n from app.reminders r join app.users x on x.id = r.user_id where r.kind = 'picture' and x.username = 'tunde.bello'")).rows[0].n === 0, "an editor who already has a picture isn't pinged, even with notifications on");
+  await sync(tp2);
+  await tp2.waitForTimeout(400);
+  ok((await tp2.getByText("Add a profile picture").count()) === 0 && (await tp2.getByText("Add your payment details").count()) === 1, "and isn't asked on their home screen, where what they still have to do is");
+  await sync(ada);
+  await see(ada, "Add a profile picture", "an editor without a picture is still asked");
   await look(admin, "47-reminders-settings", "reminders in Settings");
 
   /* ------------------------------------------------------------ the grace period, as a battery that drains */
