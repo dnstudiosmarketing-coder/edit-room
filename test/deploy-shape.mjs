@@ -106,6 +106,17 @@ try {
   await admin.locator("#toast", { hasText: "Ada Obi's earnings" }).waitFor();
   ok(true, "an editor's brief goes from logged to submitted to received across the two addresses");
 
+  // the privacy page that Google's sign-in screen links to: reached from the sign-in screen, styled, and back
+  const guest = await open("privacy");
+  await guest.getByRole("link", { name: "Privacy policy" }).click();
+  await guest.waitForURL(home + "privacy.html");
+  const pol = await guest.evaluate(() => ({ h1: document.querySelector("h1").textContent, list: getComputedStyle(document.querySelector(".policy-body ul")).listStyleType, font: getComputedStyle(document.body).fontFamily }));
+  ok(pol.h1 === "Privacy policy" && pol.list === "disc" && /Barlow/.test(pol.font), "the sign-in screen links to the privacy page, which opens styled from the app's folder", JSON.stringify(pol));
+  await guest.getByRole("link", { name: "Open DN Studios" }).click();
+  await guest.waitForURL(home);
+  await guest.getByRole("button", { name: "Sign in" }).waitFor();
+  ok(true, "and the privacy page's button leads back to the app");
+
   const sw = await admin.evaluate(async () => { const r = await navigator.serviceWorker.ready; return { scope: r.scope, script: r.active && r.active.scriptURL }; });
   ok(sw.scope === home && sw.script === home + "sw.js", "the offline helper covers exactly the app's folder", JSON.stringify(sw));
   const man = await admin.evaluate(async () => { const l = document.querySelector('link[rel="manifest"]'); const r = await fetch(l.href); const m = await r.json(); return { status: r.status, start: new URL(m.start_url, l.href).href, scope: new URL(m.scope, l.href).href, icons: await Promise.all(m.icons.map(async (i) => (await fetch(new URL(i.src, l.href))).status)) }; });

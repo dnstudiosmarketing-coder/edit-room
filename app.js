@@ -808,6 +808,7 @@ function authView() {
   const err = h("p", { class: "error", role: "alert", hidden: true });
   const fail = (ex) => { err.textContent = ex instanceof Oops ? ex.message : errText(ex); err.hidden = false; };
   const head = (title, note) => h("div", { class: "slate" }, h("h2", { class: "slate-title", text: title }), h("p", { class: "slate-label", text: note }));
+  const foot = () => h("p", { class: "auth-foot" }, h("a", { href: "privacy.html" }, "Privacy policy"));
   let node;
   if (state.phase === "setup") {
     const code = h("input", { class: "input", id: "su-code", type: "text", autocomplete: "off", autocapitalize: "characters", spellcheck: "false" });
@@ -834,7 +835,7 @@ function authView() {
         field("Username", user, "3 to 24 characters: small letters, numbers, dots and dashes."),
         field("Password", pass, "At least 8 characters. There is no email reset, so keep it somewhere safe."),
         err, go)),
-      installBox());
+      installBox(), foot());
   } else {
     const user = h("input", { class: "input", id: "li-user", type: "text", maxlength: "24", autocomplete: "username", autocapitalize: "none", spellcheck: "false" });
     const pass = h("input", { class: "input", id: "li-pass", type: "password", autocomplete: "current-password" });
@@ -851,7 +852,7 @@ function authView() {
           await enter(r.token);
         } catch (ex) { fail(ex); go.disabled = false; }
       } }, field("Username", user), field("Password", pass), err, go)),
-      installBox());
+      installBox(), foot());
   }
   authPanel = { phase: state.phase, node: node };
   return node;
@@ -2432,6 +2433,7 @@ function openAccount(forPicture) {
     foot: h("div", { class: "btn-row tools" },
       h("button", { class: "btn small", type: "button", onclick: openChangePassword }, "Change password"),
       h("button", { class: "btn small", type: "button", onclick: () => { const t = state.token; leave(); pushDrop(t).finally(() => api("er_logout", { p_token: t }).catch(() => {})); } }, "Sign out"),
+      h("a", { class: "btn small quiet", href: "privacy.html" }, "Privacy policy"),
       installBox()),
     run: async () => {
       if (admin) {

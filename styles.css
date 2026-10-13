@@ -289,6 +289,19 @@ select.input { appearance: none; -webkit-appearance: none; padding-right: 42px; 
 @media (prefers-reduced-motion: reduce) { .upload-meter > i { transition: none; } }
 /* the folder picker page: Google's picker opens over it */
 .pick { display: grid; gap: 12px; max-width: 560px; margin: 24px auto 0; }
+/* the privacy page: one column of plain reading; and the small link to it under the sign-in form */
+.policy { display: grid; gap: 16px; max-width: 640px; margin: 8px auto 0; }
+.policy-body { gap: 10px; padding: 20px 18px 22px; }
+.policy-body h2 { margin-top: 14px; font: 600 18px/1.3 var(--font); letter-spacing: -0.01em; }
+.policy-body h2:first-child { margin-top: 0; }
+.policy-body p, .policy-body li { color: var(--ink-2); line-height: 1.55; }
+.policy-body strong { color: var(--ink); font-weight: 600; }
+.policy-body ul { display: grid; gap: 8px; padding-left: 22px; list-style: disc; }
+.policy-body li::marker { color: var(--ink-3); }
+.policy a:not(.btn), .auth-foot a { color: inherit; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; overflow-wrap: anywhere; }
+a.brand { color: inherit; text-decoration: none; }
+.auth-foot { font-size: 14px; text-align: center; color: var(--ink-3); }
+.auth-foot a { display: inline-block; padding-block: 10px; }
 /* the reminders in Settings: each one's name over how it stands */
 .rem-list { display: grid; gap: 12px; }
 .rem-list > li { display: grid; gap: 2px; }

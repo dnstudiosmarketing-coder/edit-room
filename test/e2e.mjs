@@ -891,6 +891,8 @@ try {
   ok(head.includes('src="theme.js') && head.indexOf('src="theme.js') < head.indexOf('rel="stylesheet"'), "the day or night choice is applied in the page's head, before the styles");
   const versions = Array.from(site("index.html").matchAll(/\?v=(\d+)"/g), (m) => m[1]);
   ok(versions.length === 5 && new Set(versions).size === 1 && /"theme\.js"/.test(site("sw.js")), "every file the page loads carries the same version, and the offline helper keeps theme.js", versions.join(","));
+  const others = ["drive-folders.html", "privacy.html"].flatMap((f) => Array.from(site(f).matchAll(/\?v=(\d+)"/g), (m) => m[1]));
+  ok(others.length === 8 && others.every((v) => v === versions[0]), "the folder picker and privacy pages load the same version as the app", others.join(","));
   // Ada's phone is set to dark (from the checks above)
   await ada.emulateMedia({ colorScheme: "dark" });
   let th = await looks(ada);
@@ -899,6 +901,7 @@ try {
   const dn = sheet(ada).locator("#ac-theme");
   await dn.waitFor();
   ok((await dn.getByRole("button", { name: "Same as phone" }).getAttribute("aria-pressed")) === "true" && (await dn.getByRole("button").count()) === 3, "the account sheet offers Day, Night and Same as phone, starting on Same as phone");
+  ok((await sheet(ada).getByRole("link", { name: "Privacy policy" }).getAttribute("href")) === "privacy.html", "the account sheet links to the privacy page");
   await see(ada, "The app follows your phone, which is in dark mode right now.", "and says what the phone is set to");
   await dn.getByRole("button", { name: "Day" }).click();
   th = await looks(ada);
