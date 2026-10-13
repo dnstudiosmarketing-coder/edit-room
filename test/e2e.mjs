@@ -1114,6 +1114,34 @@ try {
   ok((await sql("select count(*)::int as n from app.reminders where kind = 'details'")).rows[0].n === 1, "sending the same reminder again straight away sends nothing new");
   ok(/Last reminded/.test(await admin.locator("#pay-status").innerText()) && /Last reminded/.test(await admin.locator("#late-status").innerText()), "Settings show when each reminder last went out");
   await look(admin, "47-reminders-settings", "reminders in Settings");
+
+  /* ------------------------------------------------------------ the grace period, as a battery that drains */
+  await tp2.getByRole("button", { name: "Log a new brief" }).click();
+  await tp2.fill("#b-name", "Grace bar brief");
+  await tp2.selectOption("#b-cat", { label: "Ads" });
+  await sheet(tp2).getByRole("button", { name: "Log brief" }).click();
+  await closed(tp2);
+  const graceCard = tp2.locator("article.clip", { hasText: "Grace bar brief" });
+  await graceCard.waitFor();
+  ok((await graceCard.locator(".grace").count()) === 0, "before its deadline, a brief has no grace bar");
+  await sql("update app.projects set started_at = now() - interval '36 hours' where editor_id = $1 and name = 'Grace bar brief'", [tundeId]);
+  await sync(tp2);
+  const gb = graceCard.locator(".grace");
+  await gb.waitFor();
+  const level = await gb.evaluate((g) => {
+    const f = g.querySelector(".grace-fill"), b = g.querySelector(".grace-batt"), cs = getComputedStyle(b);
+    return { pct: 100 * f.getBoundingClientRect().width / (b.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)), left: g.querySelector(".grace-left").textContent, label: g.getAttribute("aria-label"),
+      drain: getComputedStyle(f).animationName, flow: getComputedStyle(f, "::before").animationName };
+  });
+  ok(Math.abs(level.pct - 75) < 1.5 && /^(36h|35h 5\dm) left$/.test(level.left) && /^Grace period: .+ left of 2d$/.test(level.label), "12 hours into a 48-hour grace period, the battery shows three quarters left, and how long", JSON.stringify(level));
+  ok(level.drain === "grace-drain" && level.flow === "none", "it keeps draining on its own between redraws; with reduced motion the charge doesn't flow", JSON.stringify(level));
+  await tp2.emulateMedia({ reducedMotion: "no-preference" });
+  ok((await gb.evaluate((g) => getComputedStyle(g.querySelector(".grace-fill"), "::before").animationName)) === "grace-flow", "otherwise the charge flows out of it, like a phone's fast-charge animation run backwards");
+  await tp2.emulateMedia({ reducedMotion: "reduce" });
+  await graceCard.scrollIntoViewIfNeeded();
+  await look(tp2, "48-grace-bar", "the grace period battery");
+  const overBar = tp2.locator("article.clip", { hasText: "Reminder test brief" }).locator(".grace.over");
+  ok((await overBar.count()) === 1 && /Over/.test(await overBar.innerText()) && (await overBar.locator(".grace-fill").evaluate((f) => f.getBoundingClientRect().width)) === 0, "once the grace period is over, the battery is empty and says so");
   await tp2.context().close();
   // the offline helper shows what arrives, with the studio's badge, and buzzes (the lightweight test browser
   // can't show notifications at all, so this one check runs in the full one)

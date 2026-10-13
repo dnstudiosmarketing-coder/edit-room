@@ -453,6 +453,24 @@ function trackBlock(p, editable) {
     : h("div", { class: "stage-labels", "aria-hidden": "true" }, STAGES.map((s, i) => h("span", { class: p.stage === i + 1 ? "now" : null, text: s })));
   return h("div", { class: "timeline" }, track, row);
 }
+// Once the deadline has passed, the grace period drains like a phone battery: green, with charge flowing out
+// to the left, shrinking in step with the time that's left. The bar keeps draining between redraws, and the
+// flow keeps its place when the screen is drawn again. Empty, with a red outline, once it's over.
+function graceBar(x) {
+  const f = x.f, total = f.graceEnd - f.deadline;
+  if (x.p.status !== "active" || f.phase === "ontrack" || !(total > 0)) return null;
+  const left = Math.max(0, f.graceEnd - now()), over = f.phase === "over" || left === 0;
+  const fill = h("i", { class: "grace-fill" });
+  fill.style.width = over ? "0%" : (100 * left / total).toFixed(3) + "%";
+  if (!over) {
+    fill.style.setProperty("--drain", left + "ms");
+    fill.style.setProperty("--flow", -(Date.now() % 700) + "ms");
+    fill.style.setProperty("--sheen", -(Date.now() % 2200) + "ms");
+  }
+  return h("div", { class: "grace" + (over ? " over" : ""), role: "img", "aria-label": over ? "Grace period over" : "Grace period: " + span(left) + " left of " + span(total) },
+    h("div", { class: "grace-head", "aria-hidden": "true" }, h("span", { text: "Grace period" }), h("span", { class: "grace-left", text: over ? "Over" : span(left) + " left" })),
+    h("div", { class: "grace-batt", "aria-hidden": "true" }, fill));
+}
 function deadlinePill(x, forEditor) {
   const p = x.p, f = x.f;
   if (p.status === "active") {
@@ -842,6 +860,7 @@ function editorCard(x) {
     h("h3", { class: "clip-title", text: p.name }),
     p.from ? h("p", { class: "hint", text: "Assigned to you by your admin." }) : null,
     p.backAt ? quote("Sent back by your admin " + ago(p.backAt), p.backNote || "Check the link and submit again.") : null,
+    graceBar(x),
     trackBlock(p, true),
     p.update ? quote("Your last update", p.update) : null,
     metaRow(x),
