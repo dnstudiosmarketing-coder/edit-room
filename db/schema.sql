@@ -1525,11 +1525,14 @@ begin
 end $$;
 
 -- The timer, where the database has one (the live project). Locally this does nothing. Once a minute is
--- soon enough for a deadline, and pg_cron writes a line to cron.job_run_details for every run.
+-- soon enough for a deadline, and pg_cron writes a line to cron.job_run_details for every run: about 1,440 a
+-- day, which would be most of what the database grows by. That log is pg_cron's diary, not the team's
+-- records, so every night the lines older than a week are cleared; a week shows whether the timer has run.
 do $$
 begin
   if exists (select 1 from pg_extension where extname = 'pg_cron') then
     execute $q$select cron.schedule('dn-notices', '* * * * *', 'select app.notice_tick()')$q$;
+    execute $q$select cron.schedule('dn-timer-log', '17 3 * * *', $c$delete from cron.job_run_details where end_time < now() - interval '7 days'$c$)$q$;
   end if;
 end $$;
 

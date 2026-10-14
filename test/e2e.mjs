@@ -603,6 +603,13 @@ try {
   ok((await tunde.locator("#player .player-title").innerText()) === "Ada O.", "an editor can tap a picture on the leaderboard to see it full size");
   await tunde.locator("#player").getByRole("button", { name: "Close" }).click();
   ok((await tunde.locator(".podium .pic-btn").count()) === 1 && (await tunde.locator("#view .reel .pic-btn, #view article.clip .pic-btn").count()) === 0, "elsewhere, an editor's screen keeps pictures as they were");
+  // pictures are kept on the phone: opening the app again shows them without downloading them again
+  const picAsks = [], onPicAsk = (r) => { if (r.url().endsWith("/rpc/er_avatars")) picAsks.push(r.postData() || ""); };
+  tunde.on("request", onPicAsk);
+  await tunde.reload();
+  await tunde.locator(".podium img.avatar").first().waitFor();
+  tunde.off("request", onPicAsk);
+  ok(picAsks.length === 0, "opening the app again shows the pictures kept on the phone, without downloading them", picAsks.length + " downloads");
 
   await ada.locator("#who").click();
   await sheet(ada).getByRole("button", { name: "Change password" }).click();
@@ -614,10 +621,12 @@ try {
   await sheet(ada).getByRole("button", { name: "Change password" }).click();
   await toast(ada, "Password changed");
   await closed(ada);
+  const keptBefore = await ada.evaluate(() => localStorage.getItem("editroom.pics"));
   await ada.locator("#who").click();
   await sheet(ada).getByRole("button", { name: "Sign out" }).click();
   await see(ada, "Use the username and password your admin gave you.", "signing out returns to the sign-in screen");
   ok((await ada.evaluate(() => localStorage.getItem("editroom.token"))) === null, "signing out forgets the session on this phone");
+  ok(/^\{"v":1,"p":\{"[0-9a-f-]{36}":\[\d+,"data:image\//.test(keptBefore || "") && (await ada.evaluate(() => localStorage.getItem("editroom.pics"))) === null, "and the pictures kept on it", (keptBefore || "").slice(0, 60));
   await ada.fill("#li-user", "ada.obi");
   await ada.fill("#li-pass", logins["Ada Obi"].password);
   await ada.getByRole("button", { name: "Sign in" }).click();
@@ -723,6 +732,9 @@ try {
   await sync(ada);
   await ada.locator("#who img.avatar").waitFor({ state: "hidden" });
   ok(true, "the admin can take an editor's picture down");
+  await sync(tunde);
+  await tunde.waitForFunction(() => { try { return Object.keys(JSON.parse(localStorage.getItem("editroom.pics")).p).length === 0; } catch (e) { return false; } });
+  ok(true, "and other phones drop the copy of it they kept");
 
   /* ------------------------------------------------------------ the admin tries the editor screen */
   await admin.locator("#try-editor").click();

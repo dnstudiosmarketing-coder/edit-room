@@ -357,6 +357,7 @@ async function enter(token) {
   } catch (e) { /* start on the first tab */ }
   authPanel = null;
   driveReturn();
+  restorePics();
   render(); plan(); loadPics(); pushRefresh();
 }
 // Coming back from Google (connecting Drive) or from the folder picker page: say how it went, on Settings,
@@ -388,26 +389,53 @@ function leave(msg) {
   state.stats = { editors: new Map(), cats: new Map() }; state.horizon = null; resetHist();
   setPanel = null;          // Settings start afresh for whoever signs in next, with no half-made changes left in them
   if (activeUpload) activeUpload.stop();
+  forgetPics();
   closeSheet(true); closePlayer(); render();
   if (msg) toast(msg, true);
+}
+// Profile pictures are kept on this phone between visits ("editroom.pics": each person's picture with its
+// version), so opening the app shows them at once and downloads only the ones changed since. Fetching
+// everyone's picture at every visit was most of what the app downloaded. Signing out clears them.
+const PIC_URL = /^data:image\/(jpeg|png|webp);base64,/;
+const PIC_KEY = "editroom.pics";
+function restorePics() {
+  let kept = null;
+  try { const o = JSON.parse(localStorage.getItem(PIC_KEY) || "null"); if (o && o.v === 1 && o.p && typeof o.p === "object") kept = o.p; } catch (e) { /* nothing kept */ }
+  if (!kept) return;
+  for (const u of state.users.values()) {
+    const k = kept[u.id];
+    if (u.has && !pics.has(u.id) && Array.isArray(k) && k[0] === u.av && typeof k[1] === "string" && PIC_URL.test(k[1])) pics.set(u.id, { ver: u.av, url: k[1] });
+  }
+}
+function keepPics() {
+  const p = {};
+  for (const [id, pic] of pics) if (pic.url && state.users.has(id)) p[id] = [pic.ver, pic.url];
+  try { localStorage.setItem(PIC_KEY, JSON.stringify({ v: 1, p: p })); }
+  catch (e) { try { localStorage.removeItem(PIC_KEY); } catch (e2) { /* none kept: they download at each visit, as before */ } }
+}
+function forgetPics() {
+  pics.clear();
+  try { localStorage.removeItem(PIC_KEY); } catch (e) { /* nothing was kept */ }
 }
 let picBusy = false;
 async function loadPics() {
   if (picBusy || state.phase !== "ready") return;
-  const want = [];
+  const want = [];        // [id, version asked for]: if a picture changes while this one downloads, the next look fetches it again
+  let dropped = false;
   for (const u of state.users.values()) {
     const have = pics.get(u.id);
-    if (u.has && (!have || have.ver !== u.av)) want.push(u.id);
-    else if (!u.has && have) { pics.delete(u.id); schedule(); }
+    if (u.has && (!have || have.ver !== u.av)) want.push([u.id, u.av]);
+    else if (!u.has && have) { pics.delete(u.id); dropped = true; }
   }
+  if (dropped) { keepPics(); schedule(); }
   if (!want.length) return;
   picBusy = true;
   try {
-    const r = (await call("er_avatars", { p_ids: want.slice(0, 24) })) || {};
-    for (const id of want.slice(0, 24)) {
-      const u = state.users.get(id), url = typeof r[id] === "string" && /^data:image\/(jpeg|png|webp);base64,/.test(r[id]) ? r[id] : "";
-      pics.set(id, { ver: u ? u.av : 0, url: url });
-    }
+    const batch = want.slice(0, 24);
+    const r = (await call("er_avatars", { p_ids: batch.map((w) => w[0]) })) || {};
+    if (state.phase !== "ready") { picBusy = false; return; }          // signed out while it downloaded
+    for (const [id, ver] of batch) pics.set(id, { ver: ver, url: typeof r[id] === "string" && PIC_URL.test(r[id]) ? r[id] : "" });
+    keepPics();
     schedule();
     if (want.length > 24) { picBusy = false; loadPics(); return; }
   } catch (e) { /* initials stay until the next try */ }

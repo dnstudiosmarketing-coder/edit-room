@@ -67,7 +67,9 @@ Each brief carries its own delivery time and grace period (`due_hours`, `grace_h
 
 Payment details live in `app.details`: saving a change adds a row, and the newest row is the one in use, so every earlier account stays on record. They reach an admin only through `er_details`, one editor at a time, never in `er_state`.
 
-Nothing in the database ever removes a row. Sessions are revoked, projects and logins are marked as removed. Keep it that way: it preserves the record, and it means changes can be applied without a destructive statement.
+Profile pictures reach the app through `er_avatars`, as small squares. The browser keeps them (`editroom.pics` in its storage, each with its version from `avatar_ver`), so opening the app downloads only the pictures that changed since; signing out clears them. Before, every visit fetched everyone's picture, which was most of what the app downloaded from Supabase.
+
+Nothing in the database ever removes a row. Sessions are revoked, projects and logins are marked as removed. Keep it that way: it preserves the record, and it means changes can be applied without a destructive statement. The one thing cleared is pg_cron's own log of timer runs, which isn't the team's record (see the notes at the end).
 
 ## Making a change
 
@@ -128,7 +130,7 @@ ER_BACKEND=real POSTGREST=/path/to/postgrest node deploy-shape.mjs   # pages in 
 - **Supabase's free plan** pauses a project after about a week with no use. Open the project in the Supabase dashboard and restore it; nothing is lost.
 - `app.login_log` is an empty table left over from the first version of the sign-in code. It is not used and can be dropped.
 - The `pg_net` extension lets the database nudge the notification sender; `pg_cron` runs `app.notice_tick()` every minute (job `dn-notices`). To see what was sent: `select kind, title, result, created_at from app.outbox order by created_at desc limit 20;` and, for reminders, the same from `app.reminders`.
-- pg_cron writes one line to its own log, `cron.job_run_details`, for every run: about 1,440 a day, very roughly 80 MB a year. That is pg_cron's diary, not the team's records. If the database ever nears the free plan's size limit, clear the old lines in the SQL editor: `delete from cron.job_run_details where end_time < now() - interval '7 days';`
+- pg_cron writes one line to its own log, `cron.job_run_details`, for every run: about 1,440 a day, roughly 100 MB a year if kept. That is pg_cron's diary, not the team's records, so a second job, `dn-timer-log`, clears the lines older than a week every night at 03:17 UTC. A week is plenty to see whether the timer has been running.
 - **Notifications stopped?** Check the job is there (`select * from cron.job`), that `app.meta.push_url` is set, and the `dn-push` function's logs in the Supabase dashboard.
 - **Uploads stopped?** Settings → Google Drive says if Google ended the connection; Connect again fixes it. Otherwise check the `dn-drive` function's logs, that its secrets are set, and that the Google Cloud project is still published. What happened to each upload is in `app.uploads` (`result`), and every connection in `app.drive`.
 - The font (Barlow) is served from `fonts/` under the SIL Open Font License; the licence text is in that folder.
