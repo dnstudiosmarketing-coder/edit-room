@@ -42,7 +42,7 @@ const state = {
 // Older projects for the admin's Projects list, fetched a page at a time for the filters in use.
 const hist = { key: null, rows: new Map(), next: null, more: false, busy: false, failed: false };
 function resetHist() { hist.key = null; hist.rows = new Map(); hist.next = null; hist.more = false; hist.busy = false; hist.failed = false; }
-const ui = { view: "editor", tab: "inbox", etab: "work", fStatus: "active", fEditor: "all", fCat: "all", period: "week", manage: null, limit: 40, older: false, earnAll: false, spark: null, bCat: "all", bLimit: 30 };
+const ui = { view: "editor", tab: "inbox", etab: "work", fStatus: "active", fEditor: "all", fCat: "all", period: "week", manage: null, limit: 40, older: false, earnAll: false, spark: null, bCat: "all", bLimit: 30, allOnTime: false };
 const pics = new Map();        // user id -> { ver, url }
 
 /* ---------- small helpers ---------- */
@@ -1225,7 +1225,7 @@ function setupCard() {
         editors ? null : h("button", { class: "btn small", type: "button", dataset: { fk: "toteam" }, onclick: () => setTab("settings") }, "Open Settings"))),
       h("li", null, h("div", { class: "step-body" },
         h("span", { class: "step-title", text: "Download finished work from this inbox" }),
-        h("span", { class: "hint", text: "Editors log a brief when they get it and submit with a Drive link. Each submission lands here, and anything past its deadline is listed below it." })))));
+        h("span", { class: "hint", text: "Editors log a brief when they get it and submit with a Drive link. Each submission lands here. Briefs in progress are listed below it, newest first, then anything past its deadline." })))));
 }
 function viewInbox(all) {
   const out = [];
@@ -1254,10 +1254,29 @@ function viewInbox(all) {
     h("div", { class: "section-head" }, h("h2", { class: "section-title", text: "Scripts not taken on yet" }),
       scripts.length > 1 ? h("p", { class: "section-note", text: scripts.some((x) => x.status === "declined") ? "Turned down first" : "Oldest first" }) : null),
     h("div", { class: "grid" }, scripts.map(scriptCard))));
+  // briefs still on time, newest first, so a job an editor has just logged shows up here straight away (the
+  // late ones follow, in a section of their own)
+  const onTime = active.filter((x) => x.f.phase === "ontrack").sort((a, b) => b.p.startedAt - a.p.startedAt || (a.p.id < b.p.id ? 1 : -1));
+  if (onTime.length) out.push(h("section", { class: "section", id: "in-progress" },
+    h("div", { class: "section-head" }, h("h2", { class: "section-title", text: "In progress" }), h("p", { class: "section-note", text: onTime.length > 1 ? "On time, newest first" : "On time" })),
+    h("ul", { class: "rows" }, (ui.allOnTime || onTime.length <= 10 ? onTime : onTime.slice(0, 8)).map(progressRow)),
+    onTime.length > 10 ? h("div", { class: "btn-row" }, h("button", { class: "btn small", type: "button", dataset: { fk: "ontime" }, onclick: () => { ui.allOnTime = !ui.allOnTime; schedule(); } }, ui.allOnTime ? "Show fewer" : "Show all " + onTime.length)) : null));
   if (past.length) out.push(h("section", { class: "section" },
     h("div", { class: "section-head" }, h("h2", { class: "section-title", text: "Past the deadline" }), past.length > 1 ? h("p", { class: "section-note", text: "Most overdue first" }) : null),
     h("div", { class: "grid" }, past.map(pastCard))));
   return out;
+}
+// One line per brief in progress: what it is, who has it, how far along, and how long is left.
+function progressRow(x) {
+  const p = x.p, bits = [catOf(p).name, "logged " + ago(p.startedAt), p.stage === 1 ? "just started" : STAGES[p.stage - 1].toLowerCase()];
+  if (p.from) bits.push("reassigned from " + displayName(p.from));
+  if (p.backAt) bits.push("sent back " + ago(p.backAt));
+  return h("li", null,
+    h("div", { class: "row-main" },
+      h("span", { class: "row-title", text: p.name }),
+      h("div", { class: "row-head spread" }, person(x.uid), deadlinePill(x, false)),
+      h("span", { class: "hint", text: bits.join(", ") }),
+      p.update ? h("span", { class: "hint", text: "Latest update: " + p.update }) : null));
 }
 function scriptCard(sc) {
   const cat = catOf(sc), key = "sc:" + sc.id, declined = sc.status === "declined";

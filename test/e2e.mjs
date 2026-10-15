@@ -225,6 +225,12 @@ try {
   await tab(admin, "inbox");
   await admin.locator(".stat", { hasText: "In progress" }).locator(".stat-num", { hasText: "1" }).waitFor();
   ok(true, "the admin's inbox counts the brief as in progress");
+  const inRow = admin.locator("#in-progress li", { hasText: "Night market short" });
+  await inRow.waitFor();
+  ok(/Ada Obi/.test(await inRow.innerText()) && /Shorts, logged (just now|\dm ago), rough cut/.test(await inRow.innerText()) && /Latest update: Waiting on the voice-over/.test(await inRow.innerText()) && /Due in 2[34]h/.test(await inRow.innerText()),
+    "and lists it under In progress, with who has it, how far along it is and how long is left", (await inRow.innerText()).replace(/\n/g, " | "));
+  await admin.locator("#in-progress").scrollIntoViewIfNeeded();
+  await look(admin, "10a-admin-inbox-progress", "admin inbox with a brief in progress");
   await tab(admin, "projects");
   const aCard = admin.locator("#p-list article.clip", { hasText: "Night market short" });
   await aCard.waitFor();

@@ -388,6 +388,7 @@ fieldset.field > legend { padding: 0 0 6px; font-size: 14px; font-weight: 600; }
 .row-main > * { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .row-title { font-weight: 600; overflow-wrap: anywhere; }
 .row-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; min-width: 0; }
+.row-head.spread { justify-self: stretch; justify-content: space-between; }      /* who on the left, how long is left on the right */
 .row-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .rows-empty { padding: 16px; color: var(--ink-3); font-size: 14px; }
 .sheet-body .rows { background: var(--inset); }
