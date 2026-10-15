@@ -49,6 +49,7 @@ const settle = (page) => page.evaluate(() => new Promise((r) => requestAnimation
 const pick = async (page, sel, value) => { await page.selectOption(sel, value); await settle(page); };
 const closed = (page) => page.waitForFunction(() => !document.getElementById("sheet").open);
 const toast = async (page, text) => { await page.locator("#toast", { hasText: text }).waitFor(); };
+const until = async (fn, ms) => { const stop = Date.now() + (ms || 8000); while (Date.now() < stop) { if (await fn()) return true; await new Promise((r) => setTimeout(r, 50)); } return false; };
 const see = async (page, text, label) => {
   try { await page.getByText(text).first().waitFor(); ok(true, label); }
   catch (e) { ok(false, label, "did not find: " + text); }
@@ -64,7 +65,8 @@ async function look(page, name, label) {
     const unlabeled = Array.from(document.querySelectorAll("input, select, textarea")).filter((el) => el.type !== "hidden" && !(el.labels && el.labels.length) && !el.getAttribute("aria-label")).map((el) => el.id || el.name || el.type);
     const small = Array.from(document.querySelectorAll("button, a.btn, select, input:not([type=file]):not([type=radio])")).filter((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && (r.height < 36 || r.width < 36) && !el.closest(".spark"); }).map((el) => (el.textContent || el.id || el.tagName).trim().slice(0, 24) + " " + Math.round(el.getBoundingClientRect().width) + "x" + Math.round(el.getBoundingClientRect().height));
     // a value that was never filled in shows up as one of these words
-    const stray = ((document.body.innerText + " " + Array.from(document.querySelectorAll("[aria-label], [title], [placeholder]")).map((el) => [el.getAttribute("aria-label"), el.getAttribute("title"), el.getAttribute("placeholder")].join(" ")).join(" ")).match(/\b(null|undefined|NaN|Infinity)\b|\[object /g) || []).join(", ");
+    const all = document.body.innerText + " " + Array.from(document.querySelectorAll("[aria-label], [title], [placeholder]")).map((el) => [el.getAttribute("aria-label"), el.getAttribute("title"), el.getAttribute("placeholder")].join(" ")).join(" ");
+    const stray = Array.from(all.matchAll(/\b(null|undefined|NaN|Infinity)\b|\[object /g)).map((m) => JSON.stringify(all.slice(Math.max(0, m.index - 40), m.index + 20))).join(", ");      // with what's around it
     return { wide, unlabeled, small, stray };
   });
   ok(!m.stray, (label || name) + ": no unfilled values on screen", m.stray);
@@ -1077,12 +1079,12 @@ try {
   await closed(pa);
   // an editor puts it off for now
   const pe = await pushPhone("push editor", ["tunde.bello", newPw]);      // the password the admin reset earlier
-  await see(pe, "Get a ping when a deadline passes", "editors are offered pings about their deadlines");
+  await see(pe, "Get a ping for new scripts and deadlines", "editors are offered pings about new scripts and their deadlines");
   await pe.getByRole("button", { name: "Not now" }).click();
-  await gone(pe, "Get a ping when a deadline passes", "Not now puts the offer away");
+  await gone(pe, "Get a ping for new scripts and deadlines", "Not now puts the offer away");
   await pe.reload();
   await pe.locator("#tabs").waitFor();
-  ok((await pe.getByText("Get a ping when a deadline passes").count()) === 0, "and it stays away for a while");
+  ok((await pe.getByText("Get a ping for new scripts and deadlines").count()) === 0, "and it stays away for a while");
   // an editor submitting pings the admin's phone
   await tab(ada, "work");
   await ada.locator("article.clip", { hasText: "Quick turnaround" }).getByRole("button", { name: "Submit with Drive link" }).click();
@@ -1250,6 +1252,75 @@ try {
   await graceLeft(tp2, /^(36h|35h 5\dm) left$/);
   ok(Math.abs((await levelOf(gb)) - 75) < 1.5, "setting it back fills the battery back up", String(await levelOf(gb)));
   await tp2.context().close();
+
+  /* ------------------------------------------------------------ a media buyer: the approved videos, to download */
+  await tab(admin, "settings");
+  await admin.locator("#add-user").click();
+  await admin.fill("#nu-name", "Bola Buyer");
+  await pick(admin, "#nu-role", "buyer");
+  const buyerUser = await admin.inputValue("#nu-user"), buyerPass = await admin.inputValue("#nu-pass");
+  await sheet(admin).getByRole("button", { name: "Create login" }).click();
+  await sheet(admin).getByText("Login created").waitFor();
+  await sheet(admin).getByRole("button", { name: "Done" }).click();
+  await closed(admin);
+  const buyerRow = admin.locator("#view .rows").first().locator("> li", { hasText: "Bola Buyer" });
+  await buyerRow.waitFor();
+  ok(/Media buyer/.test(await buyerRow.innerText()), "an admin can add a media buyer, who shows as one in the team list", (await buyerRow.innerText()).replace(/\n/g, " | "));
+  const approvedNow = (await sql("select name, link from app.projects where status = 'submitted' and received_at is not null and not deleted order by (extract(epoch from received_at) * 1000)::bigint desc, id desc")).rows;
+  const bola = await open("bola");
+  await bola.fill("#li-user", buyerUser);
+  await bola.fill("#li-pass", buyerPass);
+  await bola.getByRole("button", { name: "Sign in" }).click();
+  await bola.getByText("Finished videos").waitFor();
+  ok((await bola.locator("#tabs").isHidden()) && (await bola.locator("#who .who-role").innerText()) === "Media buyer", "a media buyer gets one screen, and the header says what they are");
+  const buyerCards = bola.locator("#view article.clip");
+  ok(approvedNow.length > 30 && (await buyerCards.locator(".clip-title").allInnerTexts()).join("|") === approvedNow.slice(0, 30).map((r) => r.name).join("|"), "they see the approved videos, newest first, 30 at a time", (await buyerCards.locator(".clip-title").allInnerTexts()).slice(0, 5).join("|"));
+  await bola.getByRole("button", { name: "Show more" }).click();
+  ok(await until(async () => (await buyerCards.count()) === Math.min(60, approvedNow.length)), "Show more brings the next 30", String(await buyerCards.count()));
+  const onDrive = approvedNow.find((r) => /^https:\/\/drive\.google\.com\/file\/d\/[^/]+/.test(r.link || ""));
+  const dlHref = onDrive ? await bola.locator("article.clip", { hasText: onDrive.name }).getByRole("link", { name: "Download" }).getAttribute("href") : null;
+  ok(onDrive && dlHref === "https://drive.google.com/uc?export=download&id=" + /\/file\/d\/([^/]+)/.exec(onDrive.link)[1], "each Drive video has a Download button that downloads the file itself", dlHref);
+  ok((await bola.getByText("Log a new brief").count()) === 0 && (await bola.getByText("Leaderboard").count()) === 0 && (await bola.getByText("Payment details").count()) === 0, "and nothing of the editors' work, pay or leaderboard");
+  await look(bola, "51-buyer-videos", "the media buyer's screen");
+  await bola.locator("#who").click();
+  await sheet(bola).getByText("Your account").waitFor();
+  ok((await sheet(bola).locator("#ac-pay").count()) === 0 && /Your name is set by your admin\./.test(await sheet(bola).innerText()) && !/leaderboard/i.test(await sheet(bola).innerText()), "a media buyer's account sheet has no payment details", (await sheet(bola).innerText()).replace(/\n/g, " | ").slice(0, 200));
+  await look(bola, "52-buyer-account", "the media buyer's account sheet");
+  await sheet(bola).getByRole("button", { name: "Cancel" }).click();
+  await closed(bola);
+  // a video approved while they're there arrives at the top, marked new
+  await tab(ada, "work");
+  await ada.getByRole("button", { name: "Log a new brief" }).click();
+  await ada.fill("#b-name", "Buyer test reel");
+  await ada.selectOption("#b-cat", { label: "Ads" });
+  await sheet(ada).getByRole("button", { name: "Log brief" }).click();
+  await closed(ada);
+  await ada.locator("article.clip", { hasText: "Buyer test reel" }).getByRole("button", { name: "Submit with Drive link" }).click();
+  await ada.fill("#s-link", "https://drive.google.com/file/d/buyerReel77/view");
+  await sheet(ada).getByRole("button", { name: "Submit project" }).click();
+  await closed(ada);
+  await sync(bola);
+  await bola.waitForTimeout(300);
+  ok((await bola.getByText("Buyer test reel").count()) === 0, "a video waiting for the admin doesn't reach the buyer");
+  await tab(admin, "inbox");
+  await sync(admin);
+  await admin.locator("article.clip", { hasText: "Buyer test reel" }).getByRole("button", { name: "Mark received" }).click();
+  await toast(admin, "Received.");
+  await sync(bola);
+  const fresh = buyerCards.first();
+  await fresh.getByText("Buyer test reel").waitFor();
+  ok(/New/.test(await fresh.locator(".pills").innerText()) && /Approved just now, made by Ada O\.(?!\.)/.test(await fresh.innerText()), "once the admin approves it, it's at the top of the buyer's list, marked new", (await fresh.innerText()).replace(/\n/g, " | "));
+  // only the category they pick
+  const adsId = (await sql("select id from app.categories where name = 'Ads' and not archived")).rows[0].id;
+  await pick(bola, "#v-cat", adsId);
+  const tapes = await buyerCards.locator(".tape").allInnerTexts();
+  ok(tapes.length > 0 && tapes.every((t) => t === "Ads") && tapes.length < (await sql("select count(*)::int as n from app.projects where status = 'submitted' and received_at is not null and not deleted")).rows[0].n, "they can show one category at a time", tapes.join(","));
+  await pick(bola, "#v-cat", "all");
+  await fresh.getByRole("button", { name: "Watch" }).click();
+  await bola.locator("#player iframe").waitFor();
+  ok((await frameSrc(bola)) === "https://drive.google.com/file/d/buyerReel77/preview" && /Ada O\./.test(await bola.locator("#player .player-by").innerText()), "and watch a video in the app before downloading it", await frameSrc(bola));
+  await bola.locator("#player").getByRole("button", { name: "Close" }).click();
+  await bola.context().close();
   // the offline helper shows what arrives, with the studio's badge, and buzzes (the lightweight test browser
   // can't show notifications at all, so this one check runs in the full one)
   const full = await chromium.launch({ channel: "chromium" });
@@ -1267,6 +1338,12 @@ try {
   let shown = [];
   for (let i = 0; i < 40 && !shown.length; i++) { await np.waitForTimeout(100); shown = await np.evaluate(async () => (await (await navigator.serviceWorker.ready).getNotifications()).map((n) => ({ title: n.title, body: n.body, tag: n.tag, badge: n.badge, icon: n.icon, vibrate: Array.from(n.vibrate || []) }))); }
   ok(shown.length === 1 && shown[0].title === "Video submitted: Night market short" && shown[0].body === "Ada Obi submitted it on time." && shown[0].tag === "submitted:abc" && /badge-96\.png$/.test(shown[0].badge) && /icon-192\.png$/.test(shown[0].icon) && shown[0].vibrate.join() === "180,80,180", "a notification arriving on the phone shows what came in, with the studio's badge and a buzz", JSON.stringify(shown));
+  // a media buyer's ping keeps its download, for the tap to open; any other address is ignored
+  await cdp.send("ServiceWorker.deliverPushMessage", { origin: srv.url, registrationId: reg.registrationId, data: JSON.stringify({ title: "New video: Night market short", body: "Shorts. Tap to download it.", tag: "video:abc", url: "https://drive.google.com/uc?export=download&id=abc123" }) });
+  await cdp.send("ServiceWorker.deliverPushMessage", { origin: srv.url, registrationId: reg.registrationId, data: JSON.stringify({ title: "Odd", body: "x", tag: "odd", url: "javascript:alert(1)" }) });
+  let taps = [];
+  for (let i = 0; i < 40 && taps.length < 2; i++) { await np.waitForTimeout(100); taps = await np.evaluate(async () => (await (await navigator.serviceWorker.ready).getNotifications()).filter((n) => n.tag !== "submitted:abc").map((n) => ({ tag: n.tag, url: n.data && n.data.url }))); }
+  ok(taps.find((t) => t.tag === "video:abc").url === "https://drive.google.com/uc?export=download&id=abc123" && taps.find((t) => t.tag === "odd").url === "./", "a media buyer's video ping carries its download link; anything else opens the app", JSON.stringify(taps));
   await full.close();
 } catch (e) {
   ok(false, "the run stopped early", String(e && e.message).split("\n").slice(0, 4).join(" / "));

@@ -171,7 +171,42 @@ try {
   ok((await call({ action: "start", token: TA, project: p2, folder: folderId("Proxan"), size: 100, type: "video/mp4" })).body.error === "drive_off", "with Drive disconnected, nobody can upload");
   r = await call({ action: "connect", token: A, back: APP_URL });
   await back({ state: stateOf(r.body.url), code: google.code(SELF) });
-  globalThis.__drive = { A, TA, TT, cat, fProxan };
+
+  // ---- scripts: the admin sends one, it's kept in a folder of its own in Drive, and opened from there
+  const adaId = (await db.sql("select id from app.users where username = 'ada'")).rows[0].id;
+  const doc = crypto.randomBytes(9300), docB64 = doc.toString("base64");
+  const send = (tok, extra) => call(Object.assign({ action: "script_send", token: tok, editor: adaId, category: cat, name: "", file: { name: "Proxan script 15.docx", data: docB64 } }, extra || {}));
+  ok((await send(TA)).body.error === "forbidden", "only an admin can send a script");
+  ok((await send(A, { file: null })).body.error === "invalid" && (await send(A, { file: { name: "virus.exe", data: docB64 } })).body.error === "not_script", "it must come with a document");
+  r = await send(A);
+  const sc = r.body, inDrive = Array.from(google.files.values()).filter((f) => f.appProperties && f.appProperties.dnScript === sc.script);
+  const scFolder = Array.from(google.files.values()).filter((f) => f.name === "DN Studios scripts");
+  ok(sc.ok && sc.name === "Proxan script 15" && inDrive.length === 1 && scFolder.length === 1 && inDrive[0].parents[0] === scFolder[0].id && inDrive[0].name === "Proxan script 15.docx"
+    && inDrive[0].mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" && Buffer.compare(inDrive[0].content, doc) === 0,
+    "the script goes into a DN Studios scripts folder the app makes in Drive, exactly as sent", JSON.stringify(sc));
+  const scRow = (await db.sql("select status, file_id, size from app.scripts where id = $1", [sc.script])).rows[0];
+  ok(scRow.status === "waiting" && scRow.file_id === inDrive[0].id && scRow.size === doc.length && (await db.rpc("er_state", { p_token: TA })).scripts.some((x) => x.id === sc.script), "and waits for the editor, with only its Drive id kept in the database", JSON.stringify(scRow));
+  r = await send(A, { name: "Proxan script 16" });
+  ok(r.body.ok && Array.from(google.files.values()).filter((f) => f.name === "DN Studios scripts").length === 1, "the next one goes into the same folder");
+  google.files.get(scFolder[0].id).trashed = true;
+  r = await send(A, { name: "Proxan script 17" });
+  const folders2 = Array.from(google.files.values()).filter((f) => f.name === "DN Studios scripts" && !f.trashed);
+  ok(r.body.ok && folders2.length === 1 && folders2[0].id !== scFolder[0].id && (await db.sql("select scripts_folder from app.drive where ended_at is null")).rows[0].scripts_folder === folders2[0].id, "if the folder is put in the bin, a new one is made");
+  google.failSmall = 1;
+  r = await send(A, { name: "Unlucky script" });
+  const failedRow = (await db.sql("select status, note from app.scripts where name = 'Unlucky script'")).rows[0];
+  ok(r.body.error === "google" && failedRow.status === "failed" && /503/.test(failedRow.note) && !(await db.rpc("er_state", { p_token: TA })).scripts.some((x) => x.name === "Unlucky script"), "if Google fails, the script is marked failed and nobody sees it", JSON.stringify(failedRow));
+  const open = (tok, id) => call({ action: "script_open", token: tok, script: id || sc.script });
+  ok((await open(TA)).body.error === "not_found" && (await open(TT)).body.error === "not_found", "the editor can't open it before taking it on, and nobody else can");
+  r = await open(A);
+  ok(r.body.name === "Proxan script 15.docx" && Buffer.compare(Buffer.from(r.body.data, "base64"), doc) === 0, "an admin can open it, straight from Drive");
+  await db.rpc("er_accept_script", { p_token: TA, p_script: sc.script });
+  r = await open(TA);
+  ok(r.body.mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" && Buffer.compare(Buffer.from(r.body.data, "base64"), doc) === 0, "once the editor takes it on, they can open it");
+  ok((await open(TT)).body.error === "not_found", "still nobody else on the team can");
+  google.files.delete(inDrive[0].id);
+  ok((await open(TA)).body.error === "script_gone", "a script deleted from Drive is reported as gone");
+  globalThis.__drive = { A, TA, TT, cat, fProxan, adaId };
 } catch (e) {
   ok(false, "the run stopped early", String(e && e.stack).split("\n").slice(0, 4).join(" / "));
 }

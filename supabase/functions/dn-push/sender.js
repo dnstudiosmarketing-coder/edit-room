@@ -29,6 +29,27 @@ export async function loadKeys(sql) {
 
 const tagOf = (r) => r.kind + (r.project ? ":" + r.project : "");
 
+// Where tapping a ping goes. A media buyer's ping about an approved video goes straight to its download: a
+// Google Drive file link becomes Drive's own download address, and any other link is used as it is. Every
+// other ping opens the app ("./").
+export function downloadUrl(raw) {
+  let u;
+  try { u = new URL(String(raw || "")); } catch (e) { return null; }
+  if (u.protocol !== "https:") return null;
+  const host = u.hostname.toLowerCase();
+  if (host === "drive.google.com" || host === "docs.google.com" || host === "drive.usercontent.google.com") {
+    const m = /\/file\/(?:u\/\d+\/)?d\/([^/]+)/.exec(u.pathname);
+    const id = m ? m[1] : u.searchParams.get("id"), key = u.searchParams.get("resourcekey");
+    if (id && /^[A-Za-z0-9_-]{5,128}$/.test(id)) return "https://drive.google.com/uc?export=download&id=" + id + (key && /^[A-Za-z0-9_-]{1,128}$/.test(key) ? "&resourcekey=" + key : "");
+  }
+  return u.href;
+}
+async function tapUrl(sql, r) {
+  if (r.kind !== "video" || !r.project) return "./";
+  const [row] = await sql`select app.push_link(${r.kind}, ${r.project}::uuid) as link`;
+  return downloadUrl(row && row.link) || "./";
+}
+
 export async function deliver(sql, keys, opts = {}) {
   const tally = { notices: 0, sent: 0, gone: 0, failed: 0 };
   const stop = Date.now() + (opts.budgetMs ?? 25000);
@@ -39,7 +60,7 @@ export async function deliver(sql, keys, opts = {}) {
     for (const r of rows) { const list = byNotice.get(r.notice) || []; list.push(r); byNotice.set(r.notice, list); }
     await Promise.all(Array.from(byNotice.values()).map(async (list) => {
       const first = list[0];
-      const payload = JSON.stringify({ title: first.title, body: first.body, tag: tagOf(first), url: "./" });
+      const payload = JSON.stringify({ title: first.title, body: first.body, tag: tagOf(first), url: await tapUrl(sql, first) });
       const ok = [], gone = [];
       let failed = 0, note = null;
       await Promise.all(list.filter((r) => r.sub).map(async (r) => {

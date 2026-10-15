@@ -613,6 +613,122 @@ for (let i = 0; i < 38; i++) await start(TA, db1, fMeno, 1000, "video/mp4", "mp4
 await fails(start(TA, db1, fMeno, 1000, "video/mp4", "mp4"), "too_many", "one login can start at most 40 uploads a day");
 await rpc("er_delete_project", { p_token: A, p_project: db1 });
 
+// ---- scripts sent through the app: the admin sends one (the dn-drive function keeps the file in Drive), the
+// editor takes it on, and only then does its clock start and can they open it
+const phone = (uid, tag) => sql("insert into app.push_subs(user_id, endpoint, p256dh, auth) values ($1, $2, $3, $4) on conflict do nothing", [uid, "https://fcm.googleapis.com/fcm/send/" + tag, "B".repeat(87), "A".repeat(22)]);
+await phone(ada, "script-ada"); await phone(tunde, "script-tunde"); await phone(adminId, "script-admin");
+const pings = async (uid, kind) => (await sql("select title, body from app.outbox where user_id = $1 and kind = $2 order by created_at, id", [uid, kind])).rows;
+const newScript = (tok, editor, cat, name, file, size) => one("select app.script_new($1, $2, $3, $4, $5, $6) as s", [tok, editor, cat, name, file, size]);
+await fails(newScript(TA, tunde, ads, "", "Proxan 14.docx", 9000), "forbidden", "only an admin sends scripts");
+await fails(newScript(A, adminId, ads, "", "Proxan 14.docx", 9000), "not_found", "scripts go to editors only");
+await fails(newScript(A, ada, null, "", "Proxan 14.docx", 9000), "need_category", "a script needs a category while there are any");
+await fails(newScript(A, ada, ads, "", "Proxan 14.exe", 9000), "not_script", "a file that isn't a document is refused");
+await fails(newScript(A, ada, ads, "", "Proxan 14.docx", 20 * 1048576), "too_big", "and so is one over 10 MB");
+const sc1 = (await newScript(A, ada, ads, "  ", "Proxan  video 14.DOCX", 9216)).s;
+ok(sc1.script && sc1.name === "Proxan video 14" && sc1.file === "Proxan  video 14.DOCX" && sc1.mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  && sc1.folder === null && sc1.conn && sc1.editor === (await one("select name from app.users where id = $1", [ada])).name && sc1.cat === "Ads", "a script is named after its file unless the admin names it, and dn-drive is told where to keep it", JSON.stringify(sc1));
+ok((await rpc("er_state", { p_token: TA })).scripts.length === 0, "the editor sees nothing until the file is safely in Drive");
+await sql("select app.scripts_folder_set($1, $2)", [sc1.conn, "fldScripts0000001"]);
+ok((await newScript(A, ada, ads, "Spare", "spare.pdf", 10)).s.folder === "fldScripts0000001", "once dn-drive has made the scripts folder, it is used for every script");
+await sql("select app.script_failed(id, 'Google said 500') from app.scripts where name = 'Spare'");
+await sql("select app.script_saved($1, $2)", [sc1.script, "docFile00000001"]);
+let ast = await rpc("er_state", { p_token: TA });
+ok(ast.scripts.length === 1 && ast.scripts[0].id === sc1.script && ast.scripts[0].name === "Proxan video 14" && ast.scripts[0].cat === ads && !JSON.stringify(ast.scripts).includes("docFile"),
+  "once saved, the script waits on the editor's screen (a script that failed to save never shows)", JSON.stringify(ast.scripts));
+ok((await pings(ada, "assigned")).some((r) => r.title === "New script: Proxan video 14" && /Accept it to open it and start your 24-hour deadline/.test(r.body)), "and their phone pings", JSON.stringify(await pings(ada, "assigned")));
+ok((await rpc("er_state", { p_token: TT })).scripts.length === 0, "nobody else sees it");
+let adm = await rpc("er_state", { p_token: A });
+ok(adm.scripts.length === 1 && adm.scripts[0].u === ada && adm.scripts[0].status === "waiting" && adm.scripts[0].file === "Proxan  video 14.DOCX" && adm.scripts[0].by === adminId, "the admin sees it waiting for that editor", JSON.stringify(adm.scripts));
+await fails(sql("select app.script_file($1, $2)", [TA, sc1.script]), "not_found", "the editor can't open the file before taking it on");
+ok((await one("select app.script_file($1, $2) as f", [A, sc1.script])).f.file === "docFile00000001", "an admin can open it any time");
+await fails(rpc("er_accept_script", { p_token: TT, p_script: sc1.script }), "not_found", "only its editor can take it on");
+await sql("update app.scripts set sent_at = now() - interval '3 hours' where id = $1", [sc1.script]);
+const acc = await rpc("er_accept_script", { p_token: TA, p_script: sc1.script });
+ast = await rpc("er_state", { p_token: TA });
+const fromScript = ast.projects.find((p) => p.id === acc.id);
+ok(acc.ok && fromScript && fromScript.name === "Proxan video 14" && fromScript.cat === ads && fromScript.script === sc1.script && Math.abs(fromScript.started - Date.now()) < 5000
+  && fromScript.due - fromScript.started === 24 * 3600e3 && ast.scripts.length === 0, "taking it on makes the brief: its clock starts then, not when it was sent", JSON.stringify(fromScript));
+ok((await rpc("er_accept_script", { p_token: TA, p_script: sc1.script })).id === acc.id && (await one("select count(*)::int as n from app.projects where script_id = $1", [sc1.script])).n === 1, "pressing it twice makes one brief");
+ok((await one("select app.script_file($1, $2) as f", [TA, sc1.script])).f.name === "Proxan  video 14.DOCX", "now the editor can open the file");
+await fails(sql("select app.script_file($1, $2)", [TT, sc1.script]), "not_found", "but nobody else on the team can");
+ok((await rpc("er_state", { p_token: A })).scripts.length === 0 && (await rpc("er_state", { p_token: A })).projects.find((p) => p.id === acc.id).script === sc1.script, "the admin sees it as a brief like any other, with its script");
+// turned down, given to someone else, taken back
+const sc2 = (await newScript(A, tunde, longf, "Menoprime explainer", "meno.doc", 5000)).s;
+await sql("select app.script_saved($1, $2)", [sc2.script, "docFile00000002"]);
+await fails(rpc("er_decline_script", { p_token: TA, p_script: sc2.script }), "not_found", "only its editor can turn it down");
+await rpc("er_decline_script", { p_token: TT, p_script: sc2.script, p_note: "  Too busy\n this week " });
+adm = await rpc("er_state", { p_token: A });
+const dec = adm.scripts.find((s) => s.id === sc2.script);
+ok(dec && dec.status === "declined" && dec.note === "Too busy this week" && dec.declined > 0 && (await rpc("er_state", { p_token: TT })).scripts.length === 0, "an editor can say they can't take it, and why; it goes back to the admin", JSON.stringify(dec));
+ok((await pings(adminId, "declined")).some((r) => r.title === "Script not taken: Menoprime explainer" && r.body === "Tunde Bello can't take it: Too busy this week. Give it to someone else in the app."), "the admin's phone pings with the reason", JSON.stringify(await pings(adminId, "declined")));
+await fails(rpc("er_accept_script", { p_token: TT, p_script: sc2.script }), "not_found", "once turned down, it can't be taken on after all");
+await fails(rpc("er_move_script", { p_token: TA, p_script: sc2.script, p_editor: ada }), "forbidden", "only an admin gives it to someone else");
+await fails(rpc("er_move_script", { p_token: A, p_script: sc2.script, p_editor: adminId }), "invalid", "and only to an editor");
+const movedS = await rpc("er_move_script", { p_token: A, p_script: sc2.script, p_editor: ada });
+const old2 = await one("select status, moved_to, note, ended_by from app.scripts where id = $1", [sc2.script]);
+ast = await rpc("er_state", { p_token: TA });
+ok(movedS.id && old2.status === "moved" && old2.moved_to === movedS.id && old2.note === "Too busy this week" && old2.ended_by === adminId && ast.scripts.some((s) => s.id === movedS.id && s.name === "Menoprime explainer" && s.cat === longf),
+  "giving it to someone else closes it (keeping the reason) and it waits for them instead", JSON.stringify(old2));
+ok((await pings(ada, "assigned")).some((r) => r.title === "New script: Menoprime explainer"), "and their phone pings");
+await fails(rpc("er_move_script", { p_token: A, p_script: movedS.id, p_editor: ada }), "invalid", "giving a waiting script to the editor it's already with does nothing");
+await rpc("er_withdraw_script", { p_token: A, p_script: movedS.id });
+ok((await rpc("er_state", { p_token: TA })).scripts.length === 0 && !(await rpc("er_state", { p_token: A })).scripts.some((s) => s.id === movedS.id), "an admin can take a script back before it's taken on");
+await fails(rpc("er_withdraw_script", { p_token: A, p_script: movedS.id }), "not_found", "and only once");
+await fails(rpc("er_accept_script", { p_token: TA, p_script: movedS.id }), "not_found", "a script taken back can't be taken on");
+// a brief made from a script keeps it when the admin reassigns the brief
+const re = await rpc("er_reassign", { p_token: A, p_project: acc.id, p_to: tunde });
+const tProj = (await rpc("er_state", { p_token: TT })).projects.find((p) => p.id === re.id);
+ok(tProj && tProj.script === sc1.script && (await one("select app.script_file($1, $2) as f", [TT, sc1.script])).f.file === "docFile00000001", "a reassigned brief takes its script along, and the new editor can open it");
+await fails(sql("select app.script_file($1, $2)", [TA, sc1.script]), "not_found", "and the editor it was taken from no longer can");
+await sql("select app.drive_unlink($1)", [A]);
+await fails(newScript(A, ada, ads, "", "x.docx", 10), "drive_off", "with Drive disconnected, no script can be sent");
+await sql("select app.drive_link($1, $2, $3)", [adminId, "studio@example.com", "refresh-token-five"]);
+const folderNow = async (name) => (await newScript(A, ada, ads, name, "check.txt", 10)).s.folder;
+const sameAgain = await folderNow("Folder check 1");
+await sql("select app.drive_link($1, $2, $3)", [adminId, "other@example.com", "refresh-token-six"]);
+const otherAcct = await folderNow("Folder check 2");
+await sql("select app.drive_link($1, $2, $3)", [adminId, "Studio@Example.com", "refresh-token-seven"]);
+const backAgain = await folderNow("Folder check 3");
+await sql("select app.script_failed(id, 'not sent') from app.scripts where name like 'Folder check %'");
+ok(sameAgain === "fldScripts0000001" && otherAcct === null && backAgain === "fldScripts0000001", "connecting the same Google account again keeps its scripts folder; another account starts without one", JSON.stringify([sameAgain, otherAcct, backAgain]));
+
+// ---- media buyers: they sign in like editors but only see the videos an admin has approved, and get a ping
+// for each one; they can't touch briefs, scripts or uploads
+const buyer = (await rpc("er_add_user", { p_token: A, p_name: "Bisi Buyer", p_username: "bisi", p_password: "bisi-pass-1", p_role: "buyer" })).id;
+const TB = (await rpc("er_login", { p_username: "bisi", p_password: "bisi-pass-1" })).token;
+await phone(buyer, "buyer-bisi");
+let bst = await rpc("er_state", { p_token: TB });
+const approved = (await sql("select id from app.projects where status = 'submitted' and received_at is not null and not deleted")).rows.map((r) => r.id).sort();
+ok(bst.me.role === "buyer" && bst.projects.length === 0 && bst.scripts.length === 0 && bst.bonuses.length === 0 && bst.board.week.length === 0 && bst.featured.length === 0 && bst.users.length === 1
+  && bst.settings.drive.on === false && bst.settings.drive.folders.length === 0, "a media buyer gets none of the editors' work, pay or leaderboard", JSON.stringify({ users: bst.users, drive: bst.settings.drive }));
+ok(approved.length > 0 && bst.videos.map((v) => v.id).sort().join() === approved.join() && bst.videos.every((v) => v.link && v.at > 0 && v.by && v.name)
+  && bst.videos.every((v, i, a) => i === 0 || a[i - 1].at >= v.at), "they get every approved video, newest first, with its link and who made it", bst.videos.length + " videos");
+for (const [fn, args] of [["er_log_brief", { p_name: "Mine", p_category: ads }], ["er_accept_script", { p_script: sc1.script }], ["er_receive", { p_project: approved[0], p_on: false }], ["er_add_user", { p_name: "X", p_username: "xbuy", p_password: "password1" }]])
+  await fails(rpc(fn, Object.assign({ p_token: TB }, args)), "forbidden", "a media buyer is refused: " + fn);
+await fails(sql("select app.script_file($1, $2)", [TB, sc1.script]), "not_found", "a media buyer can't open scripts");
+await fails(start(TB, acc.id, fMeno, 1000, "video/mp4", "mp4"), "forbidden", "nor upload");
+ok(/new video is ready to download/.test((await rpc("er_test_push", { p_token: TB })) && (await pings(buyer, "test"))[0].body), "their test ping says what they'll hear about", JSON.stringify(await pings(buyer, "test")));
+// a video is approved: every buyer hears once, and the sender gets its link
+// the history made earlier in this run is moved an hour back, so "what changed since" holds only what follows
+await sql("alter table app.projects disable trigger projects_touch");
+await sql("update app.projects set changed_at = changed_at - interval '1 hour'");
+await sql("alter table app.projects enable trigger projects_touch");
+const bCursor = (await rpc("er_state", { p_token: TB })).cursor;
+await rpc("er_submit", { p_token: TT, p_project: re.id, p_link: "https://drive.google.com/file/d/vid0000000014/view", p_note: "" });
+const bBefore = await rpc("er_state", { p_token: TB, p_since: bCursor });
+ok(!bBefore.full && !bBefore.videos.some((v) => v.id === re.id && v.link) && (await pings(buyer, "video")).length === 0, "a video waiting for the admin is not the buyers' yet", JSON.stringify(bBefore.videos));
+await rpc("er_receive", { p_token: A, p_project: re.id, p_on: true });
+let vids = (await rpc("er_state", { p_token: TB, p_since: bCursor })).videos, myVid = vids.find((v) => v.id === re.id);
+ok(vids.length === 1 && myVid && myVid.name === "Proxan video 14" && myVid.cat === ads && myVid.by === "Tunde Bello" && myVid.link === "https://drive.google.com/file/d/vid0000000014/view", "once approved, it reaches the buyers", JSON.stringify(vids));
+ok(JSON.stringify(await pings(buyer, "video")) === JSON.stringify([{ title: "New video: Proxan video 14", body: "Ads. Tap to download it." }]), "and their phones ping", JSON.stringify(await pings(buyer, "video")));
+ok((await one("select app.push_link('video', $1) as l", [re.id])).l === "https://drive.google.com/file/d/vid0000000014/view" && (await one("select app.push_link('submitted', $1) as l", [re.id])).l === null, "the sender is given the video's link for the buyers' pings, and only for those");
+await rpc("er_receive", { p_token: A, p_project: re.id, p_on: false });
+vids = (await rpc("er_state", { p_token: TB, p_since: bCursor })).videos;
+ok(vids.length === 1 && vids[0].id === re.id && vids[0].gone === true && !vids[0].link, "marking it not received takes it back off their list", JSON.stringify(vids));
+await rpc("er_receive", { p_token: A, p_project: re.id, p_on: true });
+ok((await pings(buyer, "video")).length === 1, "approving it again doesn't ping them twice");
+ok((await one("select count(*)::int as n from app.outbox where kind = 'video' and user_id <> $1", [buyer])).n === 0, "only media buyers hear about approved videos");
+
 // ---- switching a login off, roles, lockout
 const admin2 =(await rpc("er_add_user", { p_token: A, p_name: "Kemi Admin", p_username: "kemi", p_password: "kemi-pass-1", p_role: "admin" })).id;
 const TK = (await rpc("er_login", { p_username: "kemi", p_password: "kemi-pass-1" })).token;
@@ -673,7 +789,8 @@ await fails(rpc("er_state", { p_token: A }), "auth", "signing out ends the sessi
 
 // ---- the tables themselves cannot be reached
 for (const q of ["select * from app.users", "select * from app.projects", "select * from app.featured", "select * from app.outbox", "select * from app.push_subs", "select * from app.details", "select app.details_of(null)","select app.push_keys()", "select app.push_claim(5)", "update app.meta set delivery_hours = 1", "select app.who('x')", "select app.password('aaaaaaaa')", "select app.featured_now()",
-                  "select * from app.drive", "select * from app.uploads", "select * from app.drive_key()", "select app.drive_begin('x', 'https://x.example/')", "select * from app.drive_config()"]) {
+                  "select * from app.drive", "select * from app.uploads", "select * from app.drive_key()", "select app.drive_begin('x', 'https://x.example/')", "select * from app.drive_config()",
+                  "select * from app.scripts", "select app.script_new('x', null, null, 'a', 'a.docx', 1)", "select app.script_file('x', null)", "select app.script_saved(null, 'x')", "select app.push_link('video', null)"]) {
   await fails(asAnon(q), "permission denied", "direct access is refused: " + q);
 }
 const pub = await sql("select count(*)::int as n from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname like 'er\\_%' and has_function_privilege('anon', p.oid, 'execute')");
@@ -681,7 +798,7 @@ const hidden = await sql("select count(*)::int as n from pg_proc p join pg_names
 ok(pub.rows[0].n >= 24 && hidden.rows[0].n === 0, "only the er_ functions are callable from outside", pub.rows[0].n + " public, " + hidden.rows[0].n + " private reachable");
 const hashes = await sql("select count(*)::int as n from app.users where removed_at is null and pass_hash like '$2a$10$%' and length(pass_hash) = 60");
 const everyone = await sql("select count(*)::int as n from app.users where removed_at is null");
-ok(hashes.rows[0].n === everyone.rows[0].n && everyone.rows[0].n === 6, "passwords are stored only as bcrypt hashes", hashes.rows[0].n + " of " + everyone.rows[0].n);
+ok(hashes.rows[0].n === everyone.rows[0].n && everyone.rows[0].n === 7, "passwords are stored only as bcrypt hashes", hashes.rows[0].n + " of " + everyone.rows[0].n);
 
 console.log(out.join("\n"));
 console.log(failed ? "\n" + failed + " FAILED" : "\nall " + out.length + " passed" + (process.env.ER_BACKEND === "real" ? " (real PostgreSQL + PostgREST)" : ""));

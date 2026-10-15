@@ -51,17 +51,23 @@ self.addEventListener("push", (event) => {
       tag: typeof d.tag === "string" ? d.tag.slice(0, 100) : undefined,
       renotify: typeof d.tag === "string",
       vibrate: [180, 80, 180],
-      data: { url: "./" },
+      data: { url: typeof d.url === "string" && /^https:\/\//.test(d.url) ? d.url : "./" },     // a media buyer's video ping carries its download
     });
     for (const c of await self.clients.matchAll({ type: "window", includeUncontrolled: true })) c.postMessage({ type: "sync" });
   })());
 });
 
-// Tapping it brings the app forward, or opens it.
+// Tapping it brings the app forward, or opens it. A media buyer's ping about a new video opens its download
+// instead, straight away.
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
+  const go = event.notification.data && event.notification.data.url;
   event.waitUntil((async () => {
     const scope = self.registration.scope;
+    if (typeof go === "string" && /^https:\/\//.test(go) && !go.startsWith(scope)) {
+      for (const c of await self.clients.matchAll({ type: "window", includeUncontrolled: true })) if (c.url.startsWith(scope)) c.postMessage({ type: "sync" });
+      return self.clients.openWindow(go);
+    }
     for (const c of await self.clients.matchAll({ type: "window", includeUncontrolled: true })) {
       if (c.url.startsWith(scope) && "focus" in c) { c.postMessage({ type: "sync" }); return c.focus(); }
     }

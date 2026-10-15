@@ -27,7 +27,7 @@ const state = {
   phase: "boot",               // boot | down | setup | login | ready
   online: true, token: null, skew: 0, cursor: null, lastFull: 0, wantFull: false,
   me: { id: null, name: "", username: "", role: "editor", owner: false, av: 0, has: false },
-  isAdmin: false,
+  isAdmin: false, isBuyer: false,
   config: { categories: [], weeklyTarget: null, deliveryHours: 24, graceHours: 48, currency: "", tz: "UTC", drive: { on: false, email: null, lost: false, folders: [] } },
   prefs: { bonusAmount: null },
   cats: new Map(), users: new Map(), projects: new Map(), bonuses: new Map(),
@@ -35,11 +35,14 @@ const state = {
   featured: [],                                       // "Video of the moment": up to five finished videos the admin put on everyone's home screen
   stats: { editors: new Map(), cats: new Map() },     // admin only: figures worked out by the server
   horizon: null,                                      // admin only: where history older than the loaded projects starts
+  scripts: [],                                        // scripts not yet taken on: all of them for an admin, an editor's own waiting ones
+  videos: new Map(),                                  // media buyer only: the approved videos, by id
+  seenBefore: 0,                                      // media buyer only: when they last opened the app, so newer videos show as new
 };
 // Older projects for the admin's Projects list, fetched a page at a time for the filters in use.
 const hist = { key: null, rows: new Map(), next: null, more: false, busy: false, failed: false };
 function resetHist() { hist.key = null; hist.rows = new Map(); hist.next = null; hist.more = false; hist.busy = false; hist.failed = false; }
-const ui = { view: "editor", tab: "inbox", etab: "work", fStatus: "active", fEditor: "all", fCat: "all", period: "week", manage: null, limit: 40, older: false, earnAll: false, spark: null };
+const ui = { view: "editor", tab: "inbox", etab: "work", fStatus: "active", fEditor: "all", fCat: "all", period: "week", manage: null, limit: 40, older: false, earnAll: false, spark: null, bCat: "all", bLimit: 30 };
 const pics = new Map();        // user id -> { ver, url }
 
 /* ---------- small helpers ---------- */
@@ -210,6 +213,8 @@ const ERRORS = {
   bad_bank: "Enter the name of your bank.",
   bad_account: "Enter your 10-digit account number.",
   too_many: "You've changed your details a lot today. Try again tomorrow.",
+  not_script: "That isn't a script file. Send a Word document (.doc or .docx), a PDF or a text file.",
+  script_gone: "That script isn't in your admin's Google Drive any more. Ask your admin to send it again.",
 };
 // What can go wrong with Google Drive, said the same way wherever it comes up.
 const DRIVE_ERRORS = {
@@ -257,15 +262,21 @@ function normProject(r) {
     link: str(r.link, 600) || null, note: str(r.note, 400), update: str(r.progress, 240),
     backAt: num(r.back), backNote: str(r.backNote, 300),
     from: r.from ? String(r.from) : null, movedTo: r.to ? String(r.to) : null, movedAt: num(r.moved), seenMoved: r.seen === true,
-    receivedAt: num(r.received), amount: amount(r.amount),
+    receivedAt: num(r.received), amount: amount(r.amount), script: typeof r.script === "string" && /^[0-9a-f-]{36}$/.test(r.script) ? r.script : null,
   };
 }
+const roleOf = (r) => (r === "admin" || r === "buyer" ? r : "editor");
+const viewFor = () => (state.isAdmin ? "admin" : state.isBuyer ? "buyer" : "editor");
+function normScript(x) {
+  return { id: String(x.id), uid: x.u ? String(x.u) : state.me.id, catId: x.cat ? String(x.cat) : null, name: str(x.name, 140) || "Untitled script", file: str(x.file, 200),
+    size: num(x.size) || 0, at: num(x.at) || 0, status: x.status === "declined" ? "declined" : "waiting", note: str(x.note, 300), by: x.by ? String(x.by) : null, declined: num(x.declined) };
+}
 function applyState(d) {
-  const wasAdmin = state.isAdmin, hadMe = state.me.id;
+  const wasRole = state.me.role, hadMe = state.me.id;
   state.skew = Number(d.now) - Date.now();
   const m = d.me || {};
-  state.me = { id: String(m.id), name: str(m.name, 40), username: str(m.username, 24), role: m.role === "admin" ? "admin" : "editor", owner: m.owner === true, av: num(m.av) || 0, has: m.has === true, avAt: num(m.avAt), phones: num(m.phones) || 0, details: normDetails(m.details) };
-  state.isAdmin = state.me.role === "admin";
+  state.me = { id: String(m.id), name: str(m.name, 40), username: str(m.username, 24), role: roleOf(m.role), owner: m.owner === true, av: num(m.av) || 0, has: m.has === true, avAt: num(m.avAt), phones: num(m.phones) || 0, details: normDetails(m.details) };
+  state.isAdmin = state.me.role === "admin"; state.isBuyer = state.me.role === "buyer";
   const s = d.settings || {}, active = [];
   state.cats = new Map();
   for (const c of Array.isArray(d.cats) ? d.cats : []) {
@@ -279,7 +290,7 @@ function applyState(d) {
   state.prefs = { bonusAmount: amount(s.bonus) };
   state.users = new Map();
   for (const u of Array.isArray(d.users) ? d.users : []) {
-    state.users.set(String(u.id), { id: String(u.id), name: str(u.name, 40) || "Unnamed", username: str(u.username, 24), role: u.role === "admin" ? "admin" : "editor", owner: u.owner === true, active: u.active !== false, av: num(u.av) || 0, has: u.has === true, seen: num(u.seen), earned: amount(u.earned) || 0, bonus: amount(u.bonus) || 0, last: num(u.last) || 0, moved: num(u.moved) || 0, avAt: num(u.avAt), push: u.push === true, pay: u.pay === true });
+    state.users.set(String(u.id), { id: String(u.id), name: str(u.name, 40) || "Unnamed", username: str(u.username, 24), role: roleOf(u.role), owner: u.owner === true, active: u.active !== false, av: num(u.av) || 0, has: u.has === true, seen: num(u.seen), earned: amount(u.earned) || 0, bonus: amount(u.bonus) || 0, last: num(u.last) || 0, moved: num(u.moved) || 0, avAt: num(u.avAt), push: u.push === true, pay: u.pay === true });
   }
   if (Array.isArray(d.weeks) && d.weeks.length === 6) state.weeks = d.weeks.map(Number);
   state.month = Number(d.month) || 0;
@@ -310,8 +321,17 @@ function applyState(d) {
     if (map.size) state.projects.set(uid, map); else state.projects.delete(uid);
     hist.rows.delete(id);       // the fresh copy above replaces an older page's copy
   }
+  state.scripts = (Array.isArray(d.scripts) ? d.scripts : []).filter((x) => x && typeof x.id === "string").map(normScript);
+  if (state.isBuyer) {
+    if (d.full) state.videos = new Map();
+    for (const v of Array.isArray(d.videos) ? d.videos : []) {
+      if (!v || !v.id) continue;
+      if (v.gone) state.videos.delete(String(v.id));
+      else state.videos.set(String(v.id), { id: String(v.id), name: str(v.name, 140) || "Untitled video", catId: v.cat ? String(v.cat) : null, link: str(v.link, 600) || null, at: num(v.at) || 0, by: str(v.by, 40) });
+    }
+  } else state.videos = new Map();
   state.cursor = num(d.cursor);
-  if (hadMe && wasAdmin !== state.isAdmin) { state.cursor = null; ui.view = state.isAdmin ? "admin" : "editor"; }   // a changed role changes what this login may load
+  if (hadMe && wasRole !== state.me.role) { state.cursor = null; ui.view = viewFor(); }   // a changed role changes what this login may load
 }
 let syncTimer = 0, syncing = null, syncAgain = false;
 function plan() {
@@ -346,10 +366,15 @@ function saveToken(t) {
 async function enter(token) {
   const d = await api("er_state", { p_token: token, p_since: null });
   saveToken(token);
-  state.me.id = null; state.isAdmin = false;
+  state.me.id = null; state.isAdmin = false; state.isBuyer = false;
   applyState(d);
   state.lastFull = Date.now(); state.wantFull = false; state.online = true; state.phase = "ready";
-  ui.view = state.isAdmin ? "admin" : "editor";
+  ui.view = viewFor();
+  if (state.isBuyer) {      // videos approved since this phone last opened the app are marked new for this visit
+    let last = null;
+    try { last = Number(localStorage.getItem("editroom.seenVideos")) || null; localStorage.setItem("editroom.seenVideos", String(now())); } catch (e) { /* nothing is marked new */ }
+    state.seenBefore = last || now();
+  }
   try {
     const t = localStorage.getItem("editroom.tab"), e = localStorage.getItem("editroom.etab");
     if (ADMIN_TABS.some((x) => x[0] === t)) ui.tab = t;
@@ -385,7 +410,7 @@ function driveReturn() {
 function leave(msg) {
   saveToken(null);
   clearTimeout(syncTimer);
-  state.phase = "login"; state.cursor = null; state.projects = new Map(); state.users = new Map(); state.featured = [];
+  state.phase = "login"; state.cursor = null; state.projects = new Map(); state.users = new Map(); state.featured = []; state.scripts = []; state.videos = new Map();
   state.stats = { editors: new Map(), cats: new Map() }; state.horizon = null; resetHist();
   setPanel = null;          // Settings start afresh for whoever signs in next, with no half-made changes left in them
   if (activeUpload) activeUpload.stop();
@@ -683,6 +708,75 @@ function momentPanel() {      // on everyone's home screen; an admin also gets t
       admin ? h("button", { class: "btn small", type: "button", dataset: { fk: "down:" + x.id }, onclick: (e) => feature(e.currentTarget, x.id, false) }, "Take down") : null))));
 }
 
+/* ---------- scripts sent through the app, and finished videos to download ---------- */
+const SCRIPT_ACCEPT = ".doc,.docx,.pdf,.txt,.rtf,.odt,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf,text/plain,application/rtf,application/vnd.oasis.opendocument.text";
+const SCRIPT_MAX = 10 * 1024 * 1024;
+function scriptErr(e) {
+  const c = e && e.code, admin = state.isAdmin;
+  if (e instanceof Oops) return e.message;
+  if (c === "drive_off" || c === "not_set_up") return admin ? "Google Drive isn't connected, so scripts can't be sent or opened. Connect it in Settings." : "Google Drive isn't connected right now, so the script can't be opened. Ask your admin.";
+  if (c === "drive_lost") return admin ? "Google ended the Drive connection, so scripts can't be sent or opened. Connect it again in Settings." : "Google ended the Drive connection, so the script can't be opened. Ask your admin.";
+  if (c === "too_big") return "That file is too big. Scripts can be up to 10 MB.";
+  return driveErr(e);
+}
+// A script's file comes from the studio's Google Drive, through the Drive function, and is handed to the phone
+// as a download under its own name, so it opens in Word or whatever the phone reads documents with.
+async function openScript(id, btn) {
+  const label = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "Opening…"; }
+  try {
+    const r = await driveCall("script_open", { script: id });
+    const bin = atob(String(r.data || "")), data = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) data[i] = bin.charCodeAt(i);
+    const url = URL.createObjectURL(new Blob([data], { type: str(r.mime, 120) || "application/octet-stream" }));
+    const a = h("a", { href: url, download: str(r.name, 200) || "script", hidden: true });
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (e) { toast(scriptErr(e), true); }
+  finally { if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = label; } }
+}
+const scriptBtn = (id, key, small) => h("button", { class: "btn " + (small ? "small" : "grow"), type: "button", dataset: { fk: "script:" + key }, onclick: (e) => openScript(id, e.currentTarget) }, "Open script");
+function readB64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).replace(/^data:[^,]*,/, ""));
+    r.onerror = () => reject(new Oops(file.name + " couldn't be read. Choose it again."));
+    r.readAsDataURL(file);
+  });
+}
+const stem = (name) => String(name || "").replace(/\.[A-Za-z0-9]{1,5}$/, "").replace(/[_]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
+function guessCat(name) {       // the category whose name is in the file's name, the longest one if several are
+  const n = String(name || "").toLowerCase();
+  const hits = state.config.categories.filter((c) => c.name.length > 2 && n.includes(c.name.toLowerCase())).sort((a, b) => b.name.length - a.name.length);
+  return hits.length ? hits[0].id : "";
+}
+// Editors to pick from, each with what they have on: briefs in progress, scripts waiting for them, anything late.
+function editorOptions(name, list) {
+  return h("div", { class: "options", role: "radiogroup", "aria-label": "Editor" }, list.map((u, i) => {
+    const st = editorStats(u.id), waiting = state.scripts.filter((x) => x.uid === u.id && x.status === "waiting").length, late = st.lateOpen + st.overOpen;
+    const bits = [st.active + " in progress"];
+    if (waiting) bits.push(plural(waiting, "script", "scripts") + " waiting");
+    if (late) bits.push(late + " past deadline");
+    return h("label", { class: "option" },
+      h("input", { type: "radio", name: name, id: name + "-" + i, value: u.id }),
+      h("span", { class: "option-main" }, h("span", { class: "option-name", text: u.name }), h("span", { class: "hint", text: bits.join(", ") })));
+  }));
+}
+const activeEditors = () => Array.from(state.users.values()).filter((u) => u.role === "editor" && u.active).sort((a, b) => a.name.localeCompare(b.name));
+// The address that downloads a Google Drive file straight away (for a big file, Drive asks once first). Links to
+// anywhere else get null: they open where they live instead.
+function driveDownload(raw) {
+  let u;
+  try { u = new URL(String(raw || "")); } catch (e) { return null; }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+  const host = u.hostname.toLowerCase();
+  if (host !== "drive.google.com" && host !== "docs.google.com" && host !== "drive.usercontent.google.com") return null;
+  const m = /\/file\/(?:u\/\d+\/)?d\/([^/]+)/.exec(u.pathname);
+  const id = m ? m[1] : u.searchParams.get("id"), key = u.searchParams.get("resourcekey");
+  if (!id || !/^[A-Za-z0-9_-]{5,128}$/.test(id)) return null;
+  return "https://drive.google.com/uc?export=download&id=" + id + (key && /^[A-Za-z0-9_-]{1,128}$/.test(key) ? "&resourcekey=" + key : "");
+}
+
 /* ---------- keeping the app on the phone ---------- */
 let installEvent = null;
 const isInstalled = () => navigator.standalone === true || (typeof matchMedia === "function" && matchMedia("(display-mode: standalone)").matches);
@@ -793,13 +887,14 @@ function pushCard() {
   if (state.phase !== "ready" || snoozed()) return null;
   const home = needsHomeScreen();
   if (!home && !(pushable() && pushPerm() === "default")) return null;
-  const admin = ui.view === "admin";
+  const v = ui.view;
   const later = h("button", { class: "btn small quiet", type: "button", dataset: { fk: "push-later" }, onclick: () => { try { localStorage.setItem("editroom.pushAsk", String(Date.now())); } catch (e) { /* asked again next time */ } schedule(); } }, "Not now");
   return h("section", { class: "panel push-card", "aria-label": "Notifications" },
-    h("h2", { class: "section-title", text: admin ? "Get a ping when a video comes in" : "Get a ping when a deadline passes" }),
+    h("h2", { class: "section-title", text: v === "admin" ? "Get a ping when a video comes in" : v === "buyer" ? "Get a ping when a new video is ready" : "Get a ping for new scripts and deadlines" }),
     h("p", { text: home ? "On iPhone, add " + APP + " to your home screen first, then open it from there to turn on notifications."
-      : admin ? "Turn on notifications and this phone pings as soon as an editor submits a video, even when the app is closed."
-        : "Turn on notifications and this phone pings when a video reaches its deadline and the grace period starts, even when the app is closed." }),
+      : v === "admin" ? "Turn on notifications and this phone pings as soon as an editor submits a video, even when the app is closed."
+        : v === "buyer" ? "Turn on notifications and this phone pings as soon as a video is approved, even when the app is closed. Tap the ping to download the video."
+          : "Turn on notifications and this phone pings when your admin sends you a script, and when a video reaches its deadline, even when the app is closed." }),
     h("div", { class: "btn-row" },
       home ? h("button", { class: "btn small", type: "button", dataset: { fk: "push-how" }, onclick: () => openAccount() }, "How to add it")
         : h("button", { class: "btn small primary", type: "button", dataset: { fk: "push-on" }, onclick: (e) => turnOnPush(e.currentTarget) }, "Turn on notifications"),
@@ -809,7 +904,10 @@ function pushCard() {
 function notifyBox() {
   const box = h("div", { class: "part", id: "ac-notify" });
   if (!state.config.push) { box.hidden = true; return box; }
-  const line = (text, buttons) => box.replaceChildren(h("h3", { class: "part-title", text: "Notifications" }), h("p", { class: "hint", text: text }), buttons ? h("div", { class: "btn-row" }, buttons) : null);
+  const line = (text, buttons) => {         // (replaceChildren would print a missing row as the word "null")
+    box.replaceChildren(h("h3", { class: "part-title", text: "Notifications" }), h("p", { class: "hint", text: text }));
+    if (buttons) box.append(h("div", { class: "btn-row" }, buttons));
+  };
   if (needsHomeScreen()) { line("To get notifications on iPhone, add " + APP + " to your home screen, then open it from there."); return box; }
   if (!pushable()) { line("This browser can't show notifications."); return box; }
   if (pushPerm() === "denied") { line("Notifications are blocked for " + APP + " on this phone. Allow them in your phone's settings, then come back here."); return box; }
@@ -917,6 +1015,10 @@ function viewWork(all) {
   if (notices.length) out.push(h("div", { class: "notices" }, notices));
   const ask = pushCard();
   if (ask) out.push(ask);
+  const incoming = state.isAdmin ? [] : state.scripts.slice().sort((a, b) => a.at - b.at);      // an admin trying this screen sees no one's scripts
+  if (incoming.length) out.push(h("section", { class: "section", id: "new-scripts" },
+    h("h2", { class: "section-title", text: incoming.length === 1 ? "New script" : incoming.length + " new scripts" }),
+    h("div", { class: "grid" }, incoming.map(incomingCard))));
 
   const wk = state.weeks[5], target = cfg.weeklyTarget;
   const week = done.filter((x) => (x.p.submittedAt || 0) >= wk), onTime = week.filter((x) => x.f.onTime === true).length, lateN = week.length - onTime;
@@ -952,6 +1054,25 @@ function viewWork(all) {
       metaRow(x))))));
   return out;
 }
+function incomingCard(sc) {
+  return h("article", { class: "clip" },
+    h("div", { class: "clip-top" }, tape(catOf(sc)), h("span", { class: "pills" }, pill("gold", "New"))),
+    h("h3", { class: "clip-title", text: sc.name }),
+    h("p", { class: "hint", text: "From your admin, " + ago(sc.at) + ". Accept it to open the script. Your " + state.config.deliveryHours + "-hour deadline starts when you do." }),
+    h("div", { class: "btn-row" },
+      h("button", { class: "btn primary grow", type: "button", dataset: { fk: "acc:" + sc.id }, onclick: (e) => acceptScript(e.currentTarget, sc) }, "Accept and open"),
+      h("button", { class: "btn grow", type: "button", dataset: { fk: "dec:" + sc.id }, onclick: () => openDecline(sc) }, "Can't take it")));
+}
+// Taking a script on makes its brief, so the deadline starts now; then the script opens.
+async function acceptScript(btn, sc) {
+  btn.disabled = true;
+  try {
+    await call("er_accept_script", { p_script: sc.id });
+    await sync();
+    toast("Accepted. Your " + state.config.deliveryHours + "-hour deadline has started.");
+    openScript(sc.id);
+  } catch (e) { toast(errText(e), true); if (btn.isConnected) btn.disabled = false; }
+}
 function editorCard(x) {
   const p = x.p, cat = catOf(p);
   return h("article", { class: "clip" },
@@ -965,6 +1086,7 @@ function editorCard(x) {
     metaRow(x),
     h("div", { class: "btn-row" },
       h("button", { class: "btn primary full", type: "button", dataset: { fk: "submit:" + p.id }, onclick: () => openSubmit(p) }, state.config.drive.on && state.config.drive.folders.length ? "Submit video" : "Submit with Drive link"),
+      p.script ? scriptBtn(p.script, p.id) : null,
       h("button", { class: "btn grow", type: "button", dataset: { fk: "upd:" + p.id }, onclick: () => openUpdate(p) }, "Add update")));
 }
 function doneCard(x) {
@@ -1043,6 +1165,47 @@ function viewEarn(all) {
   return out;
 }
 
+/* ---------- the media buyer's screen ---------- */
+// Every video an admin has approved, from every category, newest first, each with a button that downloads it.
+function viewVideos() {
+  const out = [], all = Array.from(state.videos.values()).sort((a, b) => b.at - a.at || (a.id < b.id ? 1 : -1));
+  const fresh = all.filter((v) => v.at > state.seenBefore).length;
+  out.push(h("section", { class: "slate", "aria-label": "Finished videos" },
+    h("h2", { class: "slate-title", text: "Finished videos" }),
+    hero(fresh || all.length, h("span", { class: "week-of", text: fresh ? "new since your last visit" : all.length === 1 ? "video ready to download" : "videos ready to download" })),
+    h("p", { class: "slate-label", text: "Every video your admin approves, from every category, newest first." })));
+  const ask = pushCard();
+  if (ask) out.push(ask);
+  const counts = new Map();
+  for (const v of all) counts.set(v.catId || "none", (counts.get(v.catId || "none") || 0) + 1);
+  const cats = Array.from(state.cats.values()).filter((c) => !c.archived || counts.has(c.id));
+  if (ui.bCat !== "all" && !cats.some((c) => c.id === ui.bCat) && !(ui.bCat === "none" && counts.has("none"))) ui.bCat = "all";
+  const pick = h("select", { class: "input", id: "v-cat", "aria-label": "Category", dataset: { fk: "vcat" }, onchange: (e) => { ui.bCat = e.target.value; ui.bLimit = 30; schedule(); } },
+    h("option", { value: "all", text: "All categories (" + all.length + ")" }),
+    cats.map((c) => h("option", { value: c.id, text: c.name + " (" + (counts.get(c.id) || 0) + ")" })),
+    counts.has("none") ? h("option", { value: "none", text: "No category (" + counts.get("none") + ")" }) : null);
+  pick.value = ui.bCat;
+  const shown = ui.bCat === "all" ? all : all.filter((v) => (v.catId || "none") === ui.bCat);
+  out.push(h("section", { class: "section" },
+    h("div", { class: "section-head" }, h("h2", { class: "section-title", text: "Videos" }), h("div", { class: "filter" }, pick)),
+    shown.length ? h("div", { class: "grid" }, shown.slice(0, ui.bLimit).map(videoCard))
+      : all.length ? empty("No videos in this category yet.", "When your admin approves one, it shows up here.")
+        : empty("No finished videos yet.", "When your admin approves a video, it shows up here and your phone pings."),
+    shown.length > ui.bLimit ? h("div", { class: "btn-row" }, h("button", { class: "btn small", type: "button", dataset: { fk: "vmore" }, onclick: () => { ui.bLimit += 30; schedule(); } }, "Show more")) : null));
+  return out;
+}
+function videoCard(v) {
+  const cat = v.catId ? state.cats.get(v.catId) : null, link = parseLink(v.link), dl = driveDownload(v.link), embed = link ? driveEmbed(link.href) : null;
+  return h("article", { class: "clip" },
+    h("div", { class: "clip-top" }, tape(cat || { name: "No category" }), h("span", { class: "pills" }, v.at > state.seenBefore ? pill("gold", "New") : null)),
+    h("h3", { class: "clip-title", text: v.name }),
+    h("p", { class: "hint", text: ("Approved " + ago(v.at) + (v.by ? ", made by " + v.by : "")).replace(/[^.!?]$/, "$&.") }),
+    h("div", { class: "btn-row" },
+      dl ? h("a", { class: "btn primary grow", href: dl, target: "_blank", rel: "noopener noreferrer", dataset: { fk: "dl:" + v.id } }, "Download")
+        : link ? openLink(link, false, "v:" + v.id) : h("p", { class: "error", text: "This video has no link." }),
+      embed ? h("button", { class: "btn grow", type: "button", dataset: { fk: "watch:" + v.id }, onclick: () => openPlayer({ id: v.id, name: v.name, catId: v.catId, by: v.by }, embed, link) }, "Watch") : null));
+}
+
 /* ---------- admin screens ---------- */
 const isWaiting = (x) => x.p.status === "submitted" && !x.f.received;
 function setupCard() {
@@ -1073,7 +1236,8 @@ function viewInbox(all) {
   out.push(h("section", { class: "slate", "aria-label": "At a glance" },
     hero(waiting.length, h("span", { class: "week-of", text: waiting.length === 1 ? "video ready to download" : "videos ready to download" })),
     h("dl", { class: "fields three" },
-      stat(active.length, "In progress"), stat(past.length, "Past deadline", past.length ? "warn" : ""), stat(over, "Grace over", over ? "crit" : ""))));
+      stat(active.length, "In progress"), stat(past.length, "Past deadline", past.length ? "warn" : ""), stat(over, "Grace over", over ? "crit" : "")),
+    h("button", { class: "btn primary", type: "button", id: "assign", dataset: { fk: "assign" }, onclick: () => openAssign() }, "Assign a script")));
   const setup = setupCard();
   if (setup) out.push(setup);
   const ask = pushCard();
@@ -1084,10 +1248,29 @@ function viewInbox(all) {
     h("div", { class: "section-head" }, h("h2", { class: "section-title", text: "Ready to download" }), waiting.length > 1 ? h("p", { class: "section-note", text: "Oldest first" }) : null),
     waiting.length ? h("div", { class: "grid" }, waiting.map(inboxCard))
       : empty("Nothing waiting.", "When an editor submits a project with a Drive link, it lands here for you to download.")));
+  // scripts nobody has taken on yet: the ones turned down first, as they need the admin; then the oldest
+  const scripts = state.scripts.slice().sort((a, b) => (a.status === b.status ? a.at - b.at : a.status === "declined" ? -1 : 1));
+  if (scripts.length) out.push(h("section", { class: "section", id: "scripts" },
+    h("div", { class: "section-head" }, h("h2", { class: "section-title", text: "Scripts not taken on yet" }),
+      scripts.length > 1 ? h("p", { class: "section-note", text: scripts.some((x) => x.status === "declined") ? "Turned down first" : "Oldest first" }) : null),
+    h("div", { class: "grid" }, scripts.map(scriptCard))));
   if (past.length) out.push(h("section", { class: "section" },
     h("div", { class: "section-head" }, h("h2", { class: "section-title", text: "Past the deadline" }), past.length > 1 ? h("p", { class: "section-note", text: "Most overdue first" }) : null),
     h("div", { class: "grid" }, past.map(pastCard))));
   return out;
+}
+function scriptCard(sc) {
+  const cat = catOf(sc), key = "sc:" + sc.id, declined = sc.status === "declined";
+  return h("article", { class: "clip" },
+    h("div", { class: "clip-top" }, tape(cat), h("span", { class: "pills" }, declined ? pill("warn", "Can't take it") : pill("", "Sent " + ago(sc.at)))),
+    h("h3", { class: "clip-title", text: sc.name }),
+    person(sc.uid),
+    declined ? quote(displayName(sc.uid) + " couldn't take it " + ago(sc.declined || sc.at), sc.note || "They didn't say why.")
+      : h("p", { class: "hint", text: "Waiting for them to accept it. Their " + state.config.deliveryHours + "-hour deadline starts when they do." }),
+    h("div", { class: "btn-row" },
+      h("button", { class: "btn full" + (declined ? " primary" : ""), type: "button", dataset: { fk: "mv:" + key }, onclick: () => openMoveScript(sc) }, "Give to someone else"),
+      scriptBtn(sc.id, key),
+      h("button", { class: "btn grow", type: "button", dataset: { fk: "wd:" + key }, onclick: () => openWithdraw(sc) }, "Take back")));
 }
 function receive(btn, uid, p) {
   return act(btn, async () => {
@@ -1109,7 +1292,7 @@ function inboxCard(x) {
       link ? openLink(link, false, key) : null,
       glow(h("button", { class: "btn grow glow", type: "button", dataset: { fk: "recv:" + key }, onclick: (e) => receive(e.currentTarget, uid, p) }, "Mark received")),
       h("button", { class: "btn grow", type: "button", dataset: { fk: "back:" + key }, onclick: () => openSendBack(uid, p) }, "Send back")),
-    link ? h("div", { class: "btn-row" }, featureBtn(p, key)) : null);
+    link || p.script ? h("div", { class: "btn-row" }, link ? featureBtn(p, key) : null, p.script ? scriptBtn(p.script, key, true) : null) : null);
 }
 function pastCard(x) {
   const uid = x.uid, p = x.p, cat = catOf(p), key = uid + ":" + p.id;
@@ -1121,7 +1304,7 @@ function pastCard(x) {
     trackBlock(p, false),
     p.update ? quote("Latest update", p.update) : null,
     metaRow(x),
-    h("div", { class: "btn-row" }, h("button", { class: "btn grow", type: "button", dataset: { fk: "re:" + key }, onclick: () => openReassign(uid, p) }, "Reassign")));
+    h("div", { class: "btn-row" }, h("button", { class: "btn grow", type: "button", dataset: { fk: "re:" + key }, onclick: () => openReassign(uid, p) }, "Reassign"), p.script ? scriptBtn(p.script, key) : null));
 }
 function adminCard(x) {
   const uid = x.uid, p = x.p, f = x.f, cat = catOf(p), key = uid + ":" + p.id, link = parseLink(p.link), open = ui.manage === key;
@@ -1148,6 +1331,7 @@ function adminCard(x) {
     p.status === "submitted" ? linkLine(link, p.link) : null,
     h("div", { class: "btn-row" },
       p.status === "submitted" && link ? openLink(link, true, key) : null,
+      p.script ? scriptBtn(p.script, key, true) : null,
       isWaiting(x) ? glow(h("button", { class: "btn small glow", type: "button", dataset: { fk: "recv:" + key }, onclick: (e) => receive(e.currentTarget, uid, p) }, "Mark received")) : null,
       h("button", { class: "btn small", type: "button", "aria-expanded": String(open), dataset: { fk: "mg:" + key }, onclick: () => { ui.manage = open ? null : key; schedule(); } }, open ? "Hide options" : "Manage")),
     open ? h("div", { class: "btn-row tools" }, tools) : null);
@@ -1446,7 +1630,7 @@ function settingsPanel() {
   setPanel = {
     node: h("div", { class: "stack" },
       h("section", { class: "section" },
-        h("div", { class: "section-head" }, h("h2", { class: "section-title", text: "Team logins" }), h("button", { class: "btn small primary", type: "button", id: "add-user", onclick: () => openAddUser() }, "Add an editor")),
+        h("div", { class: "section-head" }, h("h2", { class: "section-title", text: "Team logins" }), h("button", { class: "btn small primary", type: "button", id: "add-user", onclick: () => openAddUser() }, "Add a login")),
         h("p", { class: "section-note", text: "Each person signs in with the username and password you give them." }),
         teamList),
       h("section", { class: "section" },
@@ -1519,7 +1703,7 @@ function teamRow(u) {
   const me = state.me, manage = u.id !== me.id && !u.owner && (u.role !== "admin" || me.owner);
   return h("li", null,
     h("div", { class: "row-main" },
-      h("div", { class: "row-head" }, person(u.id), u.owner ? pill("info", "Owner") : u.role === "admin" ? pill("info", "Admin") : null, u.active ? null : pill("warn", "Switched off")),
+      h("div", { class: "row-head" }, person(u.id), u.owner ? pill("info", "Owner") : u.role === "admin" ? pill("info", "Admin") : u.role === "buyer" ? pill("info", "Media buyer") : null, u.active ? null : pill("warn", "Switched off")),
       h("span", { class: "hint", text: "@" + u.username + (u.seen ? ", last seen " + ago(u.seen) : ", hasn't signed in yet") + (u.push ? ", notifications on" : "") })),
     manage ? h("div", { class: "row-actions" }, h("button", { class: "btn small", type: "button", dataset: { fk: "user:" + u.id }, onclick: () => openUser(u.id) }, "Manage")) : null);
 }
@@ -1612,7 +1796,7 @@ function showScreen(title, byline, stage, foot) {
 function openPlayer(x, embed, link) {
   const cat = x.catId ? state.cats.get(x.catId) : null, mine = x.uid === state.me.id;
   showScreen(x.name,
-    h("p", { class: "player-by" }, avatar(x.uid), h("span", { text: displayName(x.uid) + (mine ? " (you)" : "") }), cat ? h("span", { class: "shot-cat", text: cat.name }) : null),
+    h("p", { class: "player-by" }, x.uid ? avatar(x.uid) : null, h("span", { text: x.uid ? displayName(x.uid) + (mine ? " (you)" : "") : x.by || "" }), cat ? h("span", { class: "shot-cat", text: cat.name }) : null),
     [h("p", { class: "player-wait", text: "Loading the video…" }), drivePlayer(embed, x.name)],
     h("div", { class: "player-foot" },
       h("span", { text: "Not playing? Its Drive file may not be shared with you." }),
@@ -2014,6 +2198,111 @@ function openSendBack(uid, p) {
     run: async () => { await run("er_send_back", { p_project: p.id, p_note: note.value.trim() }); ui.manage = null; return "Sent back to " + displayName(uid); },
   });
 }
+// Sending scripts: one or several files, a category and an editor. Each file is saved in the DN Studios scripts
+// folder in the studio's Google Drive, and the editor's phone pings; their deadline starts when they accept it.
+function openAssign() {
+  const d = state.config.drive, cats = state.config.categories, hours = state.config.deliveryHours, eds = activeEditors();
+  if (!d.on || !eds.length) {
+    formSheet({ title: "Assign a script", submit: null, body: [
+      h("p", { text: !d.on ? "Scripts are kept in your Google Drive, not in the app. Connect Google Drive in Settings first." : "Add an editor in Settings first. Scripts go to editors." }),
+      h("div", { class: "btn-row" }, h("button", { class: "btn primary grow", type: "button", id: "as-settings", onclick: () => { closeSheet(); setTab("settings"); } }, "Open Settings"))] });
+    return;
+  }
+  let files = [];
+  const file = h("input", { class: "vh", id: "as-file", type: "file", multiple: true, accept: SCRIPT_ACCEPT, "aria-label": "Choose the script", tabindex: "-1" });
+  const choose = h("button", { class: "btn", type: "button", id: "as-choose", onclick: () => file.click() }, "Choose the script");
+  const info = h("p", { class: "hint", id: "as-file-info", text: "A Word document, PDF or text file, up to 10 MB. Choose several to send them all to the same editor." });
+  const name = h("input", { class: "input", id: "as-name", type: "text", maxlength: "120", autocomplete: "off" });
+  const nameField = field("Brief name", name, "What the brief will be called. It starts as the file's name.");
+  const cat = h("select", { class: "input", id: "as-cat" }, h("option", { value: "", text: cats.length ? "Choose a category" : "No categories yet" }), cats.map((c) => h("option", { value: c.id, text: c.name })));
+  const err = h("p", { class: "error", role: "alert", hidden: true });
+  const fail = (msg) => { err.textContent = msg; err.hidden = false; };
+  const go = h("button", { class: "btn primary grow", type: "submit", id: "as-go" }, "Send script");
+  file.addEventListener("change", () => {
+    const picked = Array.from(file.files || []);
+    file.value = "";
+    if (!picked.length) return;
+    files = picked.slice(0, 10);
+    choose.textContent = files.length > 1 ? "Choose other scripts" : "Choose another script";
+    info.textContent = files.map((f) => f.name + " (" + bytes(f.size) + ")").join(", ") + (picked.length > 10 ? ". Only the first 10 go at once." : ".");
+    nameField.hidden = files.length > 1;
+    if (files.length === 1) name.value = stem(files[0].name);
+    go.textContent = files.length > 1 ? "Send " + files.length + " scripts" : "Send script";
+    if (!cat.value) cat.value = guessCat(files[0].name);
+    err.hidden = true;
+  });
+  const form = h("form", { class: "form", novalidate: true, oninput: () => { err.hidden = true; }, onsubmit: (e) => { e.preventDefault(); send(); } },
+    h("div", { class: "field" }, h("label", { for: "as-file", text: "Script" }), h("div", { class: "btn-row" }, choose), info, file),
+    nameField, field("Category", cat, cats.length ? null : "Add categories in Settings to sort scripts by them."),
+    h("fieldset", { class: "field" }, h("legend", { text: "Editor" }), editorOptions("as-ed", eds)),
+    h("p", { class: "hint", text: "The script is saved in the DN Studios scripts folder in your Google Drive. The editor's phone pings, and their " + hours + "-hour deadline starts when they accept it." }),
+    err, h("div", { class: "btn-row" }, go, h("button", { class: "btn grow", type: "button", onclick: () => closeSheet() }, "Cancel")));
+  async function send() {
+    if (go.disabled) return;
+    err.hidden = true;
+    const pick = form.querySelector('input[name="as-ed"]:checked');
+    if (!files.length) return fail("Choose the script to send.");
+    if (cats.length && !cat.value) return fail("Choose a category.");
+    if (!pick) return fail("Pick the editor to send it to.");
+    const big = files.find((f) => f.size > SCRIPT_MAX);
+    if (big) return fail(big.name + " is too big. Scripts can be up to 10 MB.");
+    const to = pick.value, total = files.length;
+    let sent = 0;
+    go.disabled = true; sheetHold = true;
+    try {
+      for (const f of files.slice()) {
+        go.textContent = total > 1 ? "Sending " + (sent + 1) + " of " + total + "…" : "Sending…";
+        await driveCall("script_send", { editor: to, category: cat.value || null, name: total === 1 ? tidy(name.value) : "", file: { name: f.name, data: await readB64(f) } });
+        sent++;
+        files = files.slice(1);
+      }
+      sheetHold = false; closeSheet(true);
+      toast((sent === 1 ? "Script sent to " : sent + " scripts sent to ") + displayName(to) + ".");
+      sync();
+    } catch (e) {
+      sheetHold = false;
+      go.disabled = false; go.textContent = files.length > 1 ? "Send the other " + files.length : "Try again";
+      info.textContent = files.map((f) => f.name + " (" + bytes(f.size) + ")").join(", ") + ".";
+      fail((sent ? plural(sent, "script was", "scripts were") + " sent. " : "") + (sent || total > 1 ? files[0].name + " wasn't: " : "") + scriptErr(e));
+      if (sent) sync();
+    }
+  }
+  openSheet("Assign a script", [form]);
+}
+function openMoveScript(sc) {
+  const eds = activeEditors().filter((u) => !(sc.status === "waiting" && u.id === sc.uid));
+  if (!eds.length) { formSheet({ title: "Give to someone else", submit: null, body: [h("p", { text: "There is no other editor to give it to yet. Add one in Settings first." })] }); return; }
+  formSheet({
+    title: "Give to someone else", submit: "Send script",
+    body: [
+      h("p", null, h("strong", { text: sc.name }), sc.status === "declined" ? " was turned down by " + displayName(sc.uid) + ". Pick who gets it instead." : " is waiting for " + displayName(sc.uid) + ". Pick who gets it instead."),
+      h("fieldset", { class: "field" }, h("legend", { class: "vh", text: "Editor" }), editorOptions("mv-ed", eds)),
+      h("p", { class: "hint", text: "Their phone pings, and their " + state.config.deliveryHours + "-hour deadline starts when they accept it. The file stays where it is in your Google Drive." })],
+    run: async () => {
+      const pick = sheet.querySelector('input[name="mv-ed"]:checked');
+      if (!pick) throw new Oops("Pick an editor.");
+      await run("er_move_script", { p_script: sc.id, p_editor: pick.value });
+      return "Script sent to " + displayName(pick.value) + ".";
+    },
+  });
+}
+function openWithdraw(sc) {
+  formSheet({
+    title: "Take back script", submit: "Take back", danger: true,
+    body: [h("p", null, "Take back ", h("strong", { text: sc.name }), sc.status === "declined" ? "? It comes off this list." : " from " + displayName(sc.uid) + "? It comes off their screen."),
+      h("p", { class: "hint", text: "The file stays in the DN Studios scripts folder in your Google Drive." })],
+    run: async () => { await run("er_withdraw_script", { p_script: sc.id }); return "Script taken back"; },
+  });
+}
+function openDecline(sc) {
+  const note = h("textarea", { class: "input", id: "dc-note", maxlength: "300", rows: "3" });
+  formSheet({
+    title: "Can't take this script", submit: "Send it back",
+    body: [h("p", null, h("strong", { text: sc.name }), " goes back to your admin, who can give it to someone else. No deadline starts."),
+      field("Why not? (optional, your admin sees this)", note, "For example: you already have three briefs in progress.")],
+    run: async () => { await run("er_decline_script", { p_script: sc.id, p_note: note.value.trim() }); return "Sent back. Your admin has been told."; },
+  });
+}
 function openAmount(uid, p, cur) {
   const input = h("input", { class: "input", id: "am-amt", type: "text", inputmode: "decimal", autocomplete: "off" });
   if (cur != null) input.value = String(cur);
@@ -2202,7 +2491,8 @@ function openAddUser() {
   const name = h("input", { class: "input", id: "nu-name", type: "text", maxlength: "40", autocomplete: "off" });
   const user = h("input", { class: "input", id: "nu-user", type: "text", maxlength: "24", autocomplete: "off", autocapitalize: "none", spellcheck: "false" });
   const pass = h("input", { class: "input", id: "nu-pass", type: "text", maxlength: "72", autocomplete: "off", autocapitalize: "none", spellcheck: "false" });
-  const role = h("select", { class: "input", id: "nu-role" }, h("option", { value: "editor", text: "Editor" }), h("option", { value: "admin", text: "Admin (sees and manages everything)" }));
+  const role = h("select", { class: "input", id: "nu-role" }, h("option", { value: "editor", text: "Editor" }), h("option", { value: "buyer", text: "Media buyer (downloads approved videos)" }),
+    state.me.owner ? h("option", { value: "admin", text: "Admin (sees and manages everything)" }) : null);
   pass.value = newPassword();
   let typed = false;
   user.addEventListener("input", () => { typed = true; });
@@ -2213,11 +2503,11 @@ function openAddUser() {
       field("Name", name, "Shown on their work and on the leaderboard."),
       field("Username", user, "3 to 24 characters: small letters, numbers, dots and dashes."),
       field("Password", pass, "At least 8 characters. They can change it after signing in."),
-      state.me.owner ? field("Role", role) : null],
+      field("Role", role, "A media buyer sees only the videos you approve, from every category, and gets a ping with a download link for each.")],
     run: async () => {
       const n = tidy(name.value), un = user.value.trim().toLowerCase(), pw = pass.value;
       if (!n) throw new Oops("Enter their name.");
-      try { await run("er_add_user", { p_name: n, p_username: un, p_password: pw, p_role: state.me.owner ? role.value : "editor" }); }
+      try { await run("er_add_user", { p_name: n, p_username: un, p_password: pw, p_role: role.value }); }
       catch (ex) { if (ex.code === "taken") throw new Oops("That username is already in use."); throw ex; }
       return () => openCreds("Login created", n, un, pw);
     },
@@ -2227,7 +2517,7 @@ function openUser(id) {
   const u = state.users.get(id), me = state.me;
   if (!u) return;
   const name = h("input", { class: "input", id: "mu-name", type: "text", maxlength: "40", autocomplete: "off" });
-  const role = h("select", { class: "input", id: "mu-role" }, h("option", { value: "editor", text: "Editor" }), h("option", { value: "admin", text: "Admin (sees and manages everything)" }));
+  const role = h("select", { class: "input", id: "mu-role" }, h("option", { value: "editor", text: "Editor" }), h("option", { value: "buyer", text: "Media buyer (downloads approved videos)" }), h("option", { value: "admin", text: "Admin (sees and manages everything)" }));
   name.value = u.name; role.value = u.role;
   const quick = (args, msg) => (e) => act(e.currentTarget, async () => { await run("er_update_user", Object.assign({ p_user: u.id }, args)); closeSheet(); }, msg);
   formSheet({
@@ -2253,7 +2543,7 @@ function openUser(id) {
       if (me.owner && role.value !== u.role) args.p_role = role.value;
       if (!Object.keys(args).length) return "";
       await run("er_update_user", Object.assign({ p_user: u.id }, args));
-      return args.p_role ? n + " is now " + (args.p_role === "admin" ? "an admin" : "an editor") : "Saved";
+      return args.p_role ? n + " is now " + (args.p_role === "admin" ? "an admin" : args.p_role === "buyer" ? "a media buyer" : "an editor") : "Saved";
     },
   });
 }
@@ -2426,7 +2716,7 @@ function themeBox() {
   return box;
 }
 function openAccount(forPicture) {
-  const me = state.me, admin = me.role === "admin";
+  const me = state.me, admin = me.role === "admin", buyer = me.role === "buyer";
   let picked = null;        // null = keep, "" = remove, otherwise { thumb, full } for the new picture
   const slot = h("span", { id: "ac-pic" });
   const file = h("input", { class: "vh", id: "ac-file", type: "file", accept: "image/*", "aria-label": "Choose a picture", tabindex: "-1" });
@@ -2454,8 +2744,8 @@ function openAccount(forPicture) {
       h("div", { class: "pic-row" }, slot, file, choose, remove),
       perr,
       admin ? field("Your name", name, "Signed in as @" + me.username + ". Your picture and name show wherever your work does.")
-        : h("p", { class: "hint", text: "Signed in as @" + me.username + ". Your picture shows next to your name on the leaderboard. Your name is set by your admin." }),
-      admin ? null : payBox(),
+        : h("p", { class: "hint", text: "Signed in as @" + me.username + ". " + (buyer ? "" : "Your picture shows next to your name on the leaderboard. ") + "Your name is set by your admin." }),
+      admin || buyer ? null : payBox(),
       themeBox(),
       notifyBox()],
     foot: h("div", { class: "btn-row tools" },
@@ -2519,16 +2809,17 @@ function renderWho() {
   const pic = pics.get(state.me.id), sig = state.me.name + "|" + ui.view + "|" + (pic ? pic.ver + pic.url.length : "");
   if (who.dataset.sig === sig) return;
   who.dataset.sig = sig;
-  who.setAttribute("aria-label", "Your account: " + state.me.name + ", " + (ui.view === "admin" ? "admin" : "editor"));
+  const roleName = ui.view === "admin" ? "Admin" : ui.view === "buyer" ? "Media buyer" : "Editor";
+  who.setAttribute("aria-label", "Your account: " + state.me.name + ", " + roleName.toLowerCase());
   who.replaceChildren(
-    h("span", { class: "who-text" }, h("span", { class: "who-name", text: state.me.name }), h("span", { class: "who-role", text: ui.view === "admin" ? "Admin" : "Editor" })),
+    h("span", { class: "who-text" }, h("span", { class: "who-name", text: state.me.name }), h("span", { class: "who-role", text: roleName })),
     avatar(state.me.id));
 }
 $("who").addEventListener("click", () => { if (state.phase === "ready") openAccount(); });
 function renderTabs(all) {
-  const nav = $("tabs"), on = state.phase === "ready";
+  const nav = $("tabs"), on = state.phase === "ready" && ui.view !== "buyer";      // a media buyer has one screen
   nav.hidden = !on;
-  if (!on) return;
+  if (!on) { nav.dataset.kind = ""; return; }
   const admin = ui.view === "admin", defs = admin ? ADMIN_TABS : EDITOR_TABS, cur = admin ? ui.tab : ui.etab;
   if (nav.dataset.kind !== ui.view) {
     nav.dataset.kind = ui.view;
@@ -2536,11 +2827,12 @@ function renderTabs(all) {
       h("span", { class: "tab-ic" }, icon(d[0])), h("span", { class: "tab-label", text: d[1] }),
       i === 0 ? h("span", { class: "count" + (admin ? "" : " alert"), hidden: true }) : null)));
   }
-  const n = admin ? all.filter(isWaiting).length : all.filter((x) => x.uid === state.me.id && x.p.status === "active" && x.f.phase !== "ontrack").length;
+  const n = admin ? all.filter(isWaiting).length + state.scripts.filter((x) => x.status === "declined").length
+    : all.filter((x) => x.uid === state.me.id && x.p.status === "active" && x.f.phase !== "ontrack").length + (state.isAdmin ? 0 : state.scripts.length);
   for (const b of nav.children) {
     if (b.dataset.tab === cur) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
     const c = b.querySelector(".count");
-    if (c) { c.hidden = !n; c.textContent = String(n); c.setAttribute("aria-label", n + (admin ? " waiting" : " past deadline")); }
+    if (c) { c.hidden = !n; c.textContent = String(n); c.setAttribute("aria-label", n + " need" + (n === 1 ? "s" : "") + " you"); }
   }
 }
 function renderBanners() {
@@ -2572,8 +2864,9 @@ function render() {
   }
   view.dataset.down = "";
   if (!ready) { pin(view, authView()); return; }
-  if (ui.view === "admin" && !state.isAdmin) ui.view = "editor";
-  if (ui.view === "admin" && ui.tab === "projects") { pin(view, projectsPanel().node); fillProjects(all); }
+  if ((ui.view === "admin" && !state.isAdmin) || (ui.view === "buyer") !== state.isBuyer) ui.view = viewFor();
+  if (ui.view === "buyer") view.replaceChildren.apply(view, viewVideos());
+  else if (ui.view === "admin" && ui.tab === "projects") { pin(view, projectsPanel().node); fillProjects(all); }
   else if (ui.view === "admin" && ui.tab === "settings") { pin(view, settingsPanel().node); fillSettings(); }
   else if (ui.view === "admin" && ui.tab === "editors") view.replaceChildren.apply(view, viewEditors());
   else if (ui.view === "admin") view.replaceChildren.apply(view, viewInbox(all));

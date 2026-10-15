@@ -1,7 +1,8 @@
 // The Drive upload in a real browser on a phone-sized screen, run from drive.test.mjs once the function's own
 // checks are done: the admin's Settings (folders, Google's folder picker, disconnecting and connecting again)
 // and an editor's video going straight to the stand-in Google, carrying on after the line drops, after the
-// app is closed part way, and after the editor stops it.
+// app is closed part way, and after the editor stops it; then scripts: the admin sends them, an editor takes
+// one on and opens it, turns one down, and the admin gives it to someone else or takes it back.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -195,6 +196,82 @@ export async function run({ ok, srv, google, sql, db, SELF, APP, APP_URL, ids })
     await toast(ada, "Uploaded and submitted.", 30000);
     const f3 = inDrive("Proxan video 23 (Ada Obi).mp4");
     ok(f3 && f3.sha256 === v3.hash && (await project(brief3)).status === "submitted", "Carry on uploading finishes it");
+
+    /* ------------------------------------------------ a script sent through the app, taken on, turned down, given to someone else, taken back */
+    const scriptFile = (name, size) => { const buf = crypto.randomBytes(size), file = path.join(tmp, name); fs.writeFileSync(file, buf); return { file, buf }; };
+    const scriptRow = async (name) => (await sql`select id, editor_id, status, file_id, project_id, moved_to, note from app.scripts where name = ${name} order by sent_at desc limit 1`)[0];
+    const downloaded = async (page, click) => { const [dl] = await Promise.all([page.waitForEvent("download"), click()]); return { name: dl.suggestedFilename(), buf: fs.readFileSync(await dl.path()) }; };
+    const s26 = scriptFile("Proxan video 26.docx", 9 * 1024);
+    await admin.locator('#tabs button[data-tab="inbox"]').click();
+    await admin.locator("#assign").click();
+    await sheet(admin).locator("#as-go").waitFor();
+    await admin.setInputFiles("#as-file", s26.file);
+    ok((await admin.locator("#as-file-info").innerText()) === "Proxan video 26.docx (9 KB)." && (await admin.locator("#as-name").inputValue()) === "Proxan video 26" && (await admin.locator("#as-cat").inputValue()) === ids.cat,
+      "choosing a script shows it, names the brief after the file, and picks the category in its name", await admin.locator("#as-file-info").innerText());
+    await sheet(admin).locator("#as-go").click();
+    ok((await sheet(admin).getByRole("alert").innerText()) === "Pick the editor to send it to.", "the admin is asked to pick an editor");
+    const adaOption = sheet(admin).getByRole("radio", { name: /^Ada Obi/ });
+    ok(/2 scripts waiting/.test(await sheet(admin).locator("label.option", { hasText: "Ada Obi" }).innerText()), "each editor shows what they have on, including scripts still waiting for them", await sheet(admin).locator("label.option", { hasText: "Ada Obi" }).innerText());
+    await adaOption.check();
+    await shot(admin, "6-assign-script");
+    await sheet(admin).locator("#as-go").click();
+    await toast(admin, "Script sent to Ada Obi.");
+    const kept26 = inDrive("Proxan video 26.docx"), scFolders = Array.from(google.files.values()).filter((f) => f.name === "DN Studios scripts" && !f.trashed);
+    const r26 = await scriptRow("Proxan video 26");
+    ok(kept26 && scFolders.length === 1 && kept26.parents[0] === scFolders[0].id && Buffer.compare(kept26.content, s26.buf) === 0 && r26.status === "waiting" && r26.file_id === kept26.id,
+      "the script goes into the same DN Studios scripts folder in Drive as before (Drive was connected again since), exactly as chosen, and waits for the editor", JSON.stringify({ folders: scFolders.length, r26 }));
+    await admin.locator("#scripts article.clip", { hasText: "Proxan video 26" }).waitFor();
+    ok(/Waiting for them to accept it\./.test(await admin.locator("#scripts article.clip", { hasText: "Proxan video 26" }).innerText()), "the admin's inbox lists it until the editor takes it on");
+
+    await ada.reload();
+    const incoming = ada.locator("#new-scripts");
+    await incoming.waitFor();
+    ok((await incoming.locator(".section-title").innerText()) === "3 new scripts" && (await incoming.locator("article.clip").count()) === 3, "the editor sees the scripts waiting for them", await incoming.locator(".section-title").innerText());
+    await shot(ada, "6-new-scripts");
+    const got26 = await downloaded(ada, () => incoming.locator("article.clip", { hasText: "Proxan video 26" }).getByRole("button", { name: "Accept and open" }).click());
+    await toast(ada, "Accepted. Your 24-hour deadline has started.");
+    ok(got26.name === "Proxan video 26.docx" && Buffer.compare(got26.buf, s26.buf) === 0, "Accept and open starts the deadline, then the script downloads under its own name, exactly as sent", got26.name);
+    const r26b = await scriptRow("Proxan video 26"), b26 = r26b.project_id && (await sql`select status, name, category_id, script_id, editor_id from app.projects where id = ${r26b.project_id}`)[0];
+    ok(r26b.status === "accepted" && b26 && b26.status === "active" && b26.name === "Proxan video 26" && b26.category_id === ids.cat && b26.script_id === r26b.id && b26.editor_id === ids.adaId, "taking it on makes the brief, named and sorted as the admin sent it", JSON.stringify(b26));
+    const card26 = card(ada, "Proxan video 26");
+    await card26.getByRole("button", { name: "Submit video" }).waitFor();
+    const again26 = await downloaded(ada, () => card26.getByRole("button", { name: "Open script" }).click());
+    ok(Buffer.compare(again26.buf, s26.buf) === 0 && (await incoming.locator("article.clip").count()) === 2, "the brief keeps an Open script button, and the script leaves the new list");
+    await incoming.locator("article.clip", { hasText: "Proxan script 16" }).getByRole("button", { name: "Can't take it" }).click();
+    await ada.fill("#dc-note", "I already have three briefs on");
+    await sheet(ada).getByRole("button", { name: "Send it back" }).click();
+    await toast(ada, "Sent back. Your admin has been told.");
+    ok((await ada.locator("#new-scripts .section-title").innerText()) === "New script" && (await scriptRow("Proxan script 16")).status === "declined", "Can't take it sends the script back to the admin", (await scriptRow("Proxan script 16")).status);
+
+    await admin.reload();
+    await admin.locator('#tabs button[data-tab="inbox"]').click();
+    const firstScript = admin.locator("#scripts article.clip").first();
+    await firstScript.waitFor();
+    ok(/Proxan script 16/.test(await firstScript.innerText()) && /Can't take it/.test(await firstScript.innerText()) && /I already have three briefs on/.test(await firstScript.innerText()), "the admin sees the turned-down script first, with the editor's reason", (await firstScript.innerText()).replace(/\n/g, " | "));
+    await admin.locator("#scripts").scrollIntoViewIfNeeded();
+    await shot(admin, "7-scripts-inbox");
+    await firstScript.getByRole("button", { name: "Give to someone else" }).click();
+    await sheet(admin).getByRole("radio", { name: /^Tunde Bello/ }).check();
+    await sheet(admin).getByRole("button", { name: "Send script" }).click();
+    await toast(admin, "Script sent to Tunde Bello.");
+    const old16 = (await sql`select status, moved_to, file_id from app.scripts where name = 'Proxan script 16' and status = 'moved'`)[0], new16 = await scriptRow("Proxan script 16");
+    ok(old16 && new16.status === "waiting" && old16.moved_to === new16.id && new16.file_id === old16.file_id && (await db.rpc("er_state", { p_token: ids.TT })).scripts.some((x) => x.name === "Proxan script 16"),
+      "Give to someone else sends the same file to the editor picked", JSON.stringify({ old16, new16 }));
+    await admin.locator("#scripts article.clip", { hasText: "Proxan script 17" }).getByRole("button", { name: "Take back" }).click();
+    await sheet(admin).getByRole("button", { name: "Take back" }).click();
+    await toast(admin, "Script taken back");
+    ok((await scriptRow("Proxan script 17")).status === "withdrawn" && !(await db.rpc("er_state", { p_token: ids.TA })).scripts.length, "Take back takes it off the editor's screen", (await scriptRow("Proxan script 17")).status);
+    // several at once, to the same editor
+    const s27 = scriptFile("Proxan video 27.docx", 6000), s28 = scriptFile("Proxan video 28.pdf", 8000);
+    await admin.locator("#assign").click();
+    await admin.setInputFiles("#as-file", [s27.file, s28.file]);
+    ok(await admin.locator("#as-name").isHidden() && (await admin.locator("#as-go").innerText()) === "Send 2 scripts", "choosing several scripts sends each as its own brief, named after its file");
+    await sheet(admin).getByRole("radio", { name: /^Tunde Bello/ }).check();
+    await sheet(admin).locator("#as-go").click();
+    await toast(admin, "2 scripts sent to Tunde Bello.");
+    const tundeNames = (await db.rpc("er_state", { p_token: ids.TT })).scripts.map((x) => x.name).sort().join();
+    ok(tundeNames === "Proxan script 16,Proxan video 27,Proxan video 28" && Buffer.compare(inDrive("Proxan video 28.pdf").content, s28.buf) === 0, "both arrive in Drive and on the editor's screen", tundeNames);
+    await admin.locator('#tabs button[data-tab="settings"]').click();
 
     /* ------------------------------------------------ pasting a link still works, and so does a phone without Drive */
     const brief4 = (await db.rpc("er_log_brief", { p_token: ids.TA, p_name: "Proxan video 24", p_category: ids.cat })).id;

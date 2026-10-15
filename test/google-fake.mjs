@@ -1,5 +1,6 @@
 // A stand-in for the parts of Google the Drive upload uses, for tests on one machine: the sign-in's token
-// exchange, Drive's file and permission calls, and resumable uploads, which a browser sends straight to it.
+// exchange, Drive's file and permission calls, resumable uploads, which a browser sends straight to it, and the
+// small one-request uploads, new folders and file downloads the scripts use.
 // Uploads behave the way Google's do: the address Google hands out answers the browser only if it was asked
 // for with that browser page's origin, every piece says where it starts, and "308 Resume Incomplete" with a
 // Range header says how much has arrived. It can also cut a connection part way through a piece.
@@ -25,6 +26,7 @@ export async function startGoogle(opts = {}) {
     cut: 0,                    // cut the connection on the next N pieces that carry data, part way through,
     cutSkip: 0,                // after letting this many pieces through first
     pieceDelay: 0,             // wait this long before answering each piece, as a slow line would
+    failSmall: 0,              // answer the next N one-request uploads with an error, as a bad moment at Google would
     bytesIn: new Map(),        // upload id -> bytes received in whole pieces, to show nothing was sent twice
     grantScope: "https://www.googleapis.com/auth/drive.file openid https://www.googleapis.com/auth/userinfo.email",
   };
@@ -128,6 +130,39 @@ export async function startGoogle(opts = {}) {
         g.sessions.set(sid, { meta, size: Number(req.headers["x-upload-content-length"]), mime: req.headers["x-upload-content-type"], origin: req.headers.origin || null, bytes: [], received: 0, file: null });
         return send(res, 200, null, { Location: g.url + "/upload/drive/v3/files?uploadType=resumable&upload_id=" + sid });
       }
+      // ---- a small file in one request (multipart/related: its details, then its bytes)
+      if (req.method === "POST" && url.pathname === "/upload/drive/v3/files" && url.searchParams.get("uploadType") === "multipart") {
+        if (!authed(req)) { await read(req); return send(res, 401, { error: { code: 401, message: "Invalid Credentials" } }); }
+        if (g.failSmall > 0) { g.failSmall--; await read(req); return send(res, 503, { error: { code: 503, message: "Backend Error" } }); }
+        const bnd = /boundary=([^;]+)/.exec(req.headers["content-type"] || ""), raw = await read(req);
+        if (!bnd) return send(res, 400, { error: { code: 400, message: "No boundary" } });
+        const sep = Buffer.from("--" + bnd[1]), parts = [];
+        let at = raw.indexOf(sep);
+        while (at >= 0) {
+          const next = raw.indexOf(sep, at + sep.length);
+          if (next < 0) break;
+          const chunk = raw.subarray(at + sep.length + 2, next - 2), split = chunk.indexOf("\r\n\r\n");
+          parts.push({ head: chunk.subarray(0, split).toString(), body: chunk.subarray(split + 4) });
+          at = next;
+        }
+        if (parts.length !== 2) return send(res, 400, { error: { code: 400, message: "Expected two parts" } });
+        const meta = JSON.parse(parts[0].body.toString() || "{}");
+        const parent = g.files.get((meta.parents || [])[0]);
+        if (!parent || parent.mimeType !== FOLDER || parent.trashed) return send(res, 404, { error: { code: 404, message: "File not found: " + (meta.parents || [])[0] } });
+        const id = "doc" + crypto.randomBytes(9).toString("base64url");
+        const f = { id, name: meta.name, mimeType: meta.mimeType || /Content-Type: ([^\r\n]+)/i.exec(parts[1].head)[1], size: parts[1].body.length, parents: meta.parents,
+          appProperties: meta.appProperties || {}, description: meta.description, trashed: false, content: Buffer.from(parts[1].body) };
+        g.files.set(id, f);
+        return send(res, 200, fileJson(f));
+      }
+      // ---- a new folder (the scripts folder), made where the app has no other folder: My Drive
+      if (req.method === "POST" && url.pathname === "/drive/v3/files") {
+        if (!authed(req)) { await read(req); return send(res, 401, { error: { code: 401, message: "Invalid Credentials" } }); }
+        const meta = JSON.parse((await read(req)).toString() || "{}");
+        if (meta.mimeType !== FOLDER) return send(res, 400, { error: { code: 400, message: "Only folders here" } });
+        const id = g.folder(meta.name, { parents: meta.parents || ["root"] });
+        return send(res, 200, fileJson(g.files.get(id)));
+      }
       // ---- Drive's file calls, for the function
       const m = /^\/drive\/v3\/files\/([^/]+)(\/permissions)?$/.exec(url.pathname);
       if (m) {
@@ -135,6 +170,11 @@ export async function startGoogle(opts = {}) {
         const f = g.files.get(decodeURIComponent(m[1]));
         if (!f) { await read(req); return send(res, 404, { error: { code: 404, message: "File not found" } }); }
         if (m[2] && req.method === "POST") { const p = JSON.parse((await read(req)).toString() || "{}"); g.perms.push(Object.assign({ file: f.id }, p)); return send(res, 200, { kind: "drive#permission", id: "anyoneWithLink", type: p.type, role: p.role }); }
+        if (req.method === "GET" && url.searchParams.get("alt") === "media") {
+          if (!f.content) return send(res, 403, { error: { code: 403, message: "Only files with content can be downloaded" } });
+          res.writeHead(200, { "Content-Type": f.mimeType || "application/octet-stream" });
+          return res.end(f.content);
+        }
         if (req.method === "GET") return send(res, 200, fileJson(f));
       }
       await read(req);

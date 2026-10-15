@@ -8,6 +8,10 @@
 // its link view it (as the links editors send already do, so it plays inside the app), and submits the brief
 // with that link.
 //
+// It also keeps the scripts an admin sends editors through the app: each one goes into a "DN Studios scripts"
+// folder it makes in the same Drive, and comes back out of it only for an admin, or for the editor who has
+// taken the script on (the database decides who that is).
+//
 // It works with Drive's narrowest permission, drive.file: the folders the admin picked and the files the app
 // put there, nothing else in the Drive. Who may do what is decided by the app's own logins, in the database;
 // nothing here takes the browser's word for anything else. Google's addresses can be pointed elsewhere for
@@ -17,7 +21,9 @@ const SCOPE = "https://www.googleapis.com/auth/drive.file openid email";
 const DRIVE_FILE = "https://www.googleapis.com/auth/drive.file";
 const FOLDER = "application/vnd.google-apps.folder";
 const CODES = new Set(["auth", "forbidden", "not_found", "no_folder", "drive_off", "drive_lost", "too_big", "not_video", "too_many", "invalid", "full",
-  "bad_link", "not_set_up", "google", "expired", "not_done"]);
+  "bad_link", "not_set_up", "google", "expired", "not_done", "not_script", "need_category", "bad_name", "script_gone"]);
+const SCRIPTS_FOLDER = "DN Studios scripts";
+const MAX_SCRIPT = 10 * 1024 * 1024;          // the database refuses anything bigger too
 
 export class Stop extends Error {
   constructor(code, detail) { super(code); this.detail = detail || null; }
@@ -99,6 +105,8 @@ function act(b, sql, cfg, origin) {
     case "finish": return finish(token, b, sql, cfg);
     case "disconnect": return disconnect(token, sql, cfg);
     case "check": return check(token, sql, cfg);
+    case "script_send": return scriptSend(token, b, sql, cfg);
+    case "script_open": return scriptOpen(token, b.script, sql, cfg);
     default: throw new Stop("invalid");
   }
 }
@@ -324,4 +332,101 @@ async function finish(token, b, sql, cfg) {
   }
   await sql`select app.drive_done(${u.upload}, ${file}, ${link}, ${note})`;
   return { ok: true, link: link };
+}
+
+/* ---------- scripts: an admin sends one into the studio's Drive, and it's opened from there ---------- */
+
+function fromB64(text) {
+  const bin = atob(String(text).replace(/\s+/g, ""));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function toB64(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+// The file comes in the request itself (scripts are small documents). The database checks who it's for and what
+// it is first; only then is anything put in Drive. If saving it fails, the database is told, and nobody sees it.
+async function scriptSend(token, b, sql, cfg) {
+  if (!ready(cfg)) throw new Stop("not_set_up");
+  const f = b.file && typeof b.file === "object" ? b.file : null;
+  if (!isId(b.editor) || (b.category != null && !isId(b.category)) || !f || typeof f.name !== "string" || typeof f.data !== "string") throw new Stop("invalid");
+  if (f.data.length > Math.ceil(MAX_SCRIPT / 3) * 4 + 16) throw new Stop("too_big");
+  let bytes;
+  try { bytes = fromB64(f.data); } catch (e) { throw new Stop("invalid"); }
+  if (!bytes.length) throw new Stop("invalid");
+  const [{ s }] = await sql`select app.script_new(${token}, ${b.editor}, ${b.category || null}, ${String(b.name || "").slice(0, 300)}, ${f.name.slice(0, 300)}, ${bytes.length}) as s`;
+  let id;
+  try {
+    id = await saveScript(sql, cfg, s, bytes);
+  } catch (e) {
+    await sql`select app.script_failed(${s.script}, ${String(e instanceof Stop ? e.detail || e.message : (e && e.message) || e).slice(0, 300)})`.catch(() => {});
+    throw e;
+  }
+  await sql`select app.script_saved(${s.script}, ${id})`;
+  return { ok: true, script: s.script, name: s.name };
+}
+
+// Into this connection's scripts folder: made the first time, and made again if it has been deleted or binned.
+async function saveScript(sql, cfg, s, bytes) {
+  let folder = s.folder;
+  if (folder) {
+    const r = await drive(sql, cfg, "GET", "/drive/v3/files/" + encodeURIComponent(folder) + "?supportsAllDrives=true&fields=id,trashed");
+    if (!r.ok || r.body.trashed) folder = null;
+  }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (!folder) folder = await scriptsFolder(sql, cfg, s.conn);
+    const meta = { name: s.file, parents: [folder], mimeType: s.mime, appProperties: { dnScript: s.script },
+      description: ("Script for " + s.editor + (s.cat ? " (" + s.cat + ")" : "") + ", sent through DN Studios.").slice(0, 900) };
+    const r = await sendSmall(sql, cfg, meta, s.mime, bytes);
+    if (r.ok && isDriveId(r.body.id)) return r.body.id;
+    if (r.status === 404 && attempt === 0) { folder = null; continue; }
+    throw new Stop("google", "script " + r.status + " " + JSON.stringify(r.body).slice(0, 200));
+  }
+}
+
+async function scriptsFolder(sql, cfg, conn) {
+  const r = await drive(sql, cfg, "POST", "/drive/v3/files?supportsAllDrives=true&fields=id", { name: SCRIPTS_FOLDER, mimeType: FOLDER });
+  if (!r.ok || !isDriveId(r.body.id)) throw new Stop("google", "folder " + r.status);
+  await sql`select app.scripts_folder_set(${conn}, ${r.body.id})`;
+  return r.body.id;
+}
+
+// A small file in one request: its details and its bytes together ("multipart" upload).
+async function sendSmall(sql, cfg, meta, mime, bytes) {
+  const boundary = "dn" + crypto.randomUUID().replace(/-/g, ""), enc = new TextEncoder();
+  const head = enc.encode("--" + boundary + "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n" + JSON.stringify(meta) + "\r\n--" + boundary + "\r\nContent-Type: " + mime + "\r\n\r\n");
+  const tail = enc.encode("\r\n--" + boundary + "--\r\n");
+  const body = new Uint8Array(head.length + bytes.length + tail.length);
+  body.set(head, 0); body.set(bytes, head.length); body.set(tail, head.length + bytes.length);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const at = await accessToken(sql, cfg, attempt > 0);
+    const res = await cfg.fetch(cfg.api + "/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,size",
+      { method: "POST", headers: { Authorization: "Bearer " + at, "Content-Type": "multipart/related; boundary=" + boundary }, body: body });
+    if (res.status === 401 && attempt === 0) { cache.token = null; continue; }
+    let parsed = null;
+    try { parsed = await res.json(); } catch (e) { /* no body */ }
+    return { ok: res.ok, status: res.status, body: parsed || {} };
+  }
+}
+
+// Opening a script: the database says whether this person may (an admin, or the editor who took it on), then
+// the file is fetched from Drive and handed back whole.
+async function scriptOpen(token, script, sql, cfg) {
+  if (!isId(script)) throw new Stop("invalid");
+  const [{ f }] = await sql`select app.script_file(${token}, ${script}) as f`;
+  if (!ready(cfg)) throw new Stop("not_set_up");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const at = await accessToken(sql, cfg, attempt > 0);
+    const res = await cfg.fetch(cfg.api + "/drive/v3/files/" + encodeURIComponent(f.file) + "?alt=media&supportsAllDrives=true", { headers: { Authorization: "Bearer " + at } });
+    if (res.status === 401 && attempt === 0) { cache.token = null; continue; }
+    if (res.status === 404) throw new Stop("script_gone");
+    if (!res.ok) throw new Stop("google", "open " + res.status);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (bytes.length > MAX_SCRIPT) throw new Stop("too_big");
+    return { name: f.name, mime: f.mime, data: toB64(bytes) };
+  }
 }

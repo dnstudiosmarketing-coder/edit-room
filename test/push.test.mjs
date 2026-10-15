@@ -117,7 +117,17 @@ try {
   ok(body.failed === 1 && busy.waiting && /^will try again: push service said 503 try later$/.test(busy.result) && busy.tries === 1, "a push service that is busy gets the ping again later", JSON.stringify(busy));
   r = await call(secret);
   ok((await r.json()).notices === 0, "not straight away, though");
-  ok(oldSub && received.length === 5, "every message went where it should, and nowhere else (two for the submission, one deadline, one reminder, one busy try)", received.length + " messages");
+  // a media buyer's ping when the admin approves a video: tapping it goes straight to the download
+  await db.rpc("er_add_user", { p_token: A, p_name: "Bisi Buyer", p_username: "bisi", p_password: "bisi-pass-1", p_role: "buyer" });
+  const buyerPhone = phone();
+  await sub((await db.sql("select id from app.users where username = 'bisi'")).rows[0].id, buyerPhone, "ok");
+  await db.rpc("er_receive", { p_token: A, p_project: p, p_on: true });
+  r = await call(secret);
+  body = await r.json();
+  const vid = received.filter((x) => x.path.startsWith("/ok/")).map((x) => { try { return JSON.parse(readAs(buyerPhone, x.body)); } catch (e) { return null; } }).find(Boolean);
+  ok(body.sent === 1 && vid && vid.title === "New video: Night market short" && vid.body === "Shorts. Tap to download it." && vid.tag === "video:" + p && vid.url === "https://drive.google.com/uc?export=download&id=abc123",
+    "a media buyer's phone hears about an approved video, and tapping it downloads it", JSON.stringify(vid));
+  ok(oldSub && received.length === 6, "every message went where it should, and nowhere else (two for the submission, one deadline, one reminder, one busy try, one video)", received.length + " messages");
 } catch (e) {
   ok(false, "the run stopped early", String(e && e.stack).split("\n").slice(0, 4).join(" / "));
 }

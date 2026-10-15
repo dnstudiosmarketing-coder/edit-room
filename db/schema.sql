@@ -35,7 +35,7 @@ create table if not exists app.users (
   id uuid primary key default gen_random_uuid(),
   username text not null unique check (username ~ '^[a-z0-9._-]{3,24}$'),
   name text not null check (char_length(name) between 1 and 40),
-  role text not null check (role in ('admin', 'editor')),
+  role text not null check (role in ('admin', 'editor', 'buyer')),       -- buyer: a media buyer, who downloads finished videos
   owner boolean not null default false,
   pass_hash text not null,
   active boolean not null default true,
@@ -159,7 +159,7 @@ create index if not exists push_subs_user on app.push_subs(user_id);
 create table if not exists app.outbox (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references app.users(id),
-  kind text not null check (kind in ('submitted', 'deadline', 'picture', 'test')),
+  kind text not null check (kind in ('submitted', 'deadline', 'picture', 'test', 'assigned', 'declined', 'video')),
   project_id uuid references app.projects(id),
   title text not null check (char_length(title) <= 120),
   body text not null check (char_length(body) <= 300),
@@ -200,7 +200,8 @@ create index if not exists details_user on app.details(user_id, created_at desc)
 
 -- Reminders an admin sends from Settings: a new profile picture, payment details, late videos. They wait and
 -- go out like the automatic notifications in app.outbox (the sender takes from both) and are kept the same
--- way. They have a table of their own because app.outbox's list of kinds is fixed.
+-- way. They have a table of their own because, when they were added, app.outbox's list of kinds was left as
+-- it was (it was widened later, for scripts and media buyers: see further down).
 create table if not exists app.reminders (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references app.users(id),
@@ -291,13 +292,67 @@ alter table app.meta add column if not exists google_client_id text check (googl
 alter table app.meta add column if not exists google_api_key text check (google_api_key is null or google_api_key ~ '^[A-Za-z0-9_-]{20,100}$');
 alter table app.meta add column if not exists google_app_id text check (google_app_id is null or google_app_id ~ '^[0-9]{6,20}$');
 
+-- Media buyers, and scripts sent through the app.
+--
+-- A media buyer signs in like an editor but sees only the finished videos an admin has approved (marked
+-- received), from every category, and gets a ping for each one with a link to download it. Databases made
+-- before buyers existed allowed only admins and editors, and fewer kinds of notification: this widens the two
+-- lists (everything already in them stays allowed), and does nothing once they are wide enough.
+do $$
+begin
+  if exists (select 1 from pg_constraint where conrelid = 'app.users'::regclass and conname = 'users_role_check' and pg_get_constraintdef(oid) not like '%buyer%') then
+    alter table app.users drop constraint users_role_check;
+    alter table app.users add constraint users_role_check check (role in ('admin', 'editor', 'buyer'));
+  end if;
+  if exists (select 1 from pg_constraint where conrelid = 'app.outbox'::regclass and conname = 'outbox_kind_check' and pg_get_constraintdef(oid) not like '%video%') then
+    alter table app.outbox drop constraint outbox_kind_check;
+    alter table app.outbox add constraint outbox_kind_check check (kind in ('submitted', 'deadline', 'picture', 'test', 'assigned', 'declined', 'video'));
+  end if;
+end $$;
+create unique index if not exists outbox_video_once on app.outbox(project_id, user_id) where kind = 'video';     -- each buyer hears about a video once
+
+-- Scripts an admin sends an editor. The file itself is kept in the studio's Google Drive, in a folder the app
+-- makes there ("DN Studios scripts"), never in this database: a row here says only who it's for and what
+-- became of it. It waits until the editor accepts it, which makes the brief and starts its clock (only then can
+-- they open the file), or says they can't take it. An admin can take a waiting script back, or give it to
+-- someone else, which closes this row and opens a new one for them with the same file.
+create table if not exists app.scripts (
+  id uuid primary key default gen_random_uuid(),
+  editor_id uuid not null references app.users(id),
+  category_id uuid references app.categories(id),
+  name text not null check (char_length(name) between 1 and 140),            -- the brief's name, once accepted
+  file_name text not null check (char_length(file_name) between 1 and 200),
+  mime text not null check (char_length(mime) between 3 and 120),
+  size int not null check (size between 1 and 10485760),                       -- up to 10 MB
+  file_id text check (file_id is null or file_id ~ '^[A-Za-z0-9_-]{10,200}$'),  -- Drive's id for it, once it's there
+  sent_by uuid not null references app.users(id),
+  sent_at timestamptz not null default now(),
+  status text not null default 'sending' check (status in ('sending', 'waiting', 'accepted', 'declined', 'withdrawn', 'moved', 'failed')),
+  declined_at timestamptz,                                                     -- when the editor said they can't take it (and note says why)
+  note text check (note is null or char_length(note) <= 300),                 -- the editor's reason, or why sending it failed
+  ended_at timestamptz,                                                        -- closed: accepted, taken back, given to someone else, or failed
+  ended_by uuid references app.users(id),
+  project_id uuid references app.projects(id),                                -- the brief made when it was accepted
+  moved_to uuid references app.scripts(id)                                    -- given to someone else: their row
+);
+create index if not exists scripts_open on app.scripts(sent_at) where status in ('waiting', 'declined');
+create index if not exists scripts_editor on app.scripts(editor_id, sent_at desc);
+create index if not exists scripts_sent_by on app.scripts(sent_by, sent_at desc);
+create index if not exists scripts_category on app.scripts(category_id);
+create index if not exists scripts_ended_by on app.scripts(ended_by);
+create index if not exists scripts_project on app.scripts(project_id);
+create index if not exists scripts_moved_to on app.scripts(moved_to);
+alter table app.projects add column if not exists script_id uuid references app.scripts(id);      -- the script this brief came from
+create index if not exists projects_script on app.projects(script_id);
+alter table app.drive add column if not exists scripts_folder text check (scripts_folder is null or scripts_folder ~ '^[A-Za-z0-9_-]{10,200}$');   -- where this connection keeps scripts
+
 -- Row level security is on for every table, with a single rule that lets nobody through. The er_* functions
 -- run as the tables' owner, which the rule does not apply to; any other route to the data is refused.
 do $$
 declare t text;
 begin
   foreach t in array array['meta', 'users', 'sessions', 'categories', 'projects', 'bonuses', 'featured', 'push_subs', 'outbox', 'details', 'reminders',
-                           'drive', 'drive_folders', 'drive_states', 'uploads'] loop
+                           'drive', 'drive_folders', 'drive_states', 'uploads', 'scripts'] loop
     execute format('alter table app.%I enable row level security', t);
     if not exists (select 1 from pg_policies where schemaname = 'app' and tablename = t and policyname = 'no_direct_access') then
       execute format('create policy no_direct_access on app.%I for all to public using (false) with check (false)', t);
@@ -335,6 +390,15 @@ declare u app.users;
 begin
   u := app.who(p_token);
   if u.role <> 'admin' then raise exception 'forbidden'; end if;
+  return u;
+end $$;
+
+-- Someone who works on briefs: an editor, or an admin trying the editor screen. A media buyer only downloads.
+create or replace function app.worker(p_token text) returns app.users language plpgsql set search_path = '' as $$
+declare u app.users;
+begin
+  u := app.who(p_token);
+  if u.role not in ('admin', 'editor') then raise exception 'forbidden'; end if;
   return u;
 end $$;
 
@@ -387,7 +451,7 @@ select p.id, p.editor_id, p.category_id, p.status, p.started_at, p.submitted_at,
     'back', (extract(epoch from p.back_at) * 1000)::bigint, 'backNote', nullif(p.back_note, ''),
     'from', p.from_editor, 'to', p.moved_to,
     'moved', (extract(epoch from p.moved_at) * 1000)::bigint, 'seen', nullif(p.seen_moved, false),
-    'received', (extract(epoch from p.received_at) * 1000)::bigint, 'amount', p.amount, 'deleted', nullif(p.deleted, false))) as ja,
+    'received', (extract(epoch from p.received_at) * 1000)::bigint, 'amount', p.amount, 'deleted', nullif(p.deleted, false), 'script', p.script_id)) as ja,
   json_strip_nulls(json_build_object(
     'id', p.id, 'u', p.editor_id, 'name', p.name, 'cat', p.category_id, 'stage', p.stage, 'status', p.status,
     'started', (extract(epoch from p.started_at) * 1000)::bigint, 'updated', (extract(epoch from p.updated_at) * 1000)::bigint,
@@ -398,7 +462,7 @@ select p.id, p.editor_id, p.category_id, p.status, p.started_at, p.submitted_at,
     'back', (extract(epoch from p.back_at) * 1000)::bigint, 'backNote', nullif(p.back_note, ''),
     'from', case when p.from_editor is not null then 'x' end,
     'moved', (extract(epoch from p.moved_at) * 1000)::bigint, 'seen', nullif(p.seen_moved, false),
-    'received', (extract(epoch from p.received_at) * 1000)::bigint, 'amount', p.amount, 'deleted', nullif(p.deleted, false))) as je
+    'received', (extract(epoch from p.received_at) * 1000)::bigint, 'amount', p.amount, 'deleted', nullif(p.deleted, false), 'script', p.script_id)) as je
 from app.projects p;
 
 -- top on-time performers since a point in time
@@ -744,16 +808,19 @@ end $$;
 -- A first call (p_since null) returns the current picture; later calls return only the projects that changed.
 -- The reply stays small however much history there is: an admin gets every project that is still open plus
 -- the last 8 days, with the figures for editors and categories worked out here; older projects are read a
--- page at a time through er_history. An editor gets their own latest 400.
+-- page at a time through er_history. An editor gets their own latest 400, and the scripts waiting for them.
+-- A media buyer gets the latest 300 approved videos instead, and nothing about anyone's pay or deadlines.
 create or replace function public.er_state(p_token text, p_since bigint default null) returns json
 language plpgsql security definer set search_path = '' as $$
 declare
-  u app.users; m app.meta; adm boolean; t0 timestamptz := clock_timestamp(); since timestamptz;
+  u app.users; m app.meta; adm boolean; buyer boolean; t0 timestamptz := clock_timestamp(); since timestamptz;
   ws timestamp; w0 timestamptz; cut4 timestamptz; mo timestamptz; horizon timestamptz; edge timestamptz; n int;
-  j_weeks json; j_bw json; j_bm json; j_aw json; j_users json; j_cats json; j_bonuses json; j_totals json; j_projects json; j_stats json; j_feat json;
+  j_weeks json; j_bw json := '[]'; j_bm json := '[]'; j_aw json := '[]'; j_users json; j_cats json; j_bonuses json; j_totals json; j_projects json; j_stats json; j_feat json := '[]';
+  j_scripts json := '[]'; j_videos json;
 begin
   u := app.who(p_token);
   adm := u.role = 'admin';
+  buyer := u.role = 'buyer';
   select * into m from app.meta;
   update app.users set last_seen = t0 where id = u.id and (last_seen is null or last_seen < t0 - interval '10 minutes');
   update app.sessions set expires_at = t0 + interval '60 days'
@@ -766,11 +833,13 @@ begin
   cut4 := (ws - interval '21 days') at time zone m.tz;      -- start of the "last 4 weeks" figures
   mo := date_trunc('month', t0 at time zone m.tz) at time zone m.tz;
   select json_agg(app.ms((ws - make_interval(days => 7 * i)) at time zone m.tz) order by i desc) into j_weeks from generate_series(0, 5) i;
-  j_bw := app.board(ws at time zone m.tz);
-  j_bm := app.board(mo);
-  select coalesce(json_agg(json_build_object('u', b.editor_id, 'at', app.ms(b.awarded_at), 'label', b.label) order by b.awarded_at desc), '[]'::json) into j_aw
-    from (select * from app.bonuses where not removed and awarded_at > t0 - interval '62 days' order by awarded_at desc limit 30) b;
-  j_feat := app.featured_now();
+  if not buyer then
+    j_bw := app.board(ws at time zone m.tz);
+    j_bm := app.board(mo);
+    select coalesce(json_agg(json_build_object('u', b.editor_id, 'at', app.ms(b.awarded_at), 'label', b.label) order by b.awarded_at desc), '[]'::json) into j_aw
+      from (select * from app.bonuses where not removed and awarded_at > t0 - interval '62 days' order by awarded_at desc limit 30) b;
+    j_feat := app.featured_now();
+  end if;
 
   select coalesce(json_agg(json_build_object('id', c.id, 'name', c.name, 'c', c.color, 'rate', c.rate, 'archived', c.archived) order by c.created_at), '[]'::json) into j_cats from app.categories c;
 
@@ -829,6 +898,11 @@ begin
            group by p.category_id) c), '[]'::json))
       into j_stats;
 
+    -- scripts nobody has taken on yet: waiting for their editor, or turned down and waiting for the admin
+    select coalesce(json_agg(json_build_object('id', s.id, 'u', s.editor_id, 'cat', s.category_id, 'name', s.name, 'file', s.file_name, 'size', s.size,
+                                               'at', app.ms(s.sent_at), 'status', s.status, 'note', s.note, 'by', s.sent_by, 'declined', app.ms(s.declined_at)) order by s.sent_at, s.id), '[]'::json)
+      into j_scripts from app.scripts s where s.status in ('waiting', 'declined');
+
     if since is null then
       horizon := t0 - interval '8 days';
       with win as (
@@ -842,8 +916,31 @@ begin
     else
       select coalesce(json_agg(v.ja), '[]'::json) into j_projects from app.pv v where v.changed_at > since;
     end if;
+  elsif buyer then
+    -- a media buyer: the videos an admin has approved, newest first, with who made them and the link
+    select coalesce(json_agg(json_build_object('id', x.id, 'name', x.name, 'av', x.avatar_ver, 'has', x.avatar is not null)), '[]'::json) into j_users from app.users x where x.id = u.id;
+    j_bonuses := '[]'::json; j_projects := '[]'::json;
+    if since is not null and (select count(*) from (select 1 from app.projects p where p.changed_at > since and (p.status = 'submitted' or p.deleted) limit 301) c) > 300 then since := null; end if;
+    if since is null then
+      select coalesce(json_agg(q.j order by q.at desc, q.id desc), '[]'::json) into j_videos from (
+        select p.id, p.received_at as at,
+               json_build_object('id', p.id, 'name', p.name, 'cat', p.category_id, 'link', p.link, 'at', app.ms(p.received_at), 'by', e.name) as j
+          from app.projects p join app.users e on e.id = p.editor_id
+         where p.status = 'submitted' and p.received_at is not null and not p.deleted
+         order by p.received_at desc, p.id desc
+         limit 300) q;
+    else
+      -- what changed: approved now, or no longer (marked not received, or deleted); work in progress is never sent
+      select coalesce(json_agg(case when p.status = 'submitted' and p.received_at is not null and not p.deleted
+                                    then json_build_object('id', p.id, 'name', p.name, 'cat', p.category_id, 'link', p.link, 'at', app.ms(p.received_at), 'by', e.name)
+                                    else json_build_object('id', p.id, 'gone', true) end), '[]'::json) into j_videos
+        from app.projects p join app.users e on e.id = p.editor_id
+       where p.changed_at > since and (p.status = 'submitted' or p.deleted);
+    end if;
   else
     if since is not null and (select count(*) from (select 1 from app.projects p where p.editor_id = u.id and p.changed_at > since limit 301) c) > 300 then since := null; end if;
+    select coalesce(json_agg(json_build_object('id', s.id, 'cat', s.category_id, 'name', s.name, 'at', app.ms(s.sent_at)) order by s.sent_at, s.id), '[]'::json)
+      into j_scripts from app.scripts s where s.editor_id = u.id and s.status = 'waiting';
 
     -- an editor gets their own work, plus only the names needed to draw the leaderboard and the featured videos
     select coalesce(json_agg(json_build_object('id', x.id, 'name', x.name, 'av', x.avatar_ver, 'has', x.avatar is not null)), '[]'::json) into j_users
@@ -874,11 +971,11 @@ begin
                             'details', app.details_of(u.id)),
     'settings', json_build_object('delivery', m.delivery_hours, 'grace', m.grace_hours, 'target', m.weekly_target, 'currency', m.currency, 'tz', m.tz, 'bonus', case when adm then m.bonus_default end,
                                   'push', m.vapid_public, 'picAsk', app.ms(m.pic_ask_at), 'detailsAsk', app.ms(m.details_ask_at), 'lateAsk', app.ms(m.late_ask_at),
-                                  'drive', app.drive_info(adm)),
+                                  'drive', case when buyer then json_build_object('on', false, 'folders', '[]'::json) else app.drive_info(adm) end),
     'cats', j_cats, 'users', j_users, 'weeks', j_weeks, 'month', app.ms(mo),
     'board', json_build_object('week', j_bw, 'month', j_bm, 'awards', j_aw), 'featured', j_feat,
     'bonuses', j_bonuses, 'totals', j_totals, 'stats', j_stats, 'horizon', case when adm and since is null then horizon end,
-    'projects', j_projects);
+    'projects', j_projects, 'scripts', j_scripts, 'videos', j_videos);
 end $$;
 
 -- Older finished projects for the admin's list, newest first, 40 at a time. p_before (and p_before_id, from
@@ -919,7 +1016,7 @@ create or replace function public.er_log_brief(p_token text, p_name text, p_cate
 language plpgsql security definer set search_path = '' as $$
 declare u app.users; v_id uuid; v_name text;
 begin
-  u := app.who(p_token);
+  u := app.worker(p_token);
   if p_category is null then
     if exists (select 1 from app.categories where not archived) then raise exception 'need_category'; end if;
   elsif not exists (select 1 from app.categories where id = p_category and not archived) then
@@ -940,7 +1037,7 @@ create or replace function public.er_set_stage(p_token text, p_project uuid, p_s
 language plpgsql security definer set search_path = '' as $$
 declare u app.users;
 begin
-  u := app.who(p_token);
+  u := app.worker(p_token);
   if p_stage is null or p_stage not between 1 and 3 then raise exception 'invalid'; end if;
   update app.projects set stage = p_stage, updated_at = now() where id = p_project and editor_id = u.id and status = 'active' and not deleted;
   if not found then raise exception 'not_found'; end if;
@@ -951,7 +1048,7 @@ create or replace function public.er_add_update(p_token text, p_project uuid, p_
 language plpgsql security definer set search_path = '' as $$
 declare u app.users;
 begin
-  u := app.who(p_token);
+  u := app.worker(p_token);
   update app.projects set progress = app.clean(p_text, 240, 'invalid'), updated_at = now() where id = p_project and editor_id = u.id and status = 'active' and not deleted;
   if not found then raise exception 'not_found'; end if;
   return json_build_object('ok', true);
@@ -962,7 +1059,7 @@ create or replace function public.er_submit(p_token text, p_project uuid, p_link
 language plpgsql security definer set search_path = '' as $$
 declare u app.users; p app.projects;
 begin
-  u := app.who(p_token);
+  u := app.worker(p_token);
   if p_link is null or char_length(p_link) > 600 or p_link !~ '^https?://[^[:space:]]{4,}$' then raise exception 'bad_link'; end if;
   update app.projects set status = 'submitted', link = p_link, note = left(btrim(coalesce(p_note, '')), 400), submitted_at = now(), updated_at = now()
    where id = p_project and editor_id = u.id and status = 'active' and not deleted
@@ -978,7 +1075,7 @@ create or replace function public.er_ack_moved(p_token text, p_project uuid) ret
 language plpgsql security definer set search_path = '' as $$
 declare u app.users;
 begin
-  u := app.who(p_token);
+  u := app.worker(p_token);
   update app.projects set seen_moved = true where id = p_project and editor_id = u.id and status = 'reassigned';
   if not found then raise exception 'not_found'; end if;
   return json_build_object('ok', true);
@@ -986,19 +1083,25 @@ end $$;
 
 -- ---------------------------------------------------------------- what an admin can do
 
+-- Marking a video received approves it: it goes into the editor's earnings, and every media buyer hears it's
+-- ready, once (the sender gives the ping a link that downloads it).
 create or replace function public.er_receive(p_token text, p_project uuid, p_on boolean) returns json
 language plpgsql security definer set search_path = '' as $$
-declare u app.users; v_amount numeric;
+declare u app.users; v app.projects;
 begin
   u := app.admin(p_token);
   if p_on then
-    update app.projects p set received_at = now(), amount = (select c.rate from app.categories c where c.id = p.category_id)
-     where p.id = p_project and p.status = 'submitted' and p.received_at is null and not p.deleted returning p.amount into v_amount;
+    update app.projects x set received_at = now(), amount = (select c.rate from app.categories c where c.id = x.category_id)
+     where x.id = p_project and x.status = 'submitted' and x.received_at is null and not x.deleted returning x.* into v;
+    if not found then raise exception 'not_found'; end if;
+    perform app.notify_many(array(select b.id from app.users b where b.role = 'buyer' and b.active and b.removed_at is null),
+      'video', v.id, 'New video: ' || left(v.name, 100),
+      coalesce((select c.name || '. ' from app.categories c where c.id = v.category_id), '') || 'Tap to download it.');
   else
-    update app.projects p set received_at = null, amount = null where p.id = p_project and p.status = 'submitted' and p.received_at is not null and not p.deleted;
+    update app.projects x set received_at = null, amount = null where x.id = p_project and x.status = 'submitted' and x.received_at is not null and not x.deleted;
+    if not found then raise exception 'not_found'; end if;
   end if;
-  if not found then raise exception 'not_found'; end if;
-  return json_build_object('ok', true, 'amount', v_amount);
+  return json_build_object('ok', true, 'amount', v.amount);
 end $$;
 
 create or replace function public.er_set_amount(p_token text, p_project uuid, p_amount numeric) returns json
@@ -1034,9 +1137,9 @@ begin
   u := app.admin(p_token);
   select * into p from app.projects where id = p_project and status = 'active' and not deleted for update;
   if not found then raise exception 'not_found'; end if;
-  if p_to = p.editor_id or not exists (select 1 from app.users where id = p_to and active) then raise exception 'invalid'; end if;
-  insert into app.projects(editor_id, name, category_id, from_editor, due_hours, grace_hours)
-  select p_to, p.name, p.category_id, p.editor_id, m.delivery_hours, m.grace_hours from app.meta m returning id into v_id;
+  if p_to = p.editor_id or not exists (select 1 from app.users where id = p_to and active and role in ('admin', 'editor')) then raise exception 'invalid'; end if;
+  insert into app.projects(editor_id, name, category_id, from_editor, due_hours, grace_hours, script_id)          -- the script goes with it
+  select p_to, p.name, p.category_id, p.editor_id, m.delivery_hours, m.grace_hours, p.script_id from app.meta m returning id into v_id;
   update app.projects set status = 'reassigned', moved_to = p_to, moved_at = now(), seen_moved = false where id = p.id;
   return json_build_object('ok', true, 'id', v_id);
 end $$;
@@ -1163,7 +1266,7 @@ language plpgsql security definer set search_path = '' as $$
 declare u app.users; v_user text; v_id uuid;
 begin
   u := app.admin(p_token);
-  if p_role not in ('admin', 'editor') or (p_role = 'admin' and not u.owner) then raise exception 'forbidden'; end if;
+  if p_role not in ('admin', 'editor', 'buyer') or (p_role = 'admin' and not u.owner) then raise exception 'forbidden'; end if;
   v_user := app.username(p_username);
   if exists (select 1 from app.users where username = v_user) then raise exception 'taken'; end if;
   insert into app.users(username, name, role, pass_hash) values (v_user, app.clean(p_name, 40, 'bad_name'), p_role, app.password(p_password)) returning id into v_id;
@@ -1181,7 +1284,7 @@ begin
   if not found then raise exception 'not_found'; end if;
   if t.id <> u.id and (t.owner or (t.role = 'admin' and not u.owner)) then raise exception 'forbidden'; end if;
   if p_role is not null then
-    if not u.owner or t.owner or p_role not in ('admin', 'editor') then raise exception 'forbidden'; end if;
+    if not u.owner or t.owner or p_role not in ('admin', 'editor', 'buyer') then raise exception 'forbidden'; end if;
     update app.users set role = p_role where id = t.id;
   end if;
   if p_active is not null then
@@ -1315,7 +1418,9 @@ declare u app.users; n int; k int;
 begin
   u := app.who(p_token);
   n := app.notify_many(array[u.id], 'test', null, 'Notifications are on',
-    case when u.role = 'admin' then 'This phone will ping you when an editor submits a video.' else 'This phone will ping you when a video reaches its deadline.' end);
+    case u.role when 'admin' then 'This phone will ping you when an editor submits a video.'
+                when 'buyer' then 'This phone will ping you when a new video is ready to download.'
+                else 'This phone will ping you when you get a script and when a video reaches its deadline.' end);
   select count(*) into k from app.push_subs where user_id = u.id and gone_at is null;
   return json_build_object('ok', true, 'phones', k, 'queued', n);
 end $$;
@@ -1404,14 +1509,21 @@ language sql set search_path = '' as $$
   returning s.user_id, s.back_to
 $$;
 
--- The connection Google handed over; it replaces any earlier one.
+-- The connection Google handed over; it replaces any earlier one. Connecting the same Google account again keeps
+-- the scripts folder it had, so scripts don't end up split over two folders (dn-drive checks the folder is still
+-- there before using it, and makes a new one if not).
 create or replace function app.drive_link(p_user uuid, p_email text, p_refresh text) returns uuid
 language plpgsql set search_path = '' as $$
-declare v_id uuid;
+declare v_id uuid; v_folder text;
 begin
   if not exists (select 1 from app.users x where x.id = p_user and x.active and x.role = 'admin' and x.removed_at is null) then raise exception 'forbidden'; end if;
   update app.drive set ended_at = now(), ended_by = p_user, end_note = 'replaced by a newer connection' where ended_at is null;
-  insert into app.drive(email, refresh_token, connected_by) values (left(p_email, 320), p_refresh, p_user) returning id into v_id;
+  if btrim(coalesce(p_email, '')) <> '' then
+    select d.scripts_folder into v_folder from app.drive d
+     where d.scripts_folder is not null and lower(d.email) = lower(left(p_email, 320))
+     order by d.connected_at desc limit 1;
+  end if;
+  insert into app.drive(email, refresh_token, connected_by, scripts_folder) values (left(p_email, 320), p_refresh, p_user, v_folder) returning id into v_id;
   return v_id;
 end $$;
 
@@ -1470,7 +1582,7 @@ create or replace function app.drive_start(p_token text, p_project uuid, p_folde
 language plpgsql set search_path = '' as $$
 declare u app.users; p app.projects; f app.drive_folders; v_name text; v_id uuid; v_mime text; v_ext text;
 begin
-  u := app.who(p_token);
+  u := app.worker(p_token);
   select * into p from app.projects where id = p_project and editor_id = u.id and status = 'active' and not deleted;
   if not found then raise exception 'not_found'; end if;
   select * into f from app.drive_folders where id = p_folder and removed_at is null;
@@ -1523,6 +1635,166 @@ begin
   if not found then raise exception 'not_found'; end if;
   return json_build_object('ok', true);
 end $$;
+
+-- ---------------------------------------------------------------- scripts sent through the app
+-- Sending one goes through the dn-drive function, which keeps the file in the studio's Google Drive: it calls
+-- app.script_new, saves the file there, then app.script_saved (or app.script_failed). Opening one goes through
+-- it too, and app.script_file says who may. Taking one on, turning it down, taking it back and giving it to
+-- someone else are er_* functions the app calls itself.
+
+-- The kinds of file a script can be: Word documents, and the other usual ones. Decided by the file's ending,
+-- since phones often send no type at all; anything else is refused.
+create or replace function app.script_kind(p_file text) returns text language sql immutable set search_path = '' as $$
+  select case lower(coalesce(substring(p_file from '\.([A-Za-z0-9]{1,5})$'), ''))
+    when 'docx' then 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    when 'doc' then 'application/msword'
+    when 'pdf' then 'application/pdf'
+    when 'txt' then 'text/plain'
+    when 'rtf' then 'application/rtf'
+    when 'odt' then 'application/vnd.oasis.opendocument.text'
+  end
+$$;
+
+-- An admin starts sending a script: to an editor still on the team, in a category still in use (when there are
+-- any), as a document of up to 10 MB, with Drive connected. The brief's name defaults to the file's name.
+-- Returns what dn-drive needs to save the file.
+create or replace function app.script_new(p_token text, p_editor uuid, p_category uuid, p_name text, p_file_name text, p_size bigint) returns json
+language plpgsql set search_path = '' as $$
+declare u app.users; e app.users; d app.drive; v_id uuid; v_file text; v_mime text; v_name text; v_cat text;
+begin
+  u := app.admin(p_token);
+  select * into e from app.users where id = p_editor and role = 'editor' and active and removed_at is null;
+  if not found then raise exception 'not_found'; end if;
+  if p_category is null then
+    if exists (select 1 from app.categories where not archived) then raise exception 'need_category'; end if;
+  else
+    select c.name into v_cat from app.categories c where c.id = p_category and not c.archived;
+    if not found then raise exception 'not_found'; end if;
+  end if;
+  v_file := left(btrim(regexp_replace(coalesce(p_file_name, ''), '[[:cntrl:]/\\]+', ' ', 'g')), 200);
+  v_mime := app.script_kind(v_file);
+  if v_mime is null then raise exception 'not_script'; end if;
+  if p_size is null or p_size < 1 or p_size > 10485760 then raise exception 'too_big'; end if;
+  v_name := app.clean(coalesce(nullif(btrim(coalesce(p_name, '')), ''), left(regexp_replace(v_file, '\.[A-Za-z0-9]{1,5}$', ''), 140)), 140, 'bad_name');
+  select * into d from app.drive where ended_at is null;
+  if not found then raise exception 'drive_off'; end if;
+  if (select count(*) from app.scripts s where s.sent_by = u.id and s.sent_at > now() - interval '1 day') >= 300 then raise exception 'too_many'; end if;
+  insert into app.scripts(editor_id, category_id, name, file_name, mime, size, sent_by) values (e.id, p_category, v_name, v_file, v_mime, p_size, u.id) returning id into v_id;
+  return json_build_object('script', v_id, 'name', v_name, 'file', v_file, 'mime', v_mime, 'conn', d.id, 'folder', d.scripts_folder, 'editor', e.name, 'cat', v_cat);
+end $$;
+
+-- The folder this Drive connection keeps scripts in, once dn-drive has made it.
+create or replace function app.scripts_folder_set(p_conn uuid, p_folder text) returns void
+language sql set search_path = '' as $$
+  update app.drive set scripts_folder = p_folder where id = p_conn and ended_at is null and p_folder ~ '^[A-Za-z0-9_-]{10,200}$'
+$$;
+
+-- The file is in Drive: the script now waits for its editor, and their phone pings.
+create or replace function app.script_saved(p_script uuid, p_file text) returns json
+language plpgsql set search_path = '' as $$
+declare s app.scripts; m app.meta;
+begin
+  if p_file is null or p_file !~ '^[A-Za-z0-9_-]{10,200}$' then raise exception 'invalid'; end if;
+  update app.scripts set file_id = p_file, status = 'waiting', sent_at = now() where id = p_script and status = 'sending' returning * into s;
+  if not found then raise exception 'not_found'; end if;
+  select * into m from app.meta;
+  perform app.notify_many(array[s.editor_id], 'assigned', null, 'New script: ' || left(s.name, 100),
+    'Your admin sent you a script. Accept it to open it and start your ' || m.delivery_hours || '-hour deadline.');
+  return json_build_object('ok', true, 'script', s.id);
+end $$;
+
+-- Saving the file in Drive failed: the row is closed with the reason, and nobody is told anything.
+create or replace function app.script_failed(p_script uuid, p_note text) returns void
+language sql set search_path = '' as $$
+  update app.scripts set status = 'failed', ended_at = now(), note = left(coalesce(p_note, 'failed'), 300) where id = p_script and status = 'sending'
+$$;
+
+-- Who may open a script's file: an admin, or the editor working on the brief it became, so an editor can open
+-- it only once they've taken it on (and the editor a brief is reassigned to can open it too).
+create or replace function app.script_file(p_token text, p_script uuid) returns json
+language plpgsql set search_path = '' as $$
+declare u app.users; s app.scripts;
+begin
+  u := app.who(p_token);
+  select * into s from app.scripts where id = p_script;
+  if not found or s.file_id is null then raise exception 'not_found'; end if;
+  if u.role <> 'admin' and not exists (select 1 from app.projects p where p.script_id = s.id and p.editor_id = u.id and p.status in ('active', 'submitted') and not p.deleted) then
+    raise exception 'not_found';
+  end if;
+  return json_build_object('file', s.file_id, 'name', s.file_name, 'mime', s.mime);
+end $$;
+
+-- The editor takes the script on: its brief is made now, so the clock starts now, with the name and category
+-- the admin gave it. Pressing it twice (a retry on a bad connection) makes one brief.
+create or replace function public.er_accept_script(p_token text, p_script uuid) returns json
+language plpgsql security definer set search_path = '' as $$
+declare u app.users; s app.scripts; v_id uuid;
+begin
+  u := app.worker(p_token);
+  select * into s from app.scripts where id = p_script and editor_id = u.id for update;
+  if not found then raise exception 'not_found'; end if;
+  if s.status = 'accepted' then return json_build_object('ok', true, 'id', s.project_id, 'again', true); end if;
+  if s.status <> 'waiting' then raise exception 'not_found'; end if;
+  insert into app.projects(editor_id, name, category_id, due_hours, grace_hours, script_id)
+  select u.id, s.name, s.category_id, m.delivery_hours, m.grace_hours, s.id from app.meta m returning id into v_id;
+  update app.scripts set status = 'accepted', ended_at = now(), ended_by = u.id, project_id = v_id where id = s.id;
+  return json_build_object('ok', true, 'id', v_id);
+end $$;
+
+-- The editor can't take it on: it goes back to the admins, whose phones ping with the reason.
+create or replace function public.er_decline_script(p_token text, p_script uuid, p_note text default '') returns json
+language plpgsql security definer set search_path = '' as $$
+declare u app.users; s app.scripts; v_note text := nullif(left(btrim(regexp_replace(coalesce(p_note, ''), '\s+', ' ', 'g')), 300), '');
+begin
+  u := app.worker(p_token);
+  update app.scripts set status = 'declined', declined_at = now(), note = v_note
+   where id = p_script and editor_id = u.id and status = 'waiting' returning * into s;
+  if not found then raise exception 'not_found'; end if;
+  perform app.notify_many(array(select x.id from app.users x where x.role = 'admin' and x.active and x.removed_at is null),
+    'declined', null, 'Script not taken: ' || left(s.name, 90),
+    u.name || ' can''t take it' || case when v_note is null then '.' else ': ' || left(v_note, 150) || case when left(v_note, 150) ~ '[.!?]$' then '' else '.' end end
+           || ' Give it to someone else in the app.');
+  return json_build_object('ok', true);
+end $$;
+
+-- An admin takes back a script nobody has taken on: waiting for its editor, or turned down. The file stays in Drive.
+create or replace function public.er_withdraw_script(p_token text, p_script uuid) returns json
+language plpgsql security definer set search_path = '' as $$
+declare u app.users;
+begin
+  u := app.admin(p_token);
+  update app.scripts set status = 'withdrawn', ended_at = now(), ended_by = u.id where id = p_script and status in ('waiting', 'declined');
+  if not found then raise exception 'not_found'; end if;
+  return json_build_object('ok', true);
+end $$;
+
+-- An admin gives a script nobody has taken on to another editor (or back to the same one, once they've turned
+-- it down). This row closes; a new one waits for the new editor, with the same file in Drive, and they get a ping.
+create or replace function public.er_move_script(p_token text, p_script uuid, p_editor uuid) returns json
+language plpgsql security definer set search_path = '' as $$
+declare u app.users; s app.scripts; e app.users; m app.meta; v_id uuid;
+begin
+  u := app.admin(p_token);
+  select * into s from app.scripts where id = p_script and status in ('waiting', 'declined') for update;
+  if not found then raise exception 'not_found'; end if;
+  select * into e from app.users where id = p_editor and role = 'editor' and active and removed_at is null;
+  if not found or (s.status = 'waiting' and e.id = s.editor_id) then raise exception 'invalid'; end if;
+  insert into app.scripts(editor_id, category_id, name, file_name, mime, size, file_id, sent_by, status)
+  values (e.id, s.category_id, s.name, s.file_name, s.mime, s.size, s.file_id, u.id, 'waiting') returning id into v_id;
+  update app.scripts set status = 'moved', ended_at = now(), ended_by = u.id, moved_to = v_id where id = s.id;
+  select * into m from app.meta;
+  perform app.notify_many(array[e.id], 'assigned', null, 'New script: ' || left(s.name, 100),
+    'Your admin sent you a script. Accept it to open it and start your ' || m.delivery_hours || '-hour deadline.');
+  return json_build_object('ok', true, 'id', v_id);
+end $$;
+
+-- The sender's link for a notification: for a video ping to a media buyer, the video's own link (the sender
+-- turns a Drive link into one that downloads the file). Nothing for any other kind.
+create or replace function app.push_link(p_kind text, p_project uuid) returns text
+language sql stable set search_path = '' as $$
+  select p.link from app.projects p
+   where p_kind = 'video' and p.id = p_project and p.status = 'submitted' and p.received_at is not null and not p.deleted
+$$;
 
 -- The timer, where the database has one (the live project). Locally this does nothing. Once a minute is
 -- soon enough for a deadline, and pg_cron writes a line to cron.job_run_details for every run: about 1,440 a
