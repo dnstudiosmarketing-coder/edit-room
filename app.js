@@ -38,6 +38,7 @@ const state = {
   scripts: [],                                        // scripts not yet taken on: all of them for an admin, an editor's own waiting ones
   videos: new Map(),                                  // media buyer only: the approved videos, by id
   seenBefore: 0,                                      // media buyer only: when they last opened the app, so newer videos show as new
+  peek: { videos: null, failed: false },              // admin only: the media buyers' list, while looking at their screen from Settings
 };
 // Older projects for the admin's Projects list, fetched a page at a time for the filters in use.
 const hist = { key: null, rows: new Map(), next: null, more: false, busy: false, failed: false };
@@ -265,6 +266,7 @@ function normProject(r) {
     receivedAt: num(r.received), amount: amount(r.amount), script: typeof r.script === "string" && /^[0-9a-f-]{36}$/.test(r.script) ? r.script : null,
   };
 }
+const normVideo = (v) => ({ id: String(v.id), name: str(v.name, 140) || "Untitled video", catId: v.cat ? String(v.cat) : null, link: str(v.link, 600) || null, at: num(v.at) || 0, by: str(v.by, 40) });
 const roleOf = (r) => (r === "admin" || r === "buyer" ? r : "editor");
 const viewFor = () => (state.isAdmin ? "admin" : state.isBuyer ? "buyer" : "editor");
 function normScript(x) {
@@ -327,7 +329,7 @@ function applyState(d) {
     for (const v of Array.isArray(d.videos) ? d.videos : []) {
       if (!v || !v.id) continue;
       if (v.gone) state.videos.delete(String(v.id));
-      else state.videos.set(String(v.id), { id: String(v.id), name: str(v.name, 140) || "Untitled video", catId: v.cat ? String(v.cat) : null, link: str(v.link, 600) || null, at: num(v.at) || 0, by: str(v.by, 40) });
+      else state.videos.set(String(v.id), normVideo(v));
     }
   } else state.videos = new Map();
   state.cursor = num(d.cursor);
@@ -1168,13 +1170,19 @@ function viewEarn(all) {
 /* ---------- the media buyer's screen ---------- */
 // Every video an admin has approved, from every category, newest first, each with a button that downloads it.
 function viewVideos() {
-  const out = [], all = Array.from(state.videos.values()).sort((a, b) => b.at - a.at || (a.id < b.id ? 1 : -1));
-  const fresh = all.filter((v) => v.at > state.seenBefore).length;
+  const peek = !state.isBuyer;          // an admin looking at this screen from Settings: the same list, nothing marked new, no notification offer
+  if (peek && !state.peek.videos) return [h("section", { class: "section" }, state.peek.failed
+    ? [empty("The media buyer screen couldn't be loaded.", "Check your connection, then try again."),
+      h("div", { class: "btn-row" }, h("button", { class: "btn small", type: "button", id: "peek-retry", onclick: () => openBuyerView() }, "Try again"))]
+    : empty("Loading the media buyer screen…"))];
+  const seen = peek ? Infinity : state.seenBefore;
+  const out = [], all = Array.from((peek ? state.peek.videos : state.videos).values()).sort((a, b) => b.at - a.at || (a.id < b.id ? 1 : -1));
+  const fresh = all.filter((v) => v.at > seen).length;
   out.push(h("section", { class: "slate", "aria-label": "Finished videos" },
     h("h2", { class: "slate-title", text: "Finished videos" }),
     hero(fresh || all.length, h("span", { class: "week-of", text: fresh ? "new since your last visit" : all.length === 1 ? "video ready to download" : "videos ready to download" })),
     h("p", { class: "slate-label", text: "Every video your admin approves, from every category, newest first." })));
-  const ask = pushCard();
+  const ask = peek ? null : pushCard();
   if (ask) out.push(ask);
   const counts = new Map();
   for (const v of all) counts.set(v.catId || "none", (counts.get(v.catId || "none") || 0) + 1);
@@ -1188,22 +1196,37 @@ function viewVideos() {
   const shown = ui.bCat === "all" ? all : all.filter((v) => (v.catId || "none") === ui.bCat);
   out.push(h("section", { class: "section" },
     h("div", { class: "section-head" }, h("h2", { class: "section-title", text: "Videos" }), h("div", { class: "filter" }, pick)),
-    shown.length ? h("div", { class: "grid" }, shown.slice(0, ui.bLimit).map(videoCard))
+    shown.length ? h("div", { class: "grid" }, shown.slice(0, ui.bLimit).map((v) => videoCard(v, seen)))
       : all.length ? empty("No videos in this category yet.", "When your admin approves one, it shows up here.")
         : empty("No finished videos yet.", "When your admin approves a video, it shows up here and your phone pings."),
     shown.length > ui.bLimit ? h("div", { class: "btn-row" }, h("button", { class: "btn small", type: "button", dataset: { fk: "vmore" }, onclick: () => { ui.bLimit += 30; schedule(); } }, "Show more")) : null));
   return out;
 }
-function videoCard(v) {
+function videoCard(v, seen) {
   const cat = v.catId ? state.cats.get(v.catId) : null, link = parseLink(v.link), dl = driveDownload(v.link), embed = link ? driveEmbed(link.href) : null;
   return h("article", { class: "clip" },
-    h("div", { class: "clip-top" }, tape(cat || { name: "No category" }), h("span", { class: "pills" }, v.at > state.seenBefore ? pill("gold", "New") : null)),
+    h("div", { class: "clip-top" }, tape(cat || { name: "No category" }), h("span", { class: "pills" }, v.at > seen ? pill("gold", "New") : null)),
     h("h3", { class: "clip-title", text: v.name }),
     h("p", { class: "hint", text: ("Approved " + ago(v.at) + (v.by ? ", made by " + v.by : "")).replace(/[^.!?]$/, "$&.") }),
     h("div", { class: "btn-row" },
       dl ? h("a", { class: "btn primary grow", href: dl, target: "_blank", rel: "noopener noreferrer", dataset: { fk: "dl:" + v.id } }, "Download")
         : link ? openLink(link, false, "v:" + v.id) : h("p", { class: "error", text: "This video has no link." }),
       embed ? h("button", { class: "btn grow", type: "button", dataset: { fk: "watch:" + v.id }, onclick: () => openPlayer({ id: v.id, name: v.name, catId: v.catId, by: v.by }, embed, link) }, "Watch") : null));
+}
+
+// An admin looking at the media buyers' screen (Settings): the list their phones get, fetched fresh each time.
+async function openBuyerView() {
+  ui.view = "buyer"; ui.bCat = "all"; ui.bLimit = 30;
+  state.peek = { videos: null, failed: false };
+  window.scrollTo(0, 0); schedule();
+  try {
+    const r = await call("er_buyer_view", {});
+    if (ui.view !== "buyer") return;          // back to admin before it arrived
+    state.peek = { videos: new Map((Array.isArray(r && r.videos) ? r.videos : []).filter((v) => v && v.id).map((v) => [String(v.id), normVideo(v)])), failed: false };
+  } catch (e) {
+    if (ui.view === "buyer") state.peek = { videos: null, failed: true };
+  }
+  schedule();
 }
 
 /* ---------- admin screens ---------- */
@@ -1642,10 +1665,13 @@ function settingsPanel() {
         h("li", null, h("span", { class: "row-title", text: "Late videos" }), lateStatus)),
       h("div", { class: "btn-row" }, h("button", { class: "btn", type: "button", id: "send-reminder", onclick: () => openRemind() }, "Send a reminder"))));
   const tryBox = h("section", { class: "section" },
-    h("h2", { class: "section-title", text: "Try the editor screen" }),
+    h("h2", { class: "section-title", text: "See what your team sees" }),
     h("div", { class: "panel" },
-      h("p", null, "See what your editors see, including their leaderboard and earnings. Anything you log there is saved under your name, and you can delete it from Projects afterwards."),
-      h("div", { class: "btn-row" }, h("button", { class: "btn", type: "button", id: "try-editor", onclick: () => { ui.view = "editor"; ui.etab = "work"; window.scrollTo(0, 0); schedule(); } }, "Open the editor screen"))));
+      h("p", null, "The editor screen shows what your editors see, including their leaderboard and earnings. Anything you log there is saved under your name, and you can delete it from Projects afterwards."),
+      h("p", null, "The media buyer screen shows the finished videos your media buyers see, with the same Download and Watch buttons. Looking at it changes nothing for them."),
+      h("div", { class: "btn-row" },
+        h("button", { class: "btn", type: "button", id: "try-editor", onclick: () => { ui.view = "editor"; ui.etab = "work"; window.scrollTo(0, 0); schedule(); } }, "Open the editor screen"),
+        h("button", { class: "btn", type: "button", id: "try-buyer", onclick: () => openBuyerView() }, "Open the media buyer screen"))));
   setPanel = {
     node: h("div", { class: "stack" },
       h("section", { class: "section" },
@@ -2861,6 +2887,10 @@ function renderBanners() {
     h("strong", { text: "This is the editor screen, as your editors see it." }),
     h("span", { text: "Anything you log here is saved under your name. You can delete it from Projects afterwards." }),
     h("button", { class: "btn small", type: "button", id: "back-admin", onclick: () => { ui.view = "admin"; window.scrollTo(0, 0); schedule(); } }, "Back to admin")));
+  if (state.phase === "ready" && state.isAdmin && ui.view === "buyer") out.push(h("div", { class: "notice" },
+    h("strong", { text: "This is the media buyer screen, as your media buyers see it." }),
+    h("span", { text: "Looking at it changes nothing for them. Download and Watch work here too." }),
+    h("button", { class: "btn small", type: "button", id: "back-admin", onclick: () => { ui.view = "admin"; state.peek = { videos: null, failed: false }; window.scrollTo(0, 0); schedule(); } }, "Back to admin")));
   const box = $("banners"), sig = out.map((n) => n.textContent).join("|");
   if (box.dataset.sig === sig) return;
   box.dataset.sig = sig;
@@ -2883,7 +2913,7 @@ function render() {
   }
   view.dataset.down = "";
   if (!ready) { pin(view, authView()); return; }
-  if ((ui.view === "admin" && !state.isAdmin) || (ui.view === "buyer") !== state.isBuyer) ui.view = viewFor();
+  if (ui.view !== viewFor() && !(state.isAdmin && (ui.view === "editor" || ui.view === "buyer"))) ui.view = viewFor();     // an admin can look at the other screens
   if (ui.view === "buyer") view.replaceChildren.apply(view, viewVideos());
   else if (ui.view === "admin" && ui.tab === "projects") { pin(view, projectsPanel().node); fillProjects(all); }
   else if (ui.view === "admin" && ui.tab === "settings") { pin(view, settingsPanel().node); fillSettings(); }

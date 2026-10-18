@@ -1326,6 +1326,19 @@ try {
   await bola.locator("#player iframe").waitFor();
   ok((await frameSrc(bola)) === "https://drive.google.com/file/d/buyerReel77/preview" && /Ada O\./.test(await bola.locator("#player .player-by").innerText()), "and watch a video in the app before downloading it", await frameSrc(bola));
   await bola.locator("#player").getByRole("button", { name: "Close" }).click();
+  // the admin can look at the media buyer screen from Settings, any time, with the same list
+  await tab(admin, "settings");
+  await admin.locator("#try-buyer").click();
+  await see(admin, "This is the media buyer screen, as your media buyers see it.", "the admin can open the media buyer screen from Settings");
+  const peekCards = admin.locator("#view article.clip");
+  await peekCards.first().waitFor();
+  const buyerNames = (await buyerCards.locator(".clip-title").allInnerTexts()).slice(0, 30), peekNames = await peekCards.locator(".clip-title").allInnerTexts();
+  ok((await admin.locator("#tabs").isHidden()) && peekNames.join("|") === buyerNames.join("|") && (await admin.locator("#view .pill.gold").count()) === 0 && (await admin.locator("#view .push-card").count()) === 0,
+    "it shows exactly the videos the media buyer sees, in the same order, without marking any as new", peekNames.slice(0, 3).join("|") + " vs " + buyerNames.slice(0, 3).join("|"));
+  await look(admin, "53-admin-as-buyer", "the admin looking at the media buyer screen");
+  await admin.locator("#back-admin").click();
+  await admin.locator("#try-buyer").waitFor();
+  ok(!(await admin.locator("#tabs").isHidden()) && (await admin.getByText("This is the media buyer screen").count()) === 0, "Back to admin returns to Settings");
   await bola.context().close();
   // the offline helper shows what arrives, with the studio's badge, and buzzes (the lightweight test browser
   // can't show notifications at all, so this one check runs in the full one)

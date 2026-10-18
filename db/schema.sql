@@ -805,6 +805,18 @@ end $$;
 
 -- ---------------------------------------------------------------- everything a screen needs, in one call
 
+-- The finished videos media buyers see: every video an admin has approved, newest first (the latest p_limit),
+-- with who made it and its link. A media buyer's phone gets this, and so does an admin looking at their screen.
+create or replace function app.buyer_videos(p_limit int) returns json language sql stable set search_path = '' as $$
+  select coalesce(json_agg(q.j order by q.at desc, q.id desc), '[]'::json) from (
+    select p.id, p.received_at as at,
+           json_build_object('id', p.id, 'name', p.name, 'cat', p.category_id, 'link', p.link, 'at', app.ms(p.received_at), 'by', e.name) as j
+      from app.projects p join app.users e on e.id = p.editor_id
+     where p.status = 'submitted' and p.received_at is not null and not p.deleted
+     order by p.received_at desc, p.id desc
+     limit p_limit) q
+$$;
+
 -- A first call (p_since null) returns the current picture; later calls return only the projects that changed.
 -- The reply stays small however much history there is: an admin gets every project that is still open plus
 -- the last 8 days, with the figures for editors and categories worked out here; older projects are read a
@@ -922,13 +934,7 @@ begin
     j_bonuses := '[]'::json; j_projects := '[]'::json;
     if since is not null and (select count(*) from (select 1 from app.projects p where p.changed_at > since and (p.status = 'submitted' or p.deleted) limit 301) c) > 300 then since := null; end if;
     if since is null then
-      select coalesce(json_agg(q.j order by q.at desc, q.id desc), '[]'::json) into j_videos from (
-        select p.id, p.received_at as at,
-               json_build_object('id', p.id, 'name', p.name, 'cat', p.category_id, 'link', p.link, 'at', app.ms(p.received_at), 'by', e.name) as j
-          from app.projects p join app.users e on e.id = p.editor_id
-         where p.status = 'submitted' and p.received_at is not null and not p.deleted
-         order by p.received_at desc, p.id desc
-         limit 300) q;
+      j_videos := app.buyer_videos(300);
     else
       -- what changed: approved now, or no longer (marked not received, or deleted); work in progress is never sent
       select coalesce(json_agg(case when p.status = 'submitted' and p.received_at is not null and not p.deleted
@@ -976,6 +982,14 @@ begin
     'board', json_build_object('week', j_bw, 'month', j_bm, 'awards', j_aw), 'featured', j_feat,
     'bonuses', j_bonuses, 'totals', j_totals, 'stats', j_stats, 'horizon', case when adm and since is null then horizon end,
     'projects', j_projects, 'scripts', j_scripts, 'videos', j_videos);
+end $$;
+
+-- An admin looking at the media buyers' screen (from Settings) gets exactly the list a media buyer's phone gets.
+create or replace function public.er_buyer_view(p_token text) returns json
+language plpgsql security definer set search_path = '' as $$
+begin
+  perform app.admin(p_token);
+  return json_build_object('videos', app.buyer_videos(300));
 end $$;
 
 -- Older finished projects for the admin's list, newest first, 40 at a time. p_before (and p_before_id, from

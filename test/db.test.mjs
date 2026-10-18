@@ -728,6 +728,11 @@ ok(vids.length === 1 && vids[0].id === re.id && vids[0].gone === true && !vids[0
 await rpc("er_receive", { p_token: A, p_project: re.id, p_on: true });
 ok((await pings(buyer, "video")).length === 1, "approving it again doesn't ping them twice");
 ok((await one("select count(*)::int as n from app.outbox where kind = 'video' and user_id <> $1", [buyer])).n === 0, "only media buyers hear about approved videos");
+// an admin can look at the media buyers' screen, with exactly the list a buyer's phone gets
+const peek = await rpc("er_buyer_view", { p_token: A }), bNow = await rpc("er_state", { p_token: TB });
+ok(peek.videos.length > 0 && JSON.stringify(peek.videos) === JSON.stringify(bNow.videos), "an admin looking at the media buyers' screen gets exactly what a buyer's phone gets", peek.videos.length + " videos");
+await fails(rpc("er_buyer_view", { p_token: TB }), "forbidden", "only an admin can look at it that way: not a media buyer");
+await fails(rpc("er_buyer_view", { p_token: TT }), "forbidden", "nor an editor");
 
 // ---- switching a login off, roles, lockout
 const admin2 =(await rpc("er_add_user", { p_token: A, p_name: "Kemi Admin", p_username: "kemi", p_password: "kemi-pass-1", p_role: "admin" })).id;
@@ -790,7 +795,7 @@ await fails(rpc("er_state", { p_token: A }), "auth", "signing out ends the sessi
 // ---- the tables themselves cannot be reached
 for (const q of ["select * from app.users", "select * from app.projects", "select * from app.featured", "select * from app.outbox", "select * from app.push_subs", "select * from app.details", "select app.details_of(null)","select app.push_keys()", "select app.push_claim(5)", "update app.meta set delivery_hours = 1", "select app.who('x')", "select app.password('aaaaaaaa')", "select app.featured_now()",
                   "select * from app.drive", "select * from app.uploads", "select * from app.drive_key()", "select app.drive_begin('x', 'https://x.example/')", "select * from app.drive_config()",
-                  "select * from app.scripts", "select app.script_new('x', null, null, 'a', 'a.docx', 1)", "select app.script_file('x', null)", "select app.script_saved(null, 'x')", "select app.push_link('video', null)"]) {
+                  "select * from app.scripts", "select app.script_new('x', null, null, 'a', 'a.docx', 1)", "select app.script_file('x', null)", "select app.script_saved(null, 'x')", "select app.push_link('video', null)", "select app.buyer_videos(5)"]) {
   await fails(asAnon(q), "permission denied", "direct access is refused: " + q);
 }
 const pub = await sql("select count(*)::int as n from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname like 'er\\_%' and has_function_privilege('anon', p.oid, 'execute')");
