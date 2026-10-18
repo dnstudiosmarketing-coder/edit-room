@@ -35,7 +35,7 @@ create table if not exists app.users (
   id uuid primary key default gen_random_uuid(),
   username text not null unique check (username ~ '^[a-z0-9._-]{3,24}$'),
   name text not null check (char_length(name) between 1 and 40),
-  role text not null check (role in ('admin', 'editor', 'buyer')),       -- buyer: a media buyer, who downloads finished videos
+  role text not null check (role in ('admin', 'editor', 'buyer', 'supervisor')),  -- buyer: a media buyer, who downloads finished videos; supervisor: the same, and the videos uploaded each day
   owner boolean not null default false,
   pass_hash text not null,
   active boolean not null default true,
@@ -116,6 +116,21 @@ create table if not exists app.bonuses (
   removed boolean not null default false
 );
 create index if not exists bonuses_editor on app.bonuses(editor_id);
+
+-- Payments: each time an admin pays an editor and resets their earnings in the app. The row keeps what was owed
+-- at that moment (the videos marked received and the bonuses awarded since the last payment) and is never
+-- removed, so both sides can look back. An editor's earnings in the app count from their latest payment.
+create table if not exists app.payouts (
+  id uuid primary key default gen_random_uuid(),
+  editor_id uuid not null references app.users(id),
+  paid_by uuid not null references app.users(id),
+  paid_at timestamptz not null default now(),
+  amount numeric(14,2) not null check (amount >= 0),
+  videos int not null default 0 check (videos >= 0),           -- how many videos it covered
+  bonuses int not null default 0 check (bonuses >= 0)          -- and how many bonuses
+);
+create index if not exists payouts_editor on app.payouts(editor_id, paid_at desc);
+create index if not exists payouts_paid_by on app.payouts(paid_by);
 
 -- Videos an admin has put on everyone's home screen ("Video of the moment"). A pick is never deleted:
 -- taking it down, or newer picks pushing it out, stamps taken_at.
@@ -292,17 +307,18 @@ alter table app.meta add column if not exists google_client_id text check (googl
 alter table app.meta add column if not exists google_api_key text check (google_api_key is null or google_api_key ~ '^[A-Za-z0-9_-]{20,100}$');
 alter table app.meta add column if not exists google_app_id text check (google_app_id is null or google_app_id ~ '^[0-9]{6,20}$');
 
--- Media buyers, and scripts sent through the app.
+-- Media buyers and supervisors, and scripts sent through the app.
 --
 -- A media buyer signs in like an editor but sees only the finished videos an admin has approved (marked
--- received), from every category, and gets a ping for each one with a link to download it. Databases made
--- before buyers existed allowed only admins and editors, and fewer kinds of notification: this widens the two
--- lists (everything already in them stays allowed), and does nothing once they are wide enough.
+-- received), from every category, and gets a ping for each one with a link to download it. A supervisor sees
+-- the same, and also how many videos were uploaded each day, and which. Databases made before them allowed
+-- only admins and editors, or no supervisors, and fewer kinds of notification: this widens the two lists
+-- (everything already in them stays allowed), and does nothing once they are wide enough.
 do $$
 begin
-  if exists (select 1 from pg_constraint where conrelid = 'app.users'::regclass and conname = 'users_role_check' and pg_get_constraintdef(oid) not like '%buyer%') then
+  if exists (select 1 from pg_constraint where conrelid = 'app.users'::regclass and conname = 'users_role_check' and pg_get_constraintdef(oid) not like '%supervisor%') then
     alter table app.users drop constraint users_role_check;
-    alter table app.users add constraint users_role_check check (role in ('admin', 'editor', 'buyer'));
+    alter table app.users add constraint users_role_check check (role in ('admin', 'editor', 'buyer', 'supervisor'));
   end if;
   if exists (select 1 from pg_constraint where conrelid = 'app.outbox'::regclass and conname = 'outbox_kind_check' and pg_get_constraintdef(oid) not like '%video%') then
     alter table app.outbox drop constraint outbox_kind_check;
@@ -352,7 +368,7 @@ do $$
 declare t text;
 begin
   foreach t in array array['meta', 'users', 'sessions', 'categories', 'projects', 'bonuses', 'featured', 'push_subs', 'outbox', 'details', 'reminders',
-                           'drive', 'drive_folders', 'drive_states', 'uploads', 'scripts'] loop
+                           'drive', 'drive_folders', 'drive_states', 'uploads', 'scripts', 'payouts'] loop
     execute format('alter table app.%I enable row level security', t);
     if not exists (select 1 from pg_policies where schemaname = 'app' and tablename = t and policyname = 'no_direct_access') then
       execute format('create policy no_direct_access on app.%I for all to public using (false) with check (false)', t);
@@ -805,6 +821,25 @@ end $$;
 
 -- ---------------------------------------------------------------- everything a screen needs, in one call
 
+-- What an editor is owed since their latest payment: the videos marked received since then and the bonuses
+-- awarded since then, with when they were last paid, and how much.
+create or replace function app.owed(p_editor uuid) returns json language sql stable set search_path = '' as $$
+  with last as (select o.paid_at, o.amount from app.payouts o where o.editor_id = p_editor order by o.paid_at desc, o.id desc limit 1),
+       v as (select coalesce(sum(p.amount), 0) as amt, count(*) as n from app.projects p
+              where p.editor_id = p_editor and p.received_at is not null and not p.deleted and p.received_at > coalesce((select l.paid_at from last l), '-infinity')),
+       b as (select coalesce(sum(x.amount), 0) as amt, count(*) as n from app.bonuses x
+              where x.editor_id = p_editor and not x.removed and x.awarded_at > coalesce((select l.paid_at from last l), '-infinity'))
+  select json_build_object('due', v.amt + b.amt, 'videos', v.amt, 'bonus', b.amt, 'nv', v.n, 'nb', b.n,
+                           'paid', app.ms((select l.paid_at from last l)), 'paidAmt', (select l.amount from last l))
+    from v, b
+$$;
+
+-- An editor's payments, newest first.
+create or replace function app.payouts_of(p_editor uuid, p_limit int) returns json language sql stable set search_path = '' as $$
+  select coalesce(json_agg(json_build_object('id', o.id, 'at', app.ms(o.paid_at), 'amt', o.amount, 'nv', o.videos, 'nb', o.bonuses) order by o.paid_at desc, o.id desc), '[]'::json)
+    from (select * from app.payouts where editor_id = p_editor order by paid_at desc, id desc limit p_limit) o
+$$;
+
 -- The finished videos media buyers see: every video an admin has approved, newest first (the latest p_limit),
 -- with who made it and its link. A media buyer's phone gets this, and so does an admin looking at their screen.
 create or replace function app.buyer_videos(p_limit int) returns json language sql stable set search_path = '' as $$
@@ -821,7 +856,8 @@ $$;
 -- The reply stays small however much history there is: an admin gets every project that is still open plus
 -- the last 8 days, with the figures for editors and categories worked out here; older projects are read a
 -- page at a time through er_history. An editor gets their own latest 400, and the scripts waiting for them.
--- A media buyer gets the latest 300 approved videos instead, and nothing about anyone's pay or deadlines.
+-- A media buyer (or a supervisor) gets the latest 300 approved videos instead, and nothing about anyone's pay or
+-- deadlines; a supervisor reads the videos uploaded each day through er_uploads.
 create or replace function public.er_state(p_token text, p_since bigint default null) returns json
 language plpgsql security definer set search_path = '' as $$
 declare
@@ -832,7 +868,7 @@ declare
 begin
   u := app.who(p_token);
   adm := u.role = 'admin';
-  buyer := u.role = 'buyer';
+  buyer := u.role in ('buyer', 'supervisor');          -- a supervisor's phone gets what a media buyer's gets
   select * into m from app.meta;
   update app.users set last_seen = t0 where id = u.id and (last_seen is null or last_seen < t0 - interval '10 minutes');
   update app.sessions set expires_at = t0 + interval '60 days'
@@ -865,6 +901,7 @@ begin
         'push', exists (select 1 from app.push_subs s where s.user_id = x.id and s.gone_at is null),
         'pay', exists (select 1 from app.details d where d.user_id = x.id),       -- the details themselves come from er_details
         'earned', coalesce((select sum(p.amount) from app.projects p where p.editor_id = x.id and p.received_at is not null and not p.deleted), 0),
+        'owed', case when x.role in ('admin', 'editor') then app.owed(x.id) end,           -- since their latest payment
         'bonus', coalesce((select sum(b.amount) from app.bonuses b where b.editor_id = x.id and not b.removed), 0),
         -- last sign of work: a brief handed over by the admin counts only once the editor touches it
         'last', (select app.ms(max(greatest(q.updated_at, q.submitted_at))) from (
@@ -968,7 +1005,9 @@ begin
     'videos', coalesce((select sum(p.amount) from app.projects p where p.editor_id = u.id and p.received_at is not null and not p.deleted), 0),
     'bonus', coalesce((select sum(b.amount) from app.bonuses b where b.editor_id = u.id and not b.removed), 0),
     'month', coalesce((select sum(p.amount) from app.projects p where p.editor_id = u.id and p.received_at >= mo and not p.deleted), 0)
-           + coalesce((select sum(b.amount) from app.bonuses b where b.editor_id = u.id and not b.removed and b.awarded_at >= mo), 0));
+           + coalesce((select sum(b.amount) from app.bonuses b where b.editor_id = u.id and not b.removed and b.awarded_at >= mo), 0),
+    'owed', case when not buyer then app.owed(u.id) end,
+    'payouts', case when not buyer then app.payouts_of(u.id, 30) end);
 
   return json_build_object(
     'now', app.ms(clock_timestamp()), 'cursor', app.ms(t0), 'full', since is null,
@@ -990,6 +1029,26 @@ language plpgsql security definer set search_path = '' as $$
 begin
   perform app.admin(p_token);
   return json_build_object('videos', app.buyer_videos(300));
+end $$;
+
+-- Videos uploaded each day, for admins and supervisors: every video submitted in the last p_days days (1 to 92,
+-- today included), newest first, with the day it was submitted on in the team's time zone, who made it, its
+-- category and whether an admin has approved it yet. A video sent back and submitted again counts on the day
+-- it came back. No links: this is a list to read; approved videos are downloaded from the finished videos.
+create or replace function public.er_uploads(p_token text, p_days int default 14) returns json
+language plpgsql security definer set search_path = '' as $$
+declare u app.users; m app.meta; v_days int := least(greatest(coalesce(p_days, 14), 1), 92); v_from timestamptz;
+begin
+  u := app.who(p_token);
+  if u.role not in ('admin', 'supervisor') then raise exception 'forbidden'; end if;
+  select * into m from app.meta;
+  v_from := (date_trunc('day', now() at time zone m.tz) - make_interval(days => v_days - 1)) at time zone m.tz;
+  return json_build_object('days', v_days, 'today', to_char(now() at time zone m.tz, 'YYYY-MM-DD'), 'videos', coalesce((
+    select json_agg(json_build_object('id', p.id, 'name', p.name, 'cat', p.category_id, 'by', e.name, 'at', app.ms(p.submitted_at),
+                                      'day', to_char(p.submitted_at at time zone m.tz, 'YYYY-MM-DD'), 'approved', p.received_at is not null)
+                    order by p.submitted_at desc, p.id desc)
+      from app.projects p join app.users e on e.id = p.editor_id
+     where p.status = 'submitted' and not p.deleted and p.submitted_at >= v_from), '[]'::json));
 end $$;
 
 -- Older finished projects for the admin's list, newest first, 40 at a time. p_before (and p_before_id, from
@@ -1097,6 +1156,30 @@ end $$;
 
 -- ---------------------------------------------------------------- what an admin can do
 
+-- Whether a video is in a payment already: marked received before its editor's latest payment.
+create or replace function app.paid_for(p_project uuid) returns boolean language sql stable set search_path = '' as $$
+  select exists (select 1 from app.projects p join app.payouts o on o.editor_id = p.editor_id and o.paid_at >= p.received_at
+                  where p.id = p_project and p.received_at is not null and not p.deleted)
+$$;
+
+-- An admin has paid an editor: what they were owed since their last payment is recorded as paid, and their
+-- earnings start again from zero, counting from the next video marked received. p_expect is the amount the
+-- admin was shown: if it has changed since (another video was approved meanwhile), nothing is recorded and the
+-- admin is told, so the payment on record is always the one they saw.
+create or replace function public.er_reset_pay(p_token text, p_editor uuid, p_expect numeric default null) returns json
+language plpgsql security definer set search_path = '' as $$
+declare u app.users; e app.users; o json; v_id uuid;
+begin
+  u := app.admin(p_token);
+  select * into e from app.users where id = p_editor and removed_at is null and role in ('admin', 'editor') for update;      -- one reset at a time per editor
+  if not found then raise exception 'not_found'; end if;
+  o := app.owed(e.id);
+  if (o ->> 'nv')::int + (o ->> 'nb')::int = 0 then raise exception 'nothing'; end if;
+  if p_expect is not null and round(p_expect, 2) <> (o ->> 'due')::numeric then raise exception 'changed'; end if;
+  insert into app.payouts(editor_id, paid_by, amount, videos, bonuses) values (e.id, u.id, (o ->> 'due')::numeric, (o ->> 'nv')::int, (o ->> 'nb')::int) returning id into v_id;
+  return json_build_object('ok', true, 'id', v_id, 'amount', (o ->> 'due')::numeric, 'videos', (o ->> 'nv')::int, 'bonuses', (o ->> 'nb')::int);
+end $$;
+
 -- Marking a video received approves it: it goes into the editor's earnings, and every media buyer hears it's
 -- ready, once (the sender gives the ping a link that downloads it).
 create or replace function public.er_receive(p_token text, p_project uuid, p_on boolean) returns json
@@ -1108,10 +1191,11 @@ begin
     update app.projects x set received_at = now(), amount = (select c.rate from app.categories c where c.id = x.category_id)
      where x.id = p_project and x.status = 'submitted' and x.received_at is null and not x.deleted returning x.* into v;
     if not found then raise exception 'not_found'; end if;
-    perform app.notify_many(array(select b.id from app.users b where b.role = 'buyer' and b.active and b.removed_at is null),
+    perform app.notify_many(array(select b.id from app.users b where b.role in ('buyer', 'supervisor') and b.active and b.removed_at is null),
       'video', v.id, 'New video: ' || left(v.name, 100),
       coalesce((select c.name || '. ' from app.categories c where c.id = v.category_id), '') || 'Tap to download it.');
   else
+    if app.paid_for(p_project) then raise exception 'paid'; end if;       -- already in a payment: it stays received
     update app.projects x set received_at = null, amount = null where x.id = p_project and x.status = 'submitted' and x.received_at is not null and not x.deleted;
     if not found then raise exception 'not_found'; end if;
   end if;
@@ -1124,6 +1208,7 @@ declare u app.users;
 begin
   u := app.admin(p_token);
   if p_amount is null or p_amount < 0 or p_amount > 1000000000 then raise exception 'invalid'; end if;
+  if app.paid_for(p_project) then raise exception 'paid'; end if;       -- already in a payment: what it paid stays as recorded
   update app.projects set amount = p_amount where id = p_project and status = 'submitted' and received_at is not null and not deleted;
   if not found then raise exception 'not_found'; end if;
   return json_build_object('ok', true);
@@ -1163,6 +1248,7 @@ language plpgsql security definer set search_path = '' as $$
 declare u app.users;
 begin
   u := app.admin(p_token);
+  if app.paid_for(p_project) then raise exception 'paid'; end if;         -- a video already paid for stays on record
   update app.projects set deleted = true where id = p_project and not deleted;
   if not found then raise exception 'not_found'; end if;
   update app.featured set taken_at = now() where project_id = p_project and taken_at is null;
@@ -1212,6 +1298,7 @@ language plpgsql security definer set search_path = '' as $$
 declare u app.users;
 begin
   u := app.admin(p_token);
+  if exists (select 1 from app.bonuses b join app.payouts o on o.editor_id = b.editor_id and o.paid_at >= b.awarded_at where b.id = p_bonus) then raise exception 'paid'; end if;
   update app.bonuses set removed = true where id = p_bonus and not removed;
   if not found then raise exception 'not_found'; end if;
   return json_build_object('ok', true);
@@ -1280,7 +1367,7 @@ language plpgsql security definer set search_path = '' as $$
 declare u app.users; v_user text; v_id uuid;
 begin
   u := app.admin(p_token);
-  if p_role not in ('admin', 'editor', 'buyer') or (p_role = 'admin' and not u.owner) then raise exception 'forbidden'; end if;
+  if p_role not in ('admin', 'editor', 'buyer', 'supervisor') or (p_role = 'admin' and not u.owner) then raise exception 'forbidden'; end if;
   v_user := app.username(p_username);
   if exists (select 1 from app.users where username = v_user) then raise exception 'taken'; end if;
   insert into app.users(username, name, role, pass_hash) values (v_user, app.clean(p_name, 40, 'bad_name'), p_role, app.password(p_password)) returning id into v_id;
@@ -1298,7 +1385,7 @@ begin
   if not found then raise exception 'not_found'; end if;
   if t.id <> u.id and (t.owner or (t.role = 'admin' and not u.owner)) then raise exception 'forbidden'; end if;
   if p_role is not null then
-    if not u.owner or t.owner or p_role not in ('admin', 'editor', 'buyer') then raise exception 'forbidden'; end if;
+    if not u.owner or t.owner or p_role not in ('admin', 'editor', 'buyer', 'supervisor') then raise exception 'forbidden'; end if;
     update app.users set role = p_role where id = t.id;
   end if;
   if p_active is not null then
@@ -1380,7 +1467,7 @@ begin
   if p_user <> u.id and u.role <> 'admin' then raise exception 'forbidden'; end if;
   if not exists (select 1 from app.users x where x.id = p_user and x.removed_at is null) then raise exception 'not_found'; end if;
   select * into cur from app.details d where d.user_id = p_user order by d.created_at desc, d.id desc limit 1;
-  if not found then return json_build_object('details', null, 'changed', null); end if;
+  if not found then return json_build_object('details', null, 'changed', null, 'payouts', app.payouts_of(p_user, 50)); end if;
   select * into prev from app.details d
    where d.user_id = p_user and (d.bank_account <> cur.bank_account or lower(d.bank_name) <> lower(cur.bank_name))
    order by d.created_at desc, d.id desc limit 1;
@@ -1391,7 +1478,7 @@ begin
       changed := json_build_object('at', app.ms(since), 'bank', prev.bank_name, 'last4', right(prev.bank_account, 4));
     end if;
   end if;
-  return json_build_object('details', app.details_of(p_user), 'changed', changed);
+  return json_build_object('details', app.details_of(p_user), 'changed', changed, 'payouts', app.payouts_of(p_user, 50));
 end $$;
 
 -- ---------------------------------------------------------------- phone notifications
@@ -1434,6 +1521,7 @@ begin
   n := app.notify_many(array[u.id], 'test', null, 'Notifications are on',
     case u.role when 'admin' then 'This phone will ping you when an editor submits a video.'
                 when 'buyer' then 'This phone will ping you when a new video is ready to download.'
+                when 'supervisor' then 'This phone will ping you when a new video is ready to download.'
                 else 'This phone will ping you when you get a script and when a video reaches its deadline.' end);
   select count(*) into k from app.push_subs where user_id = u.id and gone_at is null;
   return json_build_object('ok', true, 'phones', k, 'queued', n);

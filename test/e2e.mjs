@@ -491,7 +491,7 @@ try {
   await tab(admin, "editors");
   const adaCard = admin.locator("article.clip", { hasText: "Ada Obi" });
   await adaCard.waitFor();
-  ok((await admin.locator("#view article.clip").count()) === 3 && /Earned in total/.test(await adaCard.innerText()), "every editor has a card with their numbers");
+  ok((await admin.locator("#view article.clip").count()) === 3 && /To pay/.test(await adaCard.innerText()) && /earned in total/.test(await adaCard.innerText()), "every editor has a card with their numbers, including what they're owed");
   await look(admin, "23-editors", "admin editors");
   // each editor's submitted videos, on a page of their own
   await adaCard.getByRole("button", { name: "Videos", exact: true }).click();
@@ -994,7 +994,7 @@ try {
   await admin.setViewportSize({ width: 390, height: 844 });
   await sync(admin);
   await tab(admin, "editors");
-  const roster = admin.locator("article.clip", { hasText: "Earned in total" }), payAda = roster.filter({ hasText: "Ada O." }), payTunde = roster.filter({ hasText: "Tunde" });
+  const roster = admin.locator("article.clip", { hasText: "To pay" }), payAda = roster.filter({ hasText: "Ada O." }), payTunde = roster.filter({ hasText: "Tunde" });
   await payAda.waitFor();
   ok((await payAda.getByText("No payment details").count()) === 0 && (await payTunde.getByText("No payment details").count()) === 1, "on the Editors screen the admin can see who hasn't added payment details");
   await payAda.getByRole("button", { name: "Profile" }).click();
@@ -1339,6 +1339,119 @@ try {
   await admin.locator("#back-admin").click();
   await admin.locator("#try-buyer").waitFor();
   ok(!(await admin.locator("#tabs").isHidden()) && (await admin.getByText("This is the media buyer screen").count()) === 0, "Back to admin returns to Settings");
+
+  /* ------------------------------------------------------------ uploads by day, and supervisors */
+  const zone = (await sql("select tz from app.meta")).rows[0].tz;
+  const ups = (await sql("select p.name, to_char(p.submitted_at at time zone $1, 'YYYY-MM-DD') as day from app.projects p where p.status = 'submitted' and not p.deleted and p.submitted_at >= (date_trunc('day', now() at time zone $1) - interval '13 days') at time zone $1 order by p.submitted_at desc, p.id desc", [zone])).rows;
+  const dayKeys = (await sql("select to_char((now() at time zone $1)::date - g, 'YYYY-MM-DD') as d from generate_series(0, 13) g order by g", [zone])).rows.map((r) => r.d);
+  const todays = ups.filter((r) => r.day === dayKeys[0]), perDay = dayKeys.map((d) => String(ups.filter((r) => r.day === d).length));
+  await tab(admin, "uploads");
+  const upDays = admin.locator("#up-days");
+  await upDays.locator(".day-count").first().waitFor();
+  ok(todays.length > 0 && (await admin.locator("#view .slate .week-num").innerText()) === String(todays.length) && (await upDays.locator("li.day.open .day-videos .row-title").allInnerTexts()).join("|") === todays.map((r) => r.name).join("|"),
+    "the admin's Uploads tab shows how many videos came in today, and which, newest first", todays.length + " today");
+  ok((await upDays.locator(".day-count").allInnerTexts()).join() === perDay.join(), "and how many came in on each of the last 14 days, counted in the team's time zone", perDay.join());
+  await look(admin, "54-admin-uploads", "the admin's uploads by day");
+  await admin.locator("#up-more").click();
+  ok(await until(async () => (await upDays.locator(".day-count").count()) === 28), "Show 14 more days reaches further back");
+  // a supervisor: the media buyers' screen, and the uploads by day
+  await tab(admin, "settings");
+  await admin.locator("#add-user").click();
+  await admin.fill("#nu-name", "Sade Super");
+  await pick(admin, "#nu-role", "supervisor");
+  const supUser = await admin.inputValue("#nu-user"), supPass = await admin.inputValue("#nu-pass");
+  await sheet(admin).getByRole("button", { name: "Create login" }).click();
+  await sheet(admin).getByText("Login created").waitFor();
+  await sheet(admin).getByRole("button", { name: "Done" }).click();
+  await closed(admin);
+  const supRow = admin.locator("#view .rows").first().locator("> li", { hasText: "Sade Super" });
+  await supRow.waitFor();
+  ok(/Supervisor/.test(await supRow.innerText()), "an admin can add a supervisor, who shows as one in the team list", (await supRow.innerText()).replace(/\n/g, " | "));
+  const sade = await open("sade");
+  await sade.fill("#li-user", supUser);
+  await sade.fill("#li-pass", supPass);
+  await sade.getByRole("button", { name: "Sign in" }).click();
+  await sade.locator("#up-days .day-count").first().waitFor();
+  ok((await sade.locator("#tabs .tab-label").allInnerTexts()).join("|") === "Uploads|Videos" && (await sade.locator("#who .who-role").innerText()) === "Supervisor", "a supervisor gets two screens, Uploads and Videos, and the header says what they are");
+  ok((await sade.locator("#view .slate .week-num").innerText()) === String(todays.length) && (await sade.locator("#up-days .day-count").allInnerTexts()).join() === perDay.join(), "their Uploads show the same as the admin's");
+  const statuses = await sade.locator("#up-days .day-videos .pill").allInnerTexts();
+  ok(statuses.length === todays.length && statuses.every((t) => t === "Approved" || t === "Waiting for approval"), "each of today's videos says whether it's approved yet", statuses.join(","));
+  await look(sade, "55-supervisor-uploads", "the supervisor's uploads by day");
+  await tab(sade, "videos");
+  const sadeCards = sade.locator("#view article.clip");
+  await sadeCards.first().waitFor();
+  ok((await sadeCards.locator(".clip-title").allInnerTexts()).join("|") === buyerNames.join("|") && (await sade.getByText("Log a new brief").count()) === 0 && (await sade.getByText("Leaderboard").count()) === 0,
+    "Videos shows the same finished videos media buyers see, and nothing of the editors' work");
+  await look(sade, "56-supervisor-videos", "the supervisor's finished videos");
+  await sade.context().close();
+  // and the admin can look at the supervisor screen from Settings
+  await admin.locator("#try-super").click();
+  await see(admin, "This is the supervisor screen, as your supervisors see it.", "the admin can open the supervisor screen from Settings");
+  await admin.locator("#up-days .day-count").first().waitFor();
+  ok((await admin.locator("#tabs .tab-label").allInnerTexts()).join("|") === "Uploads|Videos", "with the supervisor's two screens");
+  await tab(admin, "videos");
+  await admin.locator("#view article.clip").first().waitFor();
+  await look(admin, "57-admin-as-supervisor", "the admin looking at the supervisor screen");
+  await admin.locator("#back-admin").click();
+  await admin.locator("#try-super").waitFor();
+  ok((await admin.locator("#tabs .tab-label").allInnerTexts()).join("|") === "Inbox|Projects|Uploads|Editors|Settings", "Back to admin brings back the admin's tabs");
+
+  /* ------------------------------------------------------------ paying an editor: Reset payment */
+  const usd = (n) => "$" + (Math.abs(n - Math.round(n)) < 0.005 ? Math.round(n).toLocaleString("en-US") : n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  const owedAda = (await sql("select app.owed(id) as o from app.users where username = 'ada.obi'")).rows[0].o;
+  await tab(admin, "editors");
+  await sync(admin);
+  const adaPay = admin.locator("#view article.clip", { hasText: "Ada O." });
+  await adaPay.waitFor();
+  ok(owedAda.due > 0 && (await adaPay.locator(".fact", { hasText: "To pay" }).locator(".fact-num").innerText()) === usd(Number(owedAda.due)) && /Not paid in the app yet\./.test(await adaPay.innerText()),
+    "each editor's card shows what they're owed", usd(Number(owedAda.due)));
+  await adaPay.getByRole("button", { name: "Reset payment" }).click();
+  ok(new RegExp("Have you paid Ada O\\. " + usd(Number(owedAda.due)).replace("$", "\\$")).test(await sheet(admin).innerText()), "Reset payment asks first, with the amount", (await sheet(admin).innerText()).slice(0, 160));
+  await look(admin, "58-reset-payment", "the Reset payment sheet");
+  await sheet(admin).getByRole("button", { name: "Reset to zero" }).click();
+  await toast(admin, "recorded as paid to Ada O.");
+  ok((await admin.locator("#toast").innerText()).trim() === "Reset. " + usd(Number(owedAda.due)) + " recorded as paid to Ada O.", "the reset is confirmed in one sentence", await admin.locator("#toast").innerText());
+  await adaPay.locator(".fact", { hasText: "To pay" }).locator(".fact-num", { hasText: "$0" }).waitFor();
+  const payout = (await sql("select amount::float as amount, videos from app.payouts p join app.users u on u.id = p.editor_id where u.username = 'ada.obi'")).rows;
+  ok(payout.length === 1 && payout[0].amount === Number(owedAda.due) && /Last paid .+, \$/.test(await adaPay.innerText()) && (await adaPay.getByRole("button", { name: "Reset payment" }).count()) === 0,
+    "after the reset the card shows nothing to pay and when they were last paid, and the payment is on record", JSON.stringify(payout));
+  await sync(ada);
+  await tab(ada, "earn");
+  await ada.locator(".week-num", { hasText: "$0" }).waitFor();
+  ok(/Earned since your last payment/.test(await ada.locator("#view").innerText()) && new RegExp("Last payment\\s+" + usd(Number(owedAda.due)).replace("$", "\\$")).test(await ada.locator("#view").innerText()) && /Payments/.test(await ada.locator("#view").innerText()),
+    "the editor's earnings start again from zero, and they can see the payment", (await ada.locator("#view .slate").innerText()).replace(/\n/g, " | "));
+  await look(ada, "59-earnings-after-payment", "an editor's earnings after a payment");
+  // something already paid stays as it is
+  await tab(admin, "projects");
+  await pick(admin, "#f-status", "received");
+  await pick(admin, "#f-editor", (await sql("select id from app.users where username = 'ada.obi'")).rows[0].id);
+  const paidCard = admin.locator("#p-list article.clip").first();
+  await paidCard.getByRole("button", { name: "Manage" }).click();
+  await paidCard.locator(".hint", { hasText: "It's in a payment to Ada O." }).waitFor();
+  const paidTools = await paidCard.locator(".btn-row.tools button").allInnerTexts();
+  ok(/Paid/.test(await paidCard.locator(".pills").innerText()) && !paidTools.some((t) => /Undo received|Change amount|Delete/.test(t)),
+    "a video already paid for is marked Paid, and isn't offered to be changed, moved back or deleted", paidTools.join("|"));
+  await paidCard.scrollIntoViewIfNeeded();
+  await look(admin, "60-paid-video", "a paid video in Projects");
+  // a screen that hadn't caught up yet still can't change it: the database says no, in words
+  const paidId = (await sql("select p.id from app.projects p join app.users u on u.id = p.editor_id where u.username = 'ada.obi' and p.received_at is not null order by p.received_at desc limit 1")).rows[0].id;
+  const tries = await admin.evaluate(async (args) => {
+    const tok = localStorage.getItem("editroom.token");
+    const go = async (fn, more) => {
+      const r = await fetch(args.api + fn, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({ p_token: tok }, more)) });
+      return r.ok ? "ok" : ((await r.json()).message || String(r.status));
+    };
+    return [await go("er_receive", { p_project: args.id, p_on: false }), await go("er_set_amount", { p_project: args.id, p_amount: 1 }), await go("er_delete_project", { p_project: args.id })];
+  }, { api: srv.url + "/rest/v1/rpc/", id: paidId });
+  ok(tries.join("|") === "paid|paid|paid", "the database refuses to move back, change or delete a paid video", tries.join("|"));
+  await pick(admin, "#f-editor", "all");
+  await pick(admin, "#f-status", "active");
+  await tab(admin, "editors");
+  await adaPay.getByRole("button", { name: "Bonuses" }).click();
+  await sheet(admin).locator(".pill", { hasText: "Paid" }).first().waitFor();
+  ok((await sheet(admin).getByRole("button", { name: "Remove" }).count()) === 0, "a bonus already paid for can't be removed");
+  await sheet(admin).getByRole("button", { name: "Cancel" }).click();
+  await closed(admin);
   await bola.context().close();
   // the offline helper shows what arrives, with the studio's badge, and buzzes (the lightweight test browser
   // can't show notifications at all, so this one check runs in the full one)

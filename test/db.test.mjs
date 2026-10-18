@@ -734,6 +734,73 @@ ok(peek.videos.length > 0 && JSON.stringify(peek.videos) === JSON.stringify(bNow
 await fails(rpc("er_buyer_view", { p_token: TB }), "forbidden", "only an admin can look at it that way: not a media buyer");
 await fails(rpc("er_buyer_view", { p_token: TT }), "forbidden", "nor an editor");
 
+// ---- supervisors: what media buyers see, plus the videos uploaded each day
+const sup = (await rpc("er_add_user", { p_token: A, p_name: "Sola Super", p_username: "sola", p_password: "sola-pass-1", p_role: "supervisor" })).id;
+const TSup = (await rpc("er_login", { p_username: "sola", p_password: "sola-pass-1" })).token;
+await phone(sup, "super-sola");
+const sst = await rpc("er_state", { p_token: TSup }), bst2 = await rpc("er_state", { p_token: TB });
+ok(sst.me.role === "supervisor" && sst.projects.length === 0 && sst.scripts.length === 0 && sst.bonuses.length === 0 && sst.users.length === 1 && sst.settings.drive.on === false
+  && JSON.stringify(sst.videos) === JSON.stringify(bst2.videos), "a supervisor's phone gets what a media buyer's gets: the approved videos and nothing of the editors' work or pay", sst.videos.length + " videos");
+for (const [fn, args] of [["er_log_brief", { p_name: "Mine", p_category: ads }], ["er_receive", { p_project: approved[0], p_on: false }], ["er_buyer_view", {}], ["er_add_user", { p_name: "X", p_username: "xsup", p_password: "password1" }]])
+  await fails(rpc(fn, Object.assign({ p_token: TSup }, args)), "forbidden", "a supervisor is refused: " + fn);
+const tzNow = (await one("select tz from app.meta")).tz;
+const want14 = (await sql("select id, to_char(submitted_at at time zone $1, 'YYYY-MM-DD') as day, received_at is not null as approved from app.projects where status = 'submitted' and not deleted and submitted_at >= (date_trunc('day', now() at time zone $1) - interval '13 days') at time zone $1 order by submitted_at desc, id desc", [tzNow])).rows;
+const up = await rpc("er_uploads", { p_token: TSup });
+ok(up.days === 14 && up.today === (await one("select to_char(now() at time zone $1, 'YYYY-MM-DD') as d", [tzNow])).d && want14.length > 0
+  && JSON.stringify(up.videos.map((v) => [v.id, v.day, v.approved])) === JSON.stringify(want14.map((r) => [r.id, r.day, r.approved])),
+  "a supervisor sees every video submitted in the last 14 days, newest first, each with its day in the team's time zone and whether it's approved", up.videos.length + " videos");
+ok(up.videos.some((v) => v.approved) && up.videos.some((v) => !v.approved) && up.videos.every((v) => v.name && v.by && v.at > 0 && !("link" in v)), "including ones still waiting for approval, with who made them, and no links", JSON.stringify(up.videos[0]));
+ok((await rpc("er_uploads", { p_token: A, p_days: 500 })).days === 92 && (await rpc("er_uploads", { p_token: A, p_days: 0 })).days === 1, "an admin can see them too, from 1 to 92 days back");
+await fails(rpc("er_uploads", { p_token: TB }), "forbidden", "a media buyer can't see the daily uploads");
+await fails(rpc("er_uploads", { p_token: TT }), "forbidden", "nor can an editor");
+await rpc("er_receive", { p_token: A, p_project: re.id, p_on: false });
+await rpc("er_receive", { p_token: A, p_project: re.id, p_on: true });
+ok(JSON.stringify(await pings(sup, "video")) === JSON.stringify([{ title: "New video: Proxan video 14", body: "Ads. Tap to download it." }]) && (await pings(buyer, "video")).length === 1,
+  "supervisors get the approval pings too, and nobody hears about the same video twice", JSON.stringify(await pings(sup, "video")));
+ok(/new video is ready to download/.test((await rpc("er_test_push", { p_token: TSup })) && (await pings(sup, "test"))[0].body), "a supervisor's test ping says what they'll hear about");
+
+// ---- payments: once an editor is paid, the admin resets their earnings, which count again from zero
+const payEd = (await rpc("er_add_user", { p_token: A, p_name: "Pay Test", p_username: "paytest", p_password: "paytest-pass-1" })).id;
+const TP = (await rpc("er_login", { p_username: "paytest", p_password: "paytest-pass-1" })).token;
+const payCat = (await rpc("er_save_category", { p_token: A, p_id: null, p_name: "Pay check", p_rate: 25 })).id;
+const deliver = async (name) => {
+  const id = (await rpc("er_log_brief", { p_token: TP, p_name: name, p_category: payCat })).id;
+  await rpc("er_submit", { p_token: TP, p_project: id, p_link: "https://drive.google.com/file/d/" + name.replace(/\W/g, "") + "000/view", p_note: "" });
+  await rpc("er_receive", { p_token: A, p_project: id, p_on: true });
+  return id;
+};
+const paid1 = await deliver("Pay video 1"), paid2 = await deliver("Pay video 2");
+const payBonus = (await rpc("er_award_bonus", { p_token: A, p_editor: payEd, p_amount: 10, p_label: "Extra" })).id;
+let owedNow = (await rpc("er_state", { p_token: A })).users.find((x) => x.id === payEd).owed;
+ok(owedNow.due === 60 && owedNow.videos === 50 && owedNow.bonus === 10 && owedNow.nv === 2 && owedNow.nb === 1 && owedNow.paid === null, "the admin sees what an editor is owed: their videos and bonuses, never paid yet", JSON.stringify(owedNow));
+await fails(rpc("er_reset_pay", { p_token: TP, p_editor: payEd }), "forbidden", "an editor can't reset their own earnings");
+await fails(rpc("er_reset_pay", { p_token: TSup, p_editor: payEd }), "forbidden", "nor can a supervisor");
+await fails(rpc("er_reset_pay", { p_token: A, p_editor: payEd, p_expect: 35 }), "changed", "if the amount the admin saw has changed, nothing is recorded");
+const reset1 = await rpc("er_reset_pay", { p_token: A, p_editor: payEd, p_expect: 60 });
+const payRow = await one("select amount::float as amount, videos, bonuses, paid_by from app.payouts where id = $1", [reset1.id]);
+ok(reset1.ok && payRow.amount === 60 && payRow.videos === 2 && payRow.bonuses === 1 && payRow.paid_by === adminId, "resetting records the payment: the amount, how many videos and bonuses, and who paid", JSON.stringify(payRow));
+const tp1 = await rpc("er_state", { p_token: TP });
+ok(tp1.totals.owed.due === 0 && tp1.totals.owed.nv === 0 && tp1.totals.owed.paidAmt === 60 && tp1.totals.owed.paid > 0 && tp1.totals.payouts.length === 1 && tp1.totals.payouts[0].amt === 60 && tp1.totals.payouts[0].nv === 2,
+  "the editor's earnings start again from zero, and they see the payment", JSON.stringify(tp1.totals.owed));
+ok(tp1.totals.videos === 50 && tp1.totals.bonus === 10, "what they earned in all stays on record");
+await fails(rpc("er_reset_pay", { p_token: A, p_editor: payEd }), "nothing", "there's nothing to reset again until something new is earned");
+await fails(rpc("er_receive", { p_token: A, p_project: paid1, p_on: false }), "paid", "a video already paid for can't be marked not received");
+await fails(rpc("er_delete_project", { p_token: A, p_project: paid2 }), "paid", "nor deleted");
+await fails(rpc("er_set_amount", { p_token: A, p_project: paid1, p_amount: 99 }), "paid", "nor given a different amount");
+ok((await one("select amount::float as a from app.projects where id = $1", [paid1])).a === 25, "so what it paid stays as recorded");
+await fails(rpc("er_remove_bonus", { p_token: A, p_bonus: payBonus }), "paid", "and a bonus already paid can't be removed");
+const paid3 = await deliver("Pay video 3");
+owedNow = (await rpc("er_state", { p_token: TP })).totals.owed;
+ok(owedNow.due === 25 && owedNow.nv === 1 && owedNow.nb === 0, "the next video counts from zero", JSON.stringify(owedNow));
+await rpc("er_receive", { p_token: A, p_project: paid3, p_on: false });
+ok((await rpc("er_state", { p_token: TP })).totals.owed.due === 0, "and one not yet paid can still be marked not received");
+await rpc("er_receive", { p_token: A, p_project: paid3, p_on: true });
+const payDetails = await rpc("er_details", { p_token: A, p_user: payEd });
+ok(payDetails.details === null && payDetails.payouts.length === 1 && payDetails.payouts[0].amt === 60, "an editor's profile lists their payments for the admin", JSON.stringify(payDetails.payouts));
+ok((await rpc("er_details", { p_token: TP, p_user: payEd })).payouts.length === 1, "and the editor can see their own");
+const reset2 = await rpc("er_reset_pay", { p_token: A, p_editor: payEd });
+ok(reset2.amount === 25 && reset2.videos === 1 && (await rpc("er_state", { p_token: TP })).totals.payouts.map((x) => x.amt).join() === "25,60", "the next reset covers only what came after the last one; newest payment first");
+
 // ---- switching a login off, roles, lockout
 const admin2 =(await rpc("er_add_user", { p_token: A, p_name: "Kemi Admin", p_username: "kemi", p_password: "kemi-pass-1", p_role: "admin" })).id;
 const TK = (await rpc("er_login", { p_username: "kemi", p_password: "kemi-pass-1" })).token;
@@ -803,7 +870,7 @@ const hidden = await sql("select count(*)::int as n from pg_proc p join pg_names
 ok(pub.rows[0].n >= 24 && hidden.rows[0].n === 0, "only the er_ functions are callable from outside", pub.rows[0].n + " public, " + hidden.rows[0].n + " private reachable");
 const hashes = await sql("select count(*)::int as n from app.users where removed_at is null and pass_hash like '$2a$10$%' and length(pass_hash) = 60");
 const everyone = await sql("select count(*)::int as n from app.users where removed_at is null");
-ok(hashes.rows[0].n === everyone.rows[0].n && everyone.rows[0].n === 7, "passwords are stored only as bcrypt hashes", hashes.rows[0].n + " of " + everyone.rows[0].n);
+ok(hashes.rows[0].n === everyone.rows[0].n && everyone.rows[0].n === 9, "passwords are stored only as bcrypt hashes", hashes.rows[0].n + " of " + everyone.rows[0].n);
 
 console.log(out.join("\n"));
 console.log(failed ? "\n" + failed + " FAILED" : "\nall " + out.length + " passed" + (process.env.ER_BACKEND === "real" ? " (real PostgreSQL + PostgREST)" : ""));

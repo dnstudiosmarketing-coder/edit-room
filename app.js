@@ -16,7 +16,8 @@ const DAY = 864e5, HOUR = 36e5, MIN = 6e4;
 const STAGES = ["Started", "Rough cut", "Polishing"];
 const STAGE_AT = ["16.667%", "50%", "83.333%"];
 const STATUS_FILTERS = [["active", "In progress"], ["late", "Past deadline"], ["over", "Grace over"], ["waiting", "Waiting for you"], ["ontime", "Submitted on time"], ["sublate", "Submitted late"], ["received", "Received"], ["reassigned", "Reassigned"], ["all", "All projects"]];
-const ADMIN_TABS = [["inbox", "Inbox"], ["projects", "Projects"], ["editors", "Editors"], ["settings", "Settings"]];
+const ADMIN_TABS = [["inbox", "Inbox"], ["projects", "Projects"], ["uploads", "Uploads"], ["editors", "Editors"], ["settings", "Settings"]];
+const SUPERVISOR_TABS = [["uploads", "Uploads"], ["videos", "Videos"]];
 const EDITOR_TABS = [["work", "My work"], ["board", "Leaderboard"], ["earn", "Earnings"]];
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -27,11 +28,11 @@ const state = {
   phase: "boot",               // boot | down | setup | login | ready
   online: true, token: null, skew: 0, cursor: null, lastFull: 0, wantFull: false,
   me: { id: null, name: "", username: "", role: "editor", owner: false, av: 0, has: false },
-  isAdmin: false, isBuyer: false,
+  isAdmin: false, isBuyer: false, isSupervisor: false,
   config: { categories: [], weeklyTarget: null, deliveryHours: 24, graceHours: 48, currency: "", tz: "UTC", drive: { on: false, email: null, lost: false, folders: [] } },
   prefs: { bonusAmount: null },
   cats: new Map(), users: new Map(), projects: new Map(), bonuses: new Map(),
-  board: { week: [], month: [], awards: [] }, weeks: [0, 0, 0, 0, 0, 0], month: 0, totals: { videos: 0, bonus: 0, month: 0 },
+  board: { week: [], month: [], awards: [] }, weeks: [0, 0, 0, 0, 0, 0], month: 0, totals: { videos: 0, bonus: 0, month: 0, owed: { due: 0, videos: 0, bonus: 0, nv: 0, nb: 0, paid: null, paidAmt: null }, payouts: [] },
   featured: [],                                       // "Video of the moment": up to five finished videos the admin put on everyone's home screen
   stats: { editors: new Map(), cats: new Map() },     // admin only: figures worked out by the server
   horizon: null,                                      // admin only: where history older than the loaded projects starts
@@ -39,11 +40,12 @@ const state = {
   videos: new Map(),                                  // media buyer only: the approved videos, by id
   seenBefore: 0,                                      // media buyer only: when they last opened the app, so newer videos show as new
   peek: { videos: null, failed: false },              // admin only: the media buyers' list, while looking at their screen from Settings
+  uploads: { days: 14, today: "", list: null, at: 0, tried: 0, busy: false, failed: false },   // admin and supervisor: videos submitted each day
 };
 // Older projects for the admin's Projects list, fetched a page at a time for the filters in use.
 const hist = { key: null, rows: new Map(), next: null, more: false, busy: false, failed: false };
 function resetHist() { hist.key = null; hist.rows = new Map(); hist.next = null; hist.more = false; hist.busy = false; hist.failed = false; }
-const ui = { view: "editor", tab: "inbox", etab: "work", fStatus: "active", fEditor: "all", fCat: "all", period: "week", manage: null, limit: 40, older: false, earnAll: false, spark: null, bCat: "all", bLimit: 30, allOnTime: false };
+const ui = { view: "editor", tab: "inbox", etab: "work", fStatus: "active", fEditor: "all", fCat: "all", period: "week", manage: null, limit: 40, older: false, earnAll: false, spark: null, bCat: "all", bLimit: 30, allOnTime: false, stab: "uploads", upOpen: null };
 const pics = new Map();        // user id -> { ver, url }
 
 /* ---------- small helpers ---------- */
@@ -79,6 +81,8 @@ const ICONS = {       // line drawings on a 24-unit square
   earn: "M17.5 8.5V7a1.5 1.5 0 0 0-1.5-1.5H6A2 2 0 0 0 4 7.5V17a2 2 0 0 0 2 2h12.5a1.5 1.5 0 0 0 1.5-1.5V10a1.5 1.5 0 0 0-1.5-1.5H6a2 2 0 0 1-2-1.5M16 13.8h.2",
   star: "M12 4.2l2.3 4.8 5.2.7-3.8 3.7.9 5.2L12 16.1l-4.6 2.5.9-5.2-3.8-3.7 5.2-.7L12 4.2z",
   play: "M9 6.5v11l9-5.5-9-5.5z",
+  uploads: "M5.5 5.5h13A1.5 1.5 0 0 1 20 7v11.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5V7a1.5 1.5 0 0 1 1.5-1.5zM4 10h16M8.5 3.5v4M15.5 3.5v4M12 17.5v-4.6M9.8 15l2.2-2.2 2.2 2.2",
+  videos: "M5.5 5.5h13A1.5 1.5 0 0 1 20 7v10a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17V7a1.5 1.5 0 0 1 1.5-1.5zM10.5 9.4v5.2l4.2-2.6-4.2-2.6z",
   close: "M6.5 6.5l11 11M17.5 6.5l-11 11",
 };
 const SOLID = { play: true };      // drawn filled in
@@ -102,19 +106,22 @@ const now = () => Date.now() + state.skew;     // the server's clock, so a wrong
 const fmtDay = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short" });
 const fmtStamp = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 const fmtMonth = new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" });
+const fmtTime = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
 const shortDate = (ms) => fmtDay.format(new Date(ms));
 const stamp = (ms) => fmtStamp.format(new Date(ms));
-let team = { tz: null, day: fmtDay, month: fmtMonth };
+let team = { tz: null, day: fmtDay, month: fmtMonth, time: fmtTime };
 function teamFmt() {    // weeks and months are the team's, whatever time zone this phone is in
   const tz = state.config.tz;
   if (team.tz !== tz) {
-    try { team = { tz: tz, day: new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", timeZone: tz }), month: new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric", timeZone: tz }) }; }
-    catch (e) { team = { tz: tz, day: fmtDay, month: fmtMonth }; }
+    try { team = { tz: tz, day: new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", timeZone: tz }), month: new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric", timeZone: tz }),
+      time: new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", timeZone: tz }) }; }
+    catch (e) { team = { tz: tz, day: fmtDay, month: fmtMonth, time: fmtTime }; }
   }
   return team;
 }
 const teamDay = (ms) => teamFmt().day.format(new Date(ms));
 const teamMonth = (ms) => teamFmt().month.format(new Date(ms));
+const teamZoneName = () => (String(state.config.tz || "UTC").split("/").pop() || "UTC").replace(/_/g, " ");      // "Africa/Lagos" is "Lagos"
 function ago(ms) {
   const d = now() - ms;
   if (d < MIN) return "just now";
@@ -192,6 +199,9 @@ const ERRORS = {
   forbidden: "Your login isn't allowed to do that.",
   push_failed: "This phone couldn't turn notifications on. Try again in a moment.",
   not_found: "That has changed since you opened it. Check the list and try again.",
+  paid: "This was already paid for, so it stays as it is.",
+  nothing: "There's nothing to pay since the last reset.",
+  changed: "The amount changed while you were looking. Check it and try again.",
   need_category: "Choose a category.",
   bad_name: "Enter a name. It may be too long or empty.",
   bad_link: "Paste the full link, starting with https://",
@@ -266,9 +276,23 @@ function normProject(r) {
     receivedAt: num(r.received), amount: amount(r.amount), script: typeof r.script === "string" && /^[0-9a-f-]{36}$/.test(r.script) ? r.script : null,
   };
 }
+// What an editor is owed since their last payment (a reset), and their payments, as the server sends them.
+const normOwed = (o) => (o && typeof o === "object" ? { due: amount(o.due) || 0, videos: amount(o.videos) || 0, bonus: amount(o.bonus) || 0, nv: num(o.nv) || 0, nb: num(o.nb) || 0,
+  paid: num(o.paid), paidAmt: amount(o.paidAmt) } : { due: 0, videos: 0, bonus: 0, nv: 0, nb: 0, paid: null, paidAmt: null });
+const normPayouts = (list) => (Array.isArray(list) ? list : []).filter((x) => x && x.id).map((x) => ({ id: String(x.id), at: num(x.at) || 0, amt: amount(x.amt) || 0, nv: num(x.nv) || 0, nb: num(x.nb) || 0 }));
+const covers = (x) => [x.nv ? plural(x.nv, "video", "videos") : null, x.nb ? plural(x.nb, "bonus", "bonuses") : null].filter(Boolean).join(" and ") || "nothing";
+const fullStop = (s) => String(s).replace(/[^.!?]$/, "$&.");      // a sentence ending in a name like "Ada O." gets one full stop, not two
+// When someone was last paid (ms), or 0. A video marked received by then, or a bonus awarded by then, is in a
+// payment: the server keeps it as it is, so the app doesn't offer to change it.
+function paidUntil(uid) {
+  const o = uid === state.me.id ? state.totals.owed : (state.users.get(uid) || {}).owed;
+  return o && o.paid ? o.paid : 0;
+}
+const inPayment = (uid, f) => !!f.received && f.receivedAt != null && f.receivedAt <= paidUntil(uid);
 const normVideo = (v) => ({ id: String(v.id), name: str(v.name, 140) || "Untitled video", catId: v.cat ? String(v.cat) : null, link: str(v.link, 600) || null, at: num(v.at) || 0, by: str(v.by, 40) });
-const roleOf = (r) => (r === "admin" || r === "buyer" ? r : "editor");
-const viewFor = () => (state.isAdmin ? "admin" : state.isBuyer ? "buyer" : "editor");
+const roleOf = (r) => (r === "admin" || r === "buyer" || r === "supervisor" ? r : "editor");
+const viewFor = () => (state.isAdmin ? "admin" : state.isBuyer ? "buyer" : state.isSupervisor ? "supervisor" : "editor");
+const ROLE_NAMES = { admin: "Admin", editor: "Editor", buyer: "Media buyer", supervisor: "Supervisor" };
 function normScript(x) {
   return { id: String(x.id), uid: x.u ? String(x.u) : state.me.id, catId: x.cat ? String(x.cat) : null, name: str(x.name, 140) || "Untitled script", file: str(x.file, 200),
     size: num(x.size) || 0, at: num(x.at) || 0, status: x.status === "declined" ? "declined" : "waiting", note: str(x.note, 300), by: x.by ? String(x.by) : null, declined: num(x.declined) };
@@ -278,7 +302,7 @@ function applyState(d) {
   state.skew = Number(d.now) - Date.now();
   const m = d.me || {};
   state.me = { id: String(m.id), name: str(m.name, 40), username: str(m.username, 24), role: roleOf(m.role), owner: m.owner === true, av: num(m.av) || 0, has: m.has === true, avAt: num(m.avAt), phones: num(m.phones) || 0, details: normDetails(m.details) };
-  state.isAdmin = state.me.role === "admin"; state.isBuyer = state.me.role === "buyer";
+  state.isAdmin = state.me.role === "admin"; state.isBuyer = state.me.role === "buyer"; state.isSupervisor = state.me.role === "supervisor";
   const s = d.settings || {}, active = [];
   state.cats = new Map();
   for (const c of Array.isArray(d.cats) ? d.cats : []) {
@@ -292,7 +316,7 @@ function applyState(d) {
   state.prefs = { bonusAmount: amount(s.bonus) };
   state.users = new Map();
   for (const u of Array.isArray(d.users) ? d.users : []) {
-    state.users.set(String(u.id), { id: String(u.id), name: str(u.name, 40) || "Unnamed", username: str(u.username, 24), role: roleOf(u.role), owner: u.owner === true, active: u.active !== false, av: num(u.av) || 0, has: u.has === true, seen: num(u.seen), earned: amount(u.earned) || 0, bonus: amount(u.bonus) || 0, last: num(u.last) || 0, moved: num(u.moved) || 0, avAt: num(u.avAt), push: u.push === true, pay: u.pay === true });
+    state.users.set(String(u.id), { id: String(u.id), name: str(u.name, 40) || "Unnamed", username: str(u.username, 24), role: roleOf(u.role), owner: u.owner === true, active: u.active !== false, av: num(u.av) || 0, has: u.has === true, seen: num(u.seen), earned: amount(u.earned) || 0, bonus: amount(u.bonus) || 0, last: num(u.last) || 0, moved: num(u.moved) || 0, avAt: num(u.avAt), push: u.push === true, pay: u.pay === true, owed: normOwed(u.owed) });
   }
   if (Array.isArray(d.weeks) && d.weeks.length === 6) state.weeks = d.weeks.map(Number);
   state.month = Number(d.month) || 0;
@@ -307,7 +331,7 @@ function applyState(d) {
   }
   state.featured = (Array.isArray(d.featured) ? d.featured : []).slice(0, 5).map((x) => ({ id: String(x.id), uid: String(x.u), name: str(x.name, 140) || "Untitled project", catId: x.cat ? String(x.cat) : null, link: str(x.link, 600) || null, at: num(x.at) || 0 }));
   const t = d.totals || {};
-  state.totals = { videos: amount(t.videos) || 0, bonus: amount(t.bonus) || 0, month: amount(t.month) || 0 };
+  state.totals = { videos: amount(t.videos) || 0, bonus: amount(t.bonus) || 0, month: amount(t.month) || 0, owed: normOwed(t.owed), payouts: normPayouts(t.payouts) };
   const st = d.stats || {}, ed = new Map(), ct = new Map();
   for (const e of Array.isArray(st.editors) ? st.editors : []) {
     const w = Array.isArray(e.w) ? e.w : [], mo = Array.isArray(e.mo) ? e.mo : [], four = Array.isArray(e.four) ? e.four : [], weeks = [];
@@ -324,7 +348,7 @@ function applyState(d) {
     hist.rows.delete(id);       // the fresh copy above replaces an older page's copy
   }
   state.scripts = (Array.isArray(d.scripts) ? d.scripts : []).filter((x) => x && typeof x.id === "string").map(normScript);
-  if (state.isBuyer) {
+  if (state.isBuyer || state.isSupervisor) {          // a supervisor gets the media buyers' list too
     if (d.full) state.videos = new Map();
     for (const v of Array.isArray(d.videos) ? d.videos : []) {
       if (!v || !v.id) continue;
@@ -368,19 +392,20 @@ function saveToken(t) {
 async function enter(token) {
   const d = await api("er_state", { p_token: token, p_since: null });
   saveToken(token);
-  state.me.id = null; state.isAdmin = false; state.isBuyer = false;
+  state.me.id = null; state.isAdmin = false; state.isBuyer = false; state.isSupervisor = false;
   applyState(d);
   state.lastFull = Date.now(); state.wantFull = false; state.online = true; state.phase = "ready";
   ui.view = viewFor();
-  if (state.isBuyer) {      // videos approved since this phone last opened the app are marked new for this visit
+  if (state.isBuyer || state.isSupervisor) {      // videos approved since this phone last opened the app are marked new for this visit
     let last = null;
     try { last = Number(localStorage.getItem("editroom.seenVideos")) || null; localStorage.setItem("editroom.seenVideos", String(now())); } catch (e) { /* nothing is marked new */ }
     state.seenBefore = last || now();
   }
   try {
-    const t = localStorage.getItem("editroom.tab"), e = localStorage.getItem("editroom.etab");
+    const t = localStorage.getItem("editroom.tab"), e = localStorage.getItem("editroom.etab"), su = localStorage.getItem("editroom.stab");
     if (ADMIN_TABS.some((x) => x[0] === t)) ui.tab = t;
     if (EDITOR_TABS.some((x) => x[0] === e)) ui.etab = e;
+    if (SUPERVISOR_TABS.some((x) => x[0] === su)) ui.stab = su;
   } catch (e) { /* start on the first tab */ }
   authPanel = null;
   driveReturn();
@@ -413,6 +438,7 @@ function leave(msg) {
   saveToken(null);
   clearTimeout(syncTimer);
   state.phase = "login"; state.cursor = null; state.projects = new Map(); state.users = new Map(); state.featured = []; state.scripts = []; state.videos = new Map();
+  state.uploads = { days: 14, today: "", list: null, at: 0, tried: 0, busy: false, failed: false }; state.peek = { videos: null, failed: false }; ui.upOpen = null;
   state.stats = { editors: new Map(), cats: new Map() }; state.horizon = null; resetHist();
   setPanel = null;          // Settings start afresh for whoever signs in next, with no half-made changes left in them
   if (activeUpload) activeUpload.stop();
@@ -608,7 +634,7 @@ function deadlinePill(x, forEditor) {
 }
 function statusPills(x, forAdmin) {
   const p = x.p, f = x.f, out = [deadlinePill(x, !forAdmin)];
-  if (p.status === "submitted") out.push(f.received ? pill("good", "Received") : pill("info", forAdmin ? "Waiting for you" : "Waiting for admin"));
+  if (p.status === "submitted") out.push(f.received ? pill("good", inPayment(x.uid, f) ? "Paid" : "Received") : pill("info", forAdmin ? "Waiting for you" : "Waiting for admin"));
   else if (p.status === "reassigned") out.push(pill("", "Reassigned"));
   return out;
 }
@@ -892,10 +918,10 @@ function pushCard() {
   const v = ui.view;
   const later = h("button", { class: "btn small quiet", type: "button", dataset: { fk: "push-later" }, onclick: () => { try { localStorage.setItem("editroom.pushAsk", String(Date.now())); } catch (e) { /* asked again next time */ } schedule(); } }, "Not now");
   return h("section", { class: "panel push-card", "aria-label": "Notifications" },
-    h("h2", { class: "section-title", text: v === "admin" ? "Get a ping when a video comes in" : v === "buyer" ? "Get a ping when a new video is ready" : "Get a ping for new scripts and deadlines" }),
+    h("h2", { class: "section-title", text: v === "admin" ? "Get a ping when a video comes in" : v === "buyer" || v === "supervisor" ? "Get a ping when a new video is ready" : "Get a ping for new scripts and deadlines" }),
     h("p", { text: home ? "On iPhone, add " + APP + " to your home screen first, then open it from there to turn on notifications."
       : v === "admin" ? "Turn on notifications and this phone pings as soon as an editor submits a video, even when the app is closed."
-        : v === "buyer" ? "Turn on notifications and this phone pings as soon as a video is approved, even when the app is closed. Tap the ping to download the video."
+        : v === "buyer" || v === "supervisor" ? "Turn on notifications and this phone pings as soon as a video is approved, even when the app is closed. Tap the ping to download the video."
           : "Turn on notifications and this phone pings when your admin sends you a script, and when a video reaches its deadline, even when the app is closed." }),
     h("div", { class: "btn-row" },
       home ? h("button", { class: "btn small", type: "button", dataset: { fk: "push-how" }, onclick: () => openAccount() }, "How to add it")
@@ -1136,44 +1162,51 @@ function viewBoard() {
       h("span", { class: "rank-count", text: shortDate(x.at) }))))));
   return out;
 }
+// What the editor has earned since their admin last paid them (pressing Reset payment), their payments, and
+// what is still waiting for the admin. Before the first payment it's everything they've earned.
 function viewEarn(all) {
-  const uid = state.me.id, mine = all.filter((x) => x.uid === uid), lines = [], out = [];
+  const uid = state.me.id, mine = all.filter((x) => x.uid === uid), lines = [], out = [], o = state.totals.owed, since = o.paid || 0, pays = state.totals.payouts;
   let pendSum = 0;
-  for (const x of mine) if (x.f.received) lines.push({ at: x.f.receivedAt, amt: x.f.amt, title: x.p.name, sub: catOf(x.p).name + ", received " + shortDate(x.f.receivedAt) });
-  for (const b of state.bonuses.get(uid) || []) lines.push({ at: b.at, amt: b.amt, title: b.label || "Bonus", bonus: true });
+  for (const x of mine) if (x.f.received && x.f.receivedAt > since) lines.push({ at: x.f.receivedAt, amt: x.f.amt, title: x.p.name, sub: catOf(x.p).name + ", received " + shortDate(x.f.receivedAt) });
+  for (const b of state.bonuses.get(uid) || []) if (b.at > since) lines.push({ at: b.at, amt: b.amt, title: b.label || "Bonus", bonus: true });
   lines.sort((a, b) => b.at - a.at);
   const pending = mine.filter(isWaiting).sort((a, b) => (b.p.submittedAt || 0) - (a.p.submittedAt || 0));
   for (const x of pending) pendSum += rateOf(x.p) || 0;
   const shown = ui.earnAll ? lines : lines.slice(0, 20);
   const row = (label, value) => h("div", null, h("dt", { text: label }), h("dd", { text: value }));
   out.push(h("section", { class: "slate", "aria-label": "Your earnings" },
-    h("p", { class: "slate-label", text: "Total earned" }),
-    hero(money(state.totals.videos + state.totals.bonus)),
-    h("dl", { class: "slate-rows" }, row("This month", money(state.totals.month)), row("From bonuses", money(state.totals.bonus)), row("Waiting for admin", money(pendSum))),
-    h("p", { class: "hint", text: "A video is added to your earnings when your admin marks it received." })));
+    h("p", { class: "slate-label", text: o.paid ? "Earned since your last payment" : "Earned so far" }),
+    hero(money(o.due)),
+    h("dl", { class: "slate-rows" }, row("Last payment", o.paid ? money(o.paidAmt) + ", " + shortDate(o.paid) : "None yet"), row("From bonuses", money(o.bonus)), row("Waiting for admin", money(pendSum))),
+    h("p", { class: "hint", text: "A video is added to your earnings when your admin marks it received. When your admin pays you, this starts again from zero." })));
   out.push(h("section", { class: "section" },
-    h("h2", { class: "section-title", text: "What you earned" }),
+    h("h2", { class: "section-title", text: o.paid ? "Since your last payment" : "What you earned" }),
     shown.length ? h("ul", { class: "rows" }, shown.map((l) => h("li", null,
       h("div", { class: "row-main" }, h("span", { class: "row-title", text: l.title }),
         l.bonus ? h("span", { class: "linkline" }, pill("gold", "Bonus"), shortDate(l.at)) : h("span", { class: "hint", text: l.sub })),
       h("span", { class: "amount", text: l.amt != null ? money(l.amt) : "Not set yet" }))))
-      : empty("Nothing earned yet.", "Each video appears here with its amount once your admin marks it received."),
+      : empty(o.paid ? "Nothing since your last payment yet." : "Nothing earned yet.", "Each video appears here with its amount once your admin marks it received."),
     lines.length > 20 ? h("div", { class: "btn-row" }, h("button", { class: "btn small", type: "button", dataset: { fk: "earnall" }, onclick: () => { ui.earnAll = !ui.earnAll; schedule(); } }, ui.earnAll ? "Show fewer" : "Show all " + lines.length)) : null));
   if (pending.length) out.push(h("section", { class: "section" },
     h("h2", { class: "section-title", text: "Waiting for your admin" }),
     h("ul", { class: "rows" }, pending.map((x) => { const r = rateOf(x.p); return h("li", null,
       h("div", { class: "row-main" }, h("span", { class: "row-title", text: x.p.name }), h("span", { class: "hint", text: catOf(x.p).name + ", submitted " + shortDate(x.p.submittedAt || x.p.updatedAt) })),
       h("span", { class: "amount", text: r != null ? money(r) : "Rate not set" })); }))));
+  if (pays.length) out.push(h("section", { class: "section" },
+    h("h2", { class: "section-title", text: "Payments" }),
+    h("ul", { class: "rows" }, pays.map((x) => h("li", null,
+      h("div", { class: "row-main" }, h("span", { class: "row-title", text: shortDate(x.at) }), h("span", { class: "hint", text: covers(x) })),
+      h("span", { class: "amount", text: money(x.amt) }))))));
   return out;
 }
 
 /* ---------- the media buyer's screen ---------- */
 // Every video an admin has approved, from every category, newest first, each with a button that downloads it.
 function viewVideos() {
-  const peek = !state.isBuyer;          // an admin looking at this screen from Settings: the same list, nothing marked new, no notification offer
+  const peek = state.isAdmin;          // an admin looking at this screen from Settings: the same list, nothing marked new, no notification offer
   if (peek && !state.peek.videos) return [h("section", { class: "section" }, state.peek.failed
     ? [empty("The media buyer screen couldn't be loaded.", "Check your connection, then try again."),
-      h("div", { class: "btn-row" }, h("button", { class: "btn small", type: "button", id: "peek-retry", onclick: () => openBuyerView() }, "Try again"))]
+      h("div", { class: "btn-row" }, h("button", { class: "btn small", type: "button", id: "peek-retry", onclick: () => openPreview(ui.view) }, "Try again"))]
     : empty("Loading the media buyer screen…"))];
   const seen = peek ? Infinity : state.seenBefore;
   const out = [], all = Array.from((peek ? state.peek.videos : state.videos).values()).sort((a, b) => b.at - a.at || (a.id < b.id ? 1 : -1));
@@ -1207,26 +1240,102 @@ function videoCard(v, seen) {
   return h("article", { class: "clip" },
     h("div", { class: "clip-top" }, tape(cat || { name: "No category" }), h("span", { class: "pills" }, v.at > seen ? pill("gold", "New") : null)),
     h("h3", { class: "clip-title", text: v.name }),
-    h("p", { class: "hint", text: ("Approved " + ago(v.at) + (v.by ? ", made by " + v.by : "")).replace(/[^.!?]$/, "$&.") }),
+    h("p", { class: "hint", text: fullStop("Approved " + ago(v.at) + (v.by ? ", made by " + v.by : "")) }),
     h("div", { class: "btn-row" },
       dl ? h("a", { class: "btn primary grow", href: dl, target: "_blank", rel: "noopener noreferrer", dataset: { fk: "dl:" + v.id } }, "Download")
         : link ? openLink(link, false, "v:" + v.id) : h("p", { class: "error", text: "This video has no link." }),
       embed ? h("button", { class: "btn grow", type: "button", dataset: { fk: "watch:" + v.id }, onclick: () => openPlayer({ id: v.id, name: v.name, catId: v.catId, by: v.by }, embed, link) }, "Watch") : null));
 }
 
-// An admin looking at the media buyers' screen (Settings): the list their phones get, fetched fresh each time.
-async function openBuyerView() {
-  ui.view = "buyer"; ui.bCat = "all"; ui.bLimit = 30;
+// An admin looking at the media buyers' or supervisors' screen (Settings): the list their phones get, fetched
+// fresh each time it opens.
+async function openPreview(kind) {
+  ui.view = kind; ui.bCat = "all"; ui.bLimit = 30;
+  if (kind === "supervisor") ui.stab = "uploads";
   state.peek = { videos: null, failed: false };
   window.scrollTo(0, 0); schedule();
   try {
     const r = await call("er_buyer_view", {});
-    if (ui.view !== "buyer") return;          // back to admin before it arrived
+    if (ui.view !== kind) return;          // back to admin before it arrived
     state.peek = { videos: new Map((Array.isArray(r && r.videos) ? r.videos : []).filter((v) => v && v.id).map((v) => [String(v.id), normVideo(v)])), failed: false };
   } catch (e) {
-    if (ui.view === "buyer") state.peek = { videos: null, failed: true };
+    if (ui.view === kind) state.peek = { videos: null, failed: true };
   }
   schedule();
+}
+
+/* ---------- uploads by day: admins and supervisors ---------- */
+// Every video submitted in the last 14 days (more on request), grouped by the day it came in, in the team's time
+// zone. Fetched when the screen is shown, and again while it stays open, at most once a minute.
+const normUpload = (v) => ({ id: String(v.id), name: str(v.name, 140) || "Untitled video", catId: v.cat ? String(v.cat) : null, by: str(v.by, 40), at: num(v.at) || 0,
+  day: /^\d{4}-\d{2}-\d{2}$/.test(String(v.day)) ? String(v.day) : "", approved: v.approved === true });
+async function loadUploads(days) {
+  const U = state.uploads;
+  if (U.busy || state.phase !== "ready") return;
+  if (!days && (Date.now() - U.at < 60000 || Date.now() - U.tried < 30000)) return;      // fresh enough, or failed a moment ago
+  U.busy = true; U.tried = Date.now();
+  try {
+    const r = await call("er_uploads", { p_days: days || U.days });
+    state.uploads = { days: num(r && r.days) || U.days, today: /^\d{4}-\d{2}-\d{2}$/.test(String(r && r.today)) ? String(r.today) : "", list: (Array.isArray(r && r.videos) ? r.videos : []).filter((v) => v && v.id).map(normUpload),
+      at: Date.now(), tried: Date.now(), busy: false, failed: false };
+  } catch (e) {
+    U.busy = false; U.failed = true;
+    if (U.list) toast("The uploads couldn't be loaded. Check your connection.", true);
+  }
+  schedule();
+}
+function dayBack(day, n) {      // "2026-10-18" and 2 gives "2026-10-16"
+  const [y, m, d] = day.split("-").map(Number), t = new Date(Date.UTC(y, m - 1, d - n));
+  return t.toISOString().slice(0, 10);
+}
+const fmtUpDay = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
+function dayName(day, i) {
+  if (i === 0) return "Today";
+  if (i === 1) return "Yesterday";
+  const [y, m, d] = day.split("-").map(Number);
+  return fmtUpDay.format(new Date(Date.UTC(y, m - 1, d)));
+}
+function viewUploads() {
+  const U = state.uploads;
+  loadUploads();
+  if (!U.list) return [h("section", { class: "section" }, U.failed && !U.busy
+    ? [empty("The uploads couldn't be loaded.", "Check your connection, then try again."),
+      h("div", { class: "btn-row" }, h("button", { class: "btn small", type: "button", id: "up-retry", onclick: () => loadUploads(U.days) }, "Try again"))]
+    : empty("Loading the uploads…"))];
+  const byDay = new Map();
+  for (const v of U.list) { const l = byDay.get(v.day) || []; l.push(v); byDay.set(v.day, l); }
+  const days = [];
+  for (let i = 0; i < U.days && U.today; i++) { const d = dayBack(U.today, i), list = byDay.get(d) || []; days.push({ day: d, i: i, list: list }); }
+  const count = (from, to) => days.slice(from, to).reduce((n, d) => n + d.list.length, 0);
+  const top = Math.max(1, ...days.map((d) => d.list.length)), today = days.length ? days[0].list.length : 0;
+  const open = ui.upOpen || new Set(today ? [U.today] : []);
+  const out = [h("section", { class: "slate", "aria-label": "Uploads by day" },
+    h("h2", { class: "slate-title", text: "Uploads" }),
+    hero(today, h("span", { class: "week-of", text: today === 1 ? "video uploaded today" : "videos uploaded today" })),
+    h("dl", { class: "fields three" }, stat(count(1, 2), "Yesterday"), stat(count(0, 7), "Last 7 days"), stat(count(0, U.days), "Last " + U.days + " days")),
+    h("p", { class: "slate-label", text: "Every video an editor submits, counted on the day it comes in, " + teamZoneName() + " time." }))];
+  const ask = state.isSupervisor ? pushCard() : null;
+  if (ask) out.push(ask);
+  const timeOf = (ms) => teamFmt().time.format(new Date(ms));
+  const toggle = (d) => { const s = new Set(open); if (s.has(d)) s.delete(d); else s.add(d); ui.upOpen = s; schedule(); };
+  out.push(h("section", { class: "section", id: "up-days" },
+    h("div", { class: "section-head" }, h("h2", { class: "section-title", text: "By day" }), h("p", { class: "section-note", text: "Tap a day to see its videos" })),
+    h("ul", { class: "rows days" }, days.map((d) => {
+      const n = d.list.length, ok = d.list.filter((v) => v.approved).length, isOpen = n > 0 && open.has(d.day);
+      const lane = h("span", { class: "day-lane", "aria-hidden": "true" }, n ? h("i") : null);
+      if (n) lane.firstChild.style.setProperty("--w", Math.max(2, Math.round((n / top) * 1000) / 10) + "%");
+      const head = [h("span", { class: "day-name", text: dayName(d.day, d.i) }), h("span", { class: "day-count", text: String(n) }), n ? icon("next", 16, 2.6) : h("span"),
+        lane, h("span", { class: "day-note", text: n ? plural(n, "video", "videos") + ", " + (ok === n ? (n === 1 ? "approved" : "all approved") : ok + " approved") : "No videos" })];
+      return h("li", { class: "day" + (isOpen ? " open" : "") },
+        n ? h("button", { class: "day-btn", type: "button", "aria-expanded": String(isOpen), dataset: { fk: "day:" + d.day }, onclick: () => toggle(d.day) }, head)
+          : h("div", { class: "day-btn" }, head),
+        isOpen ? h("ul", { class: "day-videos" }, d.list.map((v) => h("li", null,
+          h("div", { class: "row-main" }, h("span", { class: "row-title", text: v.name }),
+            h("span", { class: "hint", text: [v.by || "Former editor", v.catId && state.cats.get(v.catId) ? state.cats.get(v.catId).name : "No category", timeOf(v.at)].join(", ") })),
+          v.approved ? pill("good", "Approved") : pill("info", "Waiting for approval")))) : null);
+    })),
+    U.days < 92 ? h("div", { class: "btn-row" }, h("button", { class: "btn small", type: "button", id: "up-more", dataset: { fk: "upmore" }, disabled: U.busy, onclick: () => loadUploads(Math.min(92, U.days + 14)) }, U.busy ? "Loading…" : "Show 14 more days")) : null));
+  return out;
 }
 
 /* ---------- admin screens ---------- */
@@ -1349,14 +1458,14 @@ function pastCard(x) {
     h("div", { class: "btn-row" }, h("button", { class: "btn grow", type: "button", dataset: { fk: "re:" + key }, onclick: () => openReassign(uid, p) }, "Reassign"), p.script ? scriptBtn(p.script, key) : null));
 }
 function adminCard(x) {
-  const uid = x.uid, p = x.p, f = x.f, cat = catOf(p), key = uid + ":" + p.id, link = parseLink(p.link), open = ui.manage === key;
+  const uid = x.uid, p = x.p, f = x.f, cat = catOf(p), key = uid + ":" + p.id, link = parseLink(p.link), open = ui.manage === key, paid = inPayment(uid, f);
   const tools = [];
   if (p.status === "active") tools.push(h("button", { class: "btn small", type: "button", dataset: { fk: "re:" + key }, onclick: () => openReassign(uid, p) }, "Reassign"));
   if (isWaiting(x)) tools.push(h("button", { class: "btn small", type: "button", dataset: { fk: "back:" + key }, onclick: () => openSendBack(uid, p) }, "Send back"));
-  if (f.received) tools.push(h("button", { class: "btn small", type: "button", dataset: { fk: "amt:" + key }, onclick: () => openAmount(uid, p, f.amt) }, "Change amount"));
-  if (f.received) tools.push(h("button", { class: "btn small", type: "button", dataset: { fk: "unrecv:" + key }, onclick: (e) => act(e.currentTarget, () => run("er_receive", { p_project: p.id, p_on: false }), "Moved back to the inbox") }, "Undo received"));
+  if (f.received && !paid) tools.push(h("button", { class: "btn small", type: "button", dataset: { fk: "amt:" + key }, onclick: () => openAmount(uid, p, f.amt) }, "Change amount"));
+  if (f.received && !paid) tools.push(h("button", { class: "btn small", type: "button", dataset: { fk: "unrecv:" + key }, onclick: (e) => act(e.currentTarget, () => run("er_receive", { p_project: p.id, p_on: false }), "Moved back to the inbox") }, "Undo received"));
   if (p.status === "submitted" && link) tools.push(featureBtn(p, key));
-  tools.push(h("button", { class: "btn small", type: "button", dataset: { fk: "del:" + key }, onclick: () => openDelete(uid, p) }, "Delete"));
+  if (!paid) tools.push(h("button", { class: "btn small", type: "button", dataset: { fk: "del:" + key }, onclick: () => openDelete(uid, p) }, "Delete"));
   return h("article", { class: "clip" },
     h("div", { class: "clip-top" }, tape(cat), h("span", { class: "pills" }, statusPills(x, true), momentPill(p))),
     h("h3", { class: "clip-title", text: p.name }),
@@ -1376,7 +1485,8 @@ function adminCard(x) {
       p.script ? scriptBtn(p.script, key, true) : null,
       isWaiting(x) ? glow(h("button", { class: "btn small glow", type: "button", dataset: { fk: "recv:" + key }, onclick: (e) => receive(e.currentTarget, uid, p) }, "Mark received")) : null,
       h("button", { class: "btn small", type: "button", "aria-expanded": String(open), dataset: { fk: "mg:" + key }, onclick: () => { ui.manage = open ? null : key; schedule(); } }, open ? "Hide options" : "Manage")),
-    open ? h("div", { class: "btn-row tools" }, tools) : null);
+    open && paid ? h("p", { class: "hint", text: "It's in a payment to " + displayName(uid) + ", so it can't be changed, moved back or deleted." }) : null,
+    open && tools.length ? h("div", { class: "btn-row tools" }, tools) : null);
 }
 
 let projPanel = null;
@@ -1556,6 +1666,7 @@ function sparkNode(s, weekStartsList, max) {      // max is the busiest week of 
       : h("p", { class: "readout", text: "Videos submitted each week. Tap a bar for that week's numbers." }));
 }
 function rosterCard(s, win, target, rank, peak) {
+  const owe = (state.users.get(s.uid) || {}).owed || normOwed(null);       // since their last payment
   const per = ui.period, on = per === "week" ? s.wkOn : s.moOn, late = per === "week" ? s.wkLate : s.moLate;
   const since = per === "week" ? win.weeks[5] : win.month, bonuses = state.bonuses.get(s.uid) || [];
   const chips = [], quiet = s.last ? Math.floor((now() - s.last) / DAY) : null;
@@ -1577,13 +1688,31 @@ function rosterCard(s, win, target, rank, peak) {
     s.weeks.some((w) => w.on + w.late > 0) ? sparkNode(s, win.weeks, peak) : h("p", { class: "hint", text: "Nothing submitted in the last 6 weeks." }),
     h("dl", { class: "facts" },
       fact(String(s.active), "In progress"), fact(s.rate != null ? Math.round(s.rate * 100) + "%" : "–", "On time, last 4 weeks"),
-      fact(s.avg != null ? span(s.avg) : "–", "Average turnaround"), fact(money(s.earned.total), "Earned in total", s.earned.bonus ? "includes " + money(s.earned.bonus) + " in bonuses" : null)),
+      fact(s.avg != null ? span(s.avg) : "–", "Average turnaround"), fact(money(owe.due), "To pay", money(s.earned.total) + " earned in total")),
+    h("p", { class: "hint", text: (owe.paid ? "Last paid " + shortDate(owe.paid) + (owe.paidAmt != null ? ", " + money(owe.paidAmt) : "") + "." : "Not paid in the app yet.")
+      + " " + (owe.nv + owe.nb ? "To pay covers " + covers(owe) + (owe.paid ? " since then." : ".") : "Nothing new to pay.") }),
     s.last ? h("p", { class: "hint", text: "Last active " + ago(s.last) + "." }) : null,
     h("div", { class: "btn-row" },
       h("button", { class: "btn small", type: "button", dataset: { fk: "profile:" + s.uid }, onclick: () => openProfile(s.uid) }, "Profile"),
       h("button", { class: "btn small", type: "button", dataset: { fk: "vids:" + s.uid }, onclick: () => openVideos(s.uid) }, "Videos"),
       h("button", { class: "btn small", type: "button", dataset: { fk: "view:" + s.uid }, onclick: () => { ui.fEditor = s.uid; ui.fStatus = "all"; ui.fCat = "all"; ui.limit = 40; setTab("projects"); } }, "View projects"),
-      h("button", { class: "btn small", type: "button", dataset: { fk: "bonus:" + s.uid }, onclick: () => openBonuses(s.uid) }, "Bonuses")));
+      h("button", { class: "btn small", type: "button", dataset: { fk: "bonus:" + s.uid }, onclick: () => openBonuses(s.uid) }, "Bonuses"),
+      owe.nv + owe.nb ? h("button", { class: "btn small", type: "button", dataset: { fk: "payreset:" + s.uid }, onclick: () => openResetPay(s.uid) }, "Reset payment") : null));
+}
+// After paying an editor: what they were owed is recorded as paid, and their earnings start again from zero.
+function openResetPay(uid) {
+  const u = state.users.get(uid), o = u ? u.owed : null;
+  if (!o) return;
+  formSheet({
+    title: "Reset payment", submit: "Reset to zero", danger: true,
+    body: [
+      h("p", null, "Have you paid ", h("strong", { text: u.name }), " " + money(o.due) + "? That's " + covers(o) + (o.paid ? " since their last payment on " + shortDate(o.paid) : "") + "."),
+      h("p", { class: "hint", text: "Resetting records " + money(o.due) + " as paid today. " + u.name.split(" ")[0] + "'s earnings then start again from zero, on your screen and theirs, and count from the next video you mark received. Anything already paid can't be marked not received, removed or deleted afterwards." })],
+    run: async () => {
+      await run("er_reset_pay", { p_editor: uid, p_expect: o.due });
+      return fullStop("Reset. " + money(o.due) + " recorded as paid to " + u.name);
+    },
+  });
 }
 
 let setPanel = null;
@@ -1668,10 +1797,11 @@ function settingsPanel() {
     h("h2", { class: "section-title", text: "See what your team sees" }),
     h("div", { class: "panel" },
       h("p", null, "The editor screen shows what your editors see, including their leaderboard and earnings. Anything you log there is saved under your name, and you can delete it from Projects afterwards."),
-      h("p", null, "The media buyer screen shows the finished videos your media buyers see, with the same Download and Watch buttons. Looking at it changes nothing for them."),
+      h("p", null, "The media buyer screen shows the finished videos your media buyers see, with the same Download and Watch buttons. The supervisor screen has those too, and the uploads by day. Looking at them changes nothing for them."),
       h("div", { class: "btn-row" },
         h("button", { class: "btn", type: "button", id: "try-editor", onclick: () => { ui.view = "editor"; ui.etab = "work"; window.scrollTo(0, 0); schedule(); } }, "Open the editor screen"),
-        h("button", { class: "btn", type: "button", id: "try-buyer", onclick: () => openBuyerView() }, "Open the media buyer screen"))));
+        h("button", { class: "btn", type: "button", id: "try-buyer", onclick: () => openPreview("buyer") }, "Open the media buyer screen"),
+        h("button", { class: "btn", type: "button", id: "try-super", onclick: () => openPreview("supervisor") }, "Open the supervisor screen"))));
   setPanel = {
     node: h("div", { class: "stack" },
       h("section", { class: "section" },
@@ -1748,7 +1878,7 @@ function teamRow(u) {
   const me = state.me, manage = u.id !== me.id && !u.owner && (u.role !== "admin" || me.owner);
   return h("li", null,
     h("div", { class: "row-main" },
-      h("div", { class: "row-head" }, person(u.id), u.owner ? pill("info", "Owner") : u.role === "admin" ? pill("info", "Admin") : u.role === "buyer" ? pill("info", "Media buyer") : null, u.active ? null : pill("warn", "Switched off")),
+      h("div", { class: "row-head" }, person(u.id), u.owner ? pill("info", "Owner") : u.role === "admin" ? pill("info", "Admin") : u.role === "buyer" || u.role === "supervisor" ? pill("info", ROLE_NAMES[u.role]) : null, u.active ? null : pill("warn", "Switched off")),
       h("span", { class: "hint", text: "@" + u.username + (u.seen ? ", last seen " + ago(u.seen) : ", hasn't signed in yet") + (u.push ? ", notifications on" : "") })),
     manage ? h("div", { class: "row-actions" }, h("button", { class: "btn small", type: "button", dataset: { fk: "user:" + u.id }, onclick: () => openUser(u.id) }, "Manage")) : null);
 }
@@ -1917,6 +2047,12 @@ function openBrief() {
 }
 // Submitting a finished video. With the studio's Google Drive connected, the editor uploads it straight into a
 // folder there; pasting a Drive link always works too.
+// A video is uploaded only under its brief's own name, so it can't go in under the wrong brief, and so into the
+// wrong folder. Capitals, spaces and symbols don't count: "Menotea_10.mp4" and "MENOTEA10.mov" fit the brief
+// "menotea 10"; every letter and number must match, in order, so "menotea 11.mp4" or "menotea 10 (1).mp4" doesn't.
+const nameKey = (s) => String(s || "").normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+const fileStem = (n) => String(n || "").replace(/\.[A-Za-z0-9]{1,5}$/, "");
+const fitsBrief = (f, p) => nameKey(fileStem(f.name)) === nameKey(p.name);
 function openSubmit(p) {
   const d = state.config.drive;
   if (!(d.on && d.folders.length)) return openLinkSubmit(p);
@@ -1930,10 +2066,19 @@ function openSubmit(p) {
   const file = h("input", { class: "vh", id: "s-file", type: "file", accept: "video/*", "aria-label": "Choose the video", tabindex: "-1" });
   const choose = h("button", { class: "btn", type: "button", id: "s-choose", onclick: () => file.click() }, "Choose the video");
   const info = h("p", { class: "hint", id: "s-file-info", text: before ? "You started uploading " + before.name + " (" + bytes(before.size) + "). Choose the same video to carry on from where it stopped."
-    : "The finished video, straight from your phone or computer." });
+    : "The finished video, from your phone or computer. Its file must be named like the brief: " + p.name + "." });
   file.addEventListener("change", () => {
-    chosen = file.files && file.files[0] ? file.files[0] : null;
-    if (!chosen) return;
+    const f = file.files && file.files[0] ? file.files[0] : null;
+    file.value = "";          // so choosing the same file again (renamed or not) still counts
+    if (!f) return;
+    if (!sameFile(savedUpload(p.id), f) && !fitsBrief(f, p)) {      // (an upload already under way carries on whatever its name)
+      chosen = null;
+      choose.textContent = "Choose the video";
+      info.textContent = "The finished video, from your phone or computer. Its file must be named like the brief: " + p.name + ".";
+      fail("This video is named " + fileStem(f.name) + ". It must have the same name as the brief: " + p.name + ". Rename the video, then choose it again.");
+      return;
+    }
+    chosen = f;
     choose.textContent = "Choose another video";
     info.textContent = chosen.name + ", " + bytes(chosen.size) + (sameFile(savedUpload(p.id), chosen) ? ". It carries on from where the last upload stopped." : ".");
     err.hidden = true;
@@ -2302,7 +2447,7 @@ function openAssign() {
         files = files.slice(1);
       }
       sheetHold = false; closeSheet(true);
-      toast((sent === 1 ? "Script sent to " : sent + " scripts sent to ") + displayName(to) + ".");
+      toast(fullStop((sent === 1 ? "Script sent to " : sent + " scripts sent to ") + displayName(to)));
       sync();
     } catch (e) {
       sheetHold = false;
@@ -2327,7 +2472,7 @@ function openMoveScript(sc) {
       const pick = sheet.querySelector('input[name="mv-ed"]:checked');
       if (!pick) throw new Oops("Pick an editor.");
       await run("er_move_script", { p_script: sc.id, p_editor: pick.value });
-      return "Script sent to " + displayName(pick.value) + ".";
+      return fullStop("Script sent to " + displayName(pick.value));
     },
   });
 }
@@ -2353,7 +2498,7 @@ function openAmount(uid, p, cur) {
   if (cur != null) input.value = String(cur);
   formSheet({
     title: "Change the amount", submit: "Save amount",
-    body: [h("p", null, h("strong", { text: p.name }), " by " + displayName(uid) + "."), field(moneyLabel("Amount for this video"), input, "This is what the editor sees on their earnings screen.")],
+    body: [h("p", null, h("strong", { text: p.name }), " by " + fullStop(displayName(uid))), field(moneyLabel("Amount for this video"), input, "This is what the editor sees on their earnings screen.")],
     run: async () => {
       const v = parseAmount(input.value);
       if (v == null) throw new Oops("Enter an amount. Use 0 for none.");
@@ -2374,7 +2519,8 @@ function openBonuses(uid) {
       h("p", null, "For ", h("strong", { text: displayName(uid) }), ". A bonus is added to their earnings and shown on the leaderboard every editor sees. The amount stays between you and them."),
       list.length ? h("ul", { class: "rows" }, list.map((b) => h("li", null,
         h("div", { class: "row-main" }, h("span", { class: "row-title", text: b.label || "Bonus" }), h("span", { class: "hint", text: money(b.amt) + ", awarded " + shortDate(b.at) })),
-        h("button", { class: "btn small", type: "button", onclick: (e) => act(e.currentTarget, async () => { await run("er_remove_bonus", { p_bonus: b.id }); closeSheet(); }, "Bonus removed") }, "Remove")))) : null,
+        b.at && b.at <= paidUntil(uid) ? pill("", "Paid")          // in a payment already, so it stays
+          : h("button", { class: "btn small", type: "button", onclick: (e) => act(e.currentTarget, async () => { await run("er_remove_bonus", { p_bonus: b.id }); closeSheet(); }, "Bonus removed") }, "Remove")))) : null,
       field(moneyLabel("Bonus amount"), amt),
       field("What it's for", label, "Editors see this line on the leaderboard.")],
     run: async () => {
@@ -2424,7 +2570,7 @@ function videoRow(uid, p) {
       h("span", { class: "hint", text: cat.name + ", submitted " + stamp(p.submittedAt || p.updatedAt) }),
       h("span", { class: "pills" },
         f.onTime ? pill("good", "On time") : pill("warn", "Late by " + span(f.lateBy || 0)),
-        f.received ? pill("", "Received") : pill("info", admin ? "Waiting for you" : "With your admin"))),
+        f.received ? pill("", inPayment(uid, f) ? "Paid" : "Received") : pill("info", admin ? "Waiting for you" : "With your admin"))),
     h("div", { class: "row-actions" },
       embed ? h("button", { class: "btn small", type: "button", dataset: { fk: "vplay:" + p.id }, onclick: () => openPlayer(x, embed, link) }, icon("play", 16), "Play")
         : link ? h("a", { class: "btn small", href: link.href, target: "_blank", rel: "noopener noreferrer" }, "Open", icon("out", 15, 2.6)) : null));
@@ -2537,6 +2683,7 @@ function openAddUser() {
   const user = h("input", { class: "input", id: "nu-user", type: "text", maxlength: "24", autocomplete: "off", autocapitalize: "none", spellcheck: "false" });
   const pass = h("input", { class: "input", id: "nu-pass", type: "text", maxlength: "72", autocomplete: "off", autocapitalize: "none", spellcheck: "false" });
   const role = h("select", { class: "input", id: "nu-role" }, h("option", { value: "editor", text: "Editor" }), h("option", { value: "buyer", text: "Media buyer (downloads approved videos)" }),
+    h("option", { value: "supervisor", text: "Supervisor (approved videos, and uploads by day)" }),
     state.me.owner ? h("option", { value: "admin", text: "Admin (sees and manages everything)" }) : null);
   pass.value = newPassword();
   let typed = false;
@@ -2548,7 +2695,7 @@ function openAddUser() {
       field("Name", name, "Shown on their work and on the leaderboard."),
       field("Username", user, "3 to 24 characters: small letters, numbers, dots and dashes."),
       field("Password", pass, "At least 8 characters. They can change it after signing in."),
-      field("Role", role, "A media buyer sees only the videos you approve, from every category, and gets a ping with a download link for each.")],
+      field("Role", role, "A media buyer sees only the videos you approve, from every category, and gets a ping with a download link for each. A supervisor sees the same, and how many videos are uploaded each day, and which.")],
     run: async () => {
       const n = tidy(name.value), un = user.value.trim().toLowerCase(), pw = pass.value;
       if (!n) throw new Oops("Enter their name.");
@@ -2562,7 +2709,8 @@ function openUser(id) {
   const u = state.users.get(id), me = state.me;
   if (!u) return;
   const name = h("input", { class: "input", id: "mu-name", type: "text", maxlength: "40", autocomplete: "off" });
-  const role = h("select", { class: "input", id: "mu-role" }, h("option", { value: "editor", text: "Editor" }), h("option", { value: "buyer", text: "Media buyer (downloads approved videos)" }), h("option", { value: "admin", text: "Admin (sees and manages everything)" }));
+  const role = h("select", { class: "input", id: "mu-role" }, h("option", { value: "editor", text: "Editor" }), h("option", { value: "buyer", text: "Media buyer (downloads approved videos)" }),
+    h("option", { value: "supervisor", text: "Supervisor (approved videos, and uploads by day)" }), h("option", { value: "admin", text: "Admin (sees and manages everything)" }));
   name.value = u.name; role.value = u.role;
   const quick = (args, msg) => (e) => act(e.currentTarget, async () => { await run("er_update_user", Object.assign({ p_user: u.id }, args)); closeSheet(); }, msg);
   formSheet({
@@ -2588,7 +2736,7 @@ function openUser(id) {
       if (me.owner && role.value !== u.role) args.p_role = role.value;
       if (!Object.keys(args).length) return "";
       await run("er_update_user", Object.assign({ p_user: u.id }, args));
-      return args.p_role ? n + " is now " + (args.p_role === "admin" ? "an admin" : args.p_role === "buyer" ? "a media buyer" : "an editor") : "Saved";
+      return args.p_role ? n + " is now " + ({ admin: "an admin", buyer: "a media buyer", supervisor: "a supervisor" }[args.p_role] || "an editor") : "Saved";
     },
   });
 }
@@ -2709,13 +2857,20 @@ function openDetails() {
 function openProfile(uid) {
   const u = state.users.get(uid);
   if (!u) return;
-  const first = u.name.split(" ")[0], body = h("div", { class: "part", id: "pf-pay" });
+  const first = u.name.split(" ")[0], body = h("div", { class: "part", id: "pf-pay" }), paidBox = h("div", { class: "part", id: "pf-paid", hidden: true });
   const draw = (nodes) => body.replaceChildren.apply(body, [h("h3", { class: "part-title", text: "Payment details" })].concat(nodes.filter(Boolean)));
   const load = async () => {
     draw([h("p", { class: "hint", text: "Loading…" })]);
     try {
       const r = await call("er_details", { p_user: uid }), d = normDetails(r && r.details), ch = r && r.changed && num(r.changed.at) ? r.changed : null;
       if (!body.isConnected) return;
+      const pays = normPayouts(r && r.payouts);          // each Reset payment, newest first
+      paidBox.hidden = u.role !== "editor" && !pays.length;
+      paidBox.replaceChildren(h("h3", { class: "part-title", text: "Payments" }),
+        pays.length ? h("ul", { class: "rows" }, pays.map((x) => h("li", null,
+          h("div", { class: "row-main" }, h("span", { class: "row-title", text: shortDate(x.at) }), h("span", { class: "hint", text: covers(x) })),
+          h("span", { class: "amount", text: money(x.amt) }))))
+          : h("p", { class: "hint", text: "No payments recorded yet. After paying " + first + ", press Reset payment on their card on the Editors screen." }));
       if (!d) { draw([empty("No payment details yet.", first + " sees a reminder on their home screen until they add them.")]); return; }
       draw([
         ch ? h("div", { class: "notice warn" }, h("strong", { text: "Bank details changed " + shortDate(num(ch.at)) }),
@@ -2731,7 +2886,7 @@ function openProfile(uid) {
     h("div", { class: "pic-row" }, avatar(uid, "lg"), h("div", { class: "row-main" },
       h("span", { class: "row-title", text: "@" + u.username }),
       h("span", { class: "hint", text: u.seen ? "Last seen " + ago(u.seen) : "Hasn't signed in yet" }))),
-    body,
+    body, paidBox,
     h("div", { class: "btn-row" }, h("button", { class: "btn grow", type: "button", onclick: closeSheet }, "Close")))]);
   load();
 }
@@ -2761,7 +2916,7 @@ function themeBox() {
   return box;
 }
 function openAccount(forPicture) {
-  const me = state.me, admin = me.role === "admin", buyer = me.role === "buyer";
+  const me = state.me, admin = me.role === "admin", buyer = me.role === "buyer" || me.role === "supervisor";     // neither has pay or a leaderboard
   let picked = null;        // null = keep, "" = remove, otherwise { thumb, full } for the new picture
   const slot = h("span", { id: "ac-pic" });
   const file = h("input", { class: "vh", id: "ac-file", type: "file", accept: "image/*", "aria-label": "Choose a picture", tabindex: "-1" });
@@ -2840,10 +2995,10 @@ function toast(msg, bad) {
   toastTimer = setTimeout(() => { toastEl.hidden = true; }, bad ? 6000 : 3600);
 }
 function setTab(id) {
-  const admin = ui.view === "admin";
-  if (admin) ui.tab = id; else ui.etab = id;
+  const admin = ui.view === "admin", sup = ui.view === "supervisor";
+  if (admin) ui.tab = id; else if (sup) ui.stab = id; else ui.etab = id;
   ui.manage = null;
-  try { localStorage.setItem(admin ? "editroom.tab" : "editroom.etab", id); } catch (e) { /* remembering the tab is optional */ }
+  try { localStorage.setItem(admin ? "editroom.tab" : sup ? "editroom.stab" : "editroom.etab", id); } catch (e) { /* remembering the tab is optional */ }
   window.scrollTo(0, 0);
   schedule();
 }
@@ -2854,7 +3009,7 @@ function renderWho() {
   const pic = pics.get(state.me.id), sig = state.me.name + "|" + ui.view + "|" + (pic ? pic.ver + pic.url.length : "");
   if (who.dataset.sig === sig) return;
   who.dataset.sig = sig;
-  const roleName = ui.view === "admin" ? "Admin" : ui.view === "buyer" ? "Media buyer" : "Editor";
+  const roleName = ROLE_NAMES[ui.view] || "Editor";
   who.setAttribute("aria-label", "Your account: " + state.me.name + ", " + roleName.toLowerCase());
   who.replaceChildren(
     h("span", { class: "who-text" }, h("span", { class: "who-name", text: state.me.name }), h("span", { class: "who-role", text: roleName })),
@@ -2865,14 +3020,15 @@ function renderTabs(all) {
   const nav = $("tabs"), on = state.phase === "ready" && ui.view !== "buyer";      // a media buyer has one screen
   nav.hidden = !on;
   if (!on) { nav.dataset.kind = ""; return; }
-  const admin = ui.view === "admin", defs = admin ? ADMIN_TABS : EDITOR_TABS, cur = admin ? ui.tab : ui.etab;
+  const admin = ui.view === "admin", sup = ui.view === "supervisor";
+  const defs = admin ? ADMIN_TABS : sup ? SUPERVISOR_TABS : EDITOR_TABS, cur = admin ? ui.tab : sup ? ui.stab : ui.etab;
   if (nav.dataset.kind !== ui.view) {
     nav.dataset.kind = ui.view;
     nav.replaceChildren.apply(nav, defs.map((d, i) => h("button", { class: "tab", type: "button", dataset: { tab: d[0] }, onclick: () => setTab(d[0]) },
       h("span", { class: "tab-ic" }, icon(d[0])), h("span", { class: "tab-label", text: d[1] }),
-      i === 0 ? h("span", { class: "count" + (admin ? "" : " alert"), hidden: true }) : null)));
+      i === 0 && !sup ? h("span", { class: "count" + (admin ? "" : " alert"), hidden: true }) : null)));
   }
-  const n = admin ? all.filter(isWaiting).length + state.scripts.filter((x) => x.status === "declined").length
+  const n = sup ? 0 : admin ? all.filter(isWaiting).length + state.scripts.filter((x) => x.status === "declined").length
     : all.filter((x) => x.uid === state.me.id && x.p.status === "active" && x.f.phase !== "ontrack").length + (state.isAdmin ? 0 : state.scripts.length);
   for (const b of nav.children) {
     if (b.dataset.tab === cur) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
@@ -2887,8 +3043,8 @@ function renderBanners() {
     h("strong", { text: "This is the editor screen, as your editors see it." }),
     h("span", { text: "Anything you log here is saved under your name. You can delete it from Projects afterwards." }),
     h("button", { class: "btn small", type: "button", id: "back-admin", onclick: () => { ui.view = "admin"; window.scrollTo(0, 0); schedule(); } }, "Back to admin")));
-  if (state.phase === "ready" && state.isAdmin && ui.view === "buyer") out.push(h("div", { class: "notice" },
-    h("strong", { text: "This is the media buyer screen, as your media buyers see it." }),
+  if (state.phase === "ready" && state.isAdmin && (ui.view === "buyer" || ui.view === "supervisor")) out.push(h("div", { class: "notice" },
+    h("strong", { text: ui.view === "buyer" ? "This is the media buyer screen, as your media buyers see it." : "This is the supervisor screen, as your supervisors see it." }),
     h("span", { text: "Looking at it changes nothing for them. Download and Watch work here too." }),
     h("button", { class: "btn small", type: "button", id: "back-admin", onclick: () => { ui.view = "admin"; state.peek = { videos: null, failed: false }; window.scrollTo(0, 0); schedule(); } }, "Back to admin")));
   const box = $("banners"), sig = out.map((n) => n.textContent).join("|");
@@ -2913,8 +3069,10 @@ function render() {
   }
   view.dataset.down = "";
   if (!ready) { pin(view, authView()); return; }
-  if (ui.view !== viewFor() && !(state.isAdmin && (ui.view === "editor" || ui.view === "buyer"))) ui.view = viewFor();     // an admin can look at the other screens
+  if (ui.view !== viewFor() && !(state.isAdmin && (ui.view === "editor" || ui.view === "buyer" || ui.view === "supervisor"))) ui.view = viewFor();     // an admin can look at the other screens
   if (ui.view === "buyer") view.replaceChildren.apply(view, viewVideos());
+  else if (ui.view === "supervisor") view.replaceChildren.apply(view, ui.stab === "videos" ? viewVideos() : viewUploads());
+  else if (ui.view === "admin" && ui.tab === "uploads") view.replaceChildren.apply(view, viewUploads());
   else if (ui.view === "admin" && ui.tab === "projects") { pin(view, projectsPanel().node); fillProjects(all); }
   else if (ui.view === "admin" && ui.tab === "settings") { pin(view, settingsPanel().node); fillSettings(); }
   else if (ui.view === "admin" && ui.tab === "editors") view.replaceChildren.apply(view, viewEditors());

@@ -391,6 +391,20 @@ fieldset.field > legend { padding: 0 0 6px; font-size: 14px; font-weight: 600; }
 .row-head.spread { justify-self: stretch; justify-content: space-between; }      /* who on the left, how long is left on the right */
 .row-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .rows-empty { padding: 16px; color: var(--ink-3); font-size: 14px; }
+/* Uploads by day: one row per day with its count and a bar as long as that day's uploads (the busiest day in view
+   is full width); tapping a day lists its videos underneath, on the inset paper */
+.rows.days > li.day { display: block; padding: 0; }
+.day-btn { display: grid; grid-template-columns: minmax(0, 1fr) auto 16px; align-items: center; gap: 6px 12px; width: 100%; padding: 12px 16px; border: 0; border-radius: 0; background: none; color: inherit; font: inherit; text-align: left; }
+.day-name { font-weight: 600; }
+.day-count { font-weight: 600; font-variant-numeric: tabular-nums; }
+.day-btn > svg { color: var(--ink-3); }
+.day-btn[aria-expanded="true"] > svg { transform: rotate(90deg); }
+.day-lane { grid-column: 1 / -1; display: flex; height: 8px; }
+.day-lane > i { width: var(--w, 0%); min-width: 3px; height: 8px; border-radius: 0 4px 4px 0; background: var(--on-time); }
+.day-note { grid-column: 1 / -1; font-size: 14px; color: var(--ink-3); }
+.day-videos { display: grid; background: var(--inset); }
+.day-videos > li { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 12px; min-width: 0; padding: 10px 16px; border-top: 1px solid var(--line); }
+.day-videos .row-main { flex-basis: 140px; }      /* room for "Waiting for approval" beside the name on a phone */
 .sheet-body .rows { background: var(--inset); }
 .amount { font-size: 16px; font-weight: 600; line-height: 1.3; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .rows > li.rank-row { justify-content: flex-start; flex-wrap: nowrap; }

@@ -135,9 +135,16 @@ export async function run({ ok, srv, google, sql, db, SELF, APP, APP_URL, ids })
     await sheet(ada).getByRole("button", { name: "Upload the video" }).waitFor();
     const proxanId = (await db.rpc("er_state", { p_token: ids.TA })).settings.drive.folders.find((f) => f.name === "Proxan").id;
     ok((await ada.locator("#s-folder").inputValue()) === proxanId, "the folder named like the brief's category is chosen for the editor");
-    const v1 = video("proxan21.mp4", 20 * 1024 * 1024 + 12345);
+    ok((await ada.locator("#s-file-info").innerText()) === "The finished video, from your phone or computer. Its file must be named like the brief: Proxan video 21.", "the editor is told the video must be named like the brief", await ada.locator("#s-file-info").innerText());
+    const misnamed = video("Proxan video 12.mp4", 2000);           // the video for another brief
+    await ada.setInputFiles("#s-file", misnamed.file);
+    ok((await sheet(ada).getByRole("alert").innerText()) === "This video is named Proxan video 12. It must have the same name as the brief: Proxan video 21. Rename the video, then choose it again.",
+      "a video named differently from the brief is refused, and the editor is told the name to use", await sheet(ada).getByRole("alert").innerText());
+    await sheet(ada).getByRole("button", { name: "Upload and submit" }).click();
+    ok((await sheet(ada).getByRole("alert").innerText()) === "Choose the video to upload." && !inDrive("Proxan video 21 (Ada Obi).mp4"), "and it can't be uploaded");
+    const v1 = video("PROXAN_video-21.mp4", 20 * 1024 * 1024 + 12345);         // capitals and symbols don't count
     await ada.setInputFiles("#s-file", v1.file);
-    ok((await ada.locator("#s-file-info").innerText()) === "proxan21.mp4, 21 MB.", "the chosen video shows with its size", await ada.locator("#s-file-info").innerText());
+    ok((await ada.locator("#s-file-info").innerText()) === "PROXAN_video-21.mp4, 21 MB." && await sheet(ada).getByRole("alert").isHidden(), "the same name with other capitals and symbols is accepted, and shows with its size", await ada.locator("#s-file-info").innerText());
     await shot(ada, "2-upload-ready");
     google.cut = 2; google.cutSkip = 1;            // the line drops part way through the second piece (and the browser's own quiet retry of it)
     await sheet(ada).getByRole("button", { name: "Upload and submit" }).click();
@@ -155,7 +162,7 @@ export async function run({ ok, srv, google, sql, db, SELF, APP, APP_URL, ids })
     const brief2 = (await db.rpc("er_log_brief", { p_token: ids.TA, p_name: "Proxan video 22", p_category: ids.cat })).id;
     await ada.reload();
     await card(ada, "Proxan video 22").getByRole("button", { name: "Submit video" }).click();
-    const v2 = video("proxan22.mov", 20 * 1024 * 1024 + 777);
+    const v2 = video("Proxan video 22.mov", 20 * 1024 * 1024 + 777);
     await ada.setInputFiles("#s-file", v2.file);
     google.pieceDelay = 700;
     await sheet(ada).getByRole("button", { name: "Upload and submit" }).click();
@@ -165,7 +172,7 @@ export async function run({ ok, srv, google, sql, db, SELF, APP, APP_URL, ids })
     google.pieceDelay = 0;
     ada = await opened(ectx);
     await card(ada, "Proxan video 22").getByRole("button", { name: "Submit video" }).click();
-    ok((await ada.locator("#s-file-info").innerText()) === "You started uploading proxan22.mov (21 MB). Choose the same video to carry on from where it stopped.", "opening it again offers to carry on", await ada.locator("#s-file-info").innerText());
+    ok((await ada.locator("#s-file-info").innerText()) === "You started uploading Proxan video 22.mov (21 MB). Choose the same video to carry on from where it stopped.", "opening it again offers to carry on", await ada.locator("#s-file-info").innerText());
     await ada.setInputFiles("#s-file", v2.file);
     ok(/It carries on from where the last upload stopped\.$/.test(await ada.locator("#s-file-info").innerText()), "and recognises the same video");
     await sheet(ada).getByRole("button", { name: "Upload and submit" }).click();
@@ -180,7 +187,7 @@ export async function run({ ok, srv, google, sql, db, SELF, APP, APP_URL, ids })
     const brief3 = (await db.rpc("er_log_brief", { p_token: ids.TA, p_name: "Proxan video 23", p_category: ids.cat })).id;
     await ada.reload();
     await card(ada, "Proxan video 23").getByRole("button", { name: "Submit video" }).click();
-    const v3 = video("proxan23.mp4", 10 * 1024 * 1024 + 99);
+    const v3 = video("proxanvideo23.mp4", 10 * 1024 * 1024 + 99);           // no spaces at all fits the brief too
     await ada.setInputFiles("#s-file", v3.file);
     google.pieceDelay = 700;
     await sheet(ada).getByRole("button", { name: "Upload and submit" }).click();
