@@ -554,11 +554,12 @@ const st2 = (await one("select app.drive_begin($1, $2) as s", [A, "https://dn.ex
 await sql("update app.drive_states set created_at = now() - interval '16 minutes' where state_hash = sha256(convert_to($1, 'UTF8'))", [st2]);
 ok((await sql("select * from app.drive_take($1)", [st2])).rows.length === 0, "and only for 15 minutes");
 await fails(sql("select app.drive_link($1, $2, $3)", [ada, "ada@example.com", "refresh-token-ada"]), "forbidden", "a connection can only be an admin's");
+ok((await rpc("er_state", { p_token: TA })).settings.drive.only === false, "a studio that has never connected a Drive submits with links");
 const c1 = (await one("select app.drive_link($1, $2, $3) as id", [adminId, "studio@example.com", "refresh-token-one"])).id;
 dv = (await rpc("er_state", { p_token: A })).settings.drive;
-ok(dv.on === true && dv.email === "studio@example.com" && dv.lost === false, "once connected, the admin sees which Google account it is");
+ok(dv.on === true && dv.email === "studio@example.com" && dv.lost === false && dv.only === true, "once connected, the admin sees which Google account it is");
 let edv = (await rpc("er_state", { p_token: TA })).settings.drive;
-ok(edv.on === true && edv.email === null && edv.lost === null && edv.folders.length === 0, "editors are told it's on, but not whose account it is", JSON.stringify(edv));
+ok(edv.on === true && edv.email === null && edv.lost === null && edv.folders.length === 0 && edv.only === true, "editors are told it's on, but not whose account it is, and that uploading is now the way to submit", JSON.stringify(edv));
 const c2 = (await one("select app.drive_link($1, $2, $3) as id", [adminId, "studio@example.com", "refresh-token-two"])).id;
 const conns = (await sql("select id, ended_at is null as live, end_note from app.drive order by connected_at, id")).rows;
 const key = (await sql("select * from app.drive_key()")).rows;
@@ -592,12 +593,26 @@ ok(u1.project === db1 && u1.size === 123456789 && u1.session === "https://upload
 await fails(sql("select app.drive_upload($1, $2)", [TT, s1.upload]), "not_found", "nobody else can carry on someone's upload");
 await sql("select app.drive_done($1, $2, $3, $4)", [s1.upload, "file-1", "https://drive.google.com/file/d/file-1/view", "submitted"]);
 ok((await one("select app.drive_upload($1, $2) as u", [TA, s1.upload])).u.done === true, "and how it ended is kept");
+// once the studio's Drive is connected, uploading is the only way to submit: a pasted link is refused, and a
+// finished upload submits its brief (dn-drive calls app.drive_submit once it has checked the file in Drive)
+const dbT = (await rpc("er_log_brief", { p_token: TT, p_name: "Drive submit brief", p_category: ads })).id;
+await fails(rpc("er_submit", { p_token: TT, p_project: dbT, p_link: "https://drive.google.com/file/d/pasted0001/view" }), "upload_only", "a pasted link is refused once the studio's Drive is connected");
+await fails(rpc("er_submit", { p_token: A, p_project: dbT, p_link: "https://drive.google.com/file/d/pasted0002/view" }), "upload_only", "for admins too");
+const sT = (await start(TT, dbT, fMeno, 4096, "video/mp4", "mp4")).s;
+await fails(sql("select app.drive_submit($1, $2, $3, $4)", [TA, sT.upload, "https://drive.google.com/file/d/fileT/view", ""]), "not_found", "nobody can submit with someone else's upload");
+await sql("select app.drive_submit($1, $2, $3, $4)", [TT, sT.upload, "https://drive.google.com/file/d/fileT/view", "  Final cut  "]);
+const dSub = await one("select status, link, note, submitted_at is not null as at from app.projects where id = $1", [dbT]);
+ok(dSub.status === "submitted" && dSub.link === "https://drive.google.com/file/d/fileT/view" && dSub.note === "Final cut" && dSub.at, "a finished upload submits its brief with the file's link and the editor's note", JSON.stringify(dSub));
+await fails(sql("select app.drive_submit($1, $2, $3, $4)", [TT, sT.upload, "https://drive.google.com/file/d/fileT/view", ""]), "not_found", "and only once");
+await fails(sql("select app.drive_submit($1, $2, $3, $4)", [TT, sT.upload, "javascript:alert(1)", ""]), "bad_link", "only a real web link is taken");
 // disconnecting, and Google ending a connection
 await fails(sql("select app.drive_unlink($1)", [TA]), "forbidden", "only an admin can disconnect Drive");
 ok((await one("select app.drive_unlink($1) as r", [A])).r === "refresh-token-two", "disconnecting hands back the key, so Google can be told to forget it");
 edv = (await rpc("er_state", { p_token: TA })).settings.drive;
 ok(edv.on === false && edv.folders.length === 0 && (await rpc("er_state", { p_token: A })).settings.drive.folders.length === 1, "once disconnected, editors see no folders; the admin keeps the list");
 await fails(start(TA, db1, fMeno, 1000, "video/mp4", "mp4"), "drive_off", "and nobody can start an upload");
+ok(edv.only === true, "uploading stays the only way to submit while Drive is disconnected");
+await fails(rpc("er_submit", { p_token: TA, p_project: db1, p_link: "https://drive.google.com/file/d/pasted0003/view" }), "upload_only", "so a pasted link is still refused: nobody can submit until it's connected again");
 const c3 = (await one("select app.drive_link($1, $2, $3) as id", [adminId, "studio@example.com", "refresh-token-three"])).id;
 await sql("select app.drive_lost($1, $2)", [c3, "Google said: invalid_grant"]);
 dv = (await rpc("er_state", { p_token: A })).settings.drive;
@@ -691,6 +706,11 @@ await sql("select app.drive_link($1, $2, $3)", [adminId, "Studio@Example.com", "
 const backAgain = await folderNow("Folder check 3");
 await sql("select app.script_failed(id, 'not sent') from app.scripts where name like 'Folder check %'");
 ok(sameAgain === "fldScripts0000001" && otherAcct === null && backAgain === "fldScripts0000001", "connecting the same Google account again keeps its scripts folder; another account starts without one", JSON.stringify([sameAgain, otherAcct, backAgain]));
+// from here on the studio's Drive is connected, so videos are submitted by uploading them
+const uploadSubmit = async (tok, project, link) => {
+  const s = (await start(tok, project, fMeno, 1000, "video/mp4", "mp4")).s;
+  await sql("select app.drive_submit($1, $2, $3, $4)", [tok, s.upload, link, ""]);
+};
 
 // ---- media buyers: they sign in like editors but only see the videos an admin has approved, and get a ping
 // for each one; they can't touch briefs, scripts or uploads
@@ -714,7 +734,7 @@ await sql("alter table app.projects disable trigger projects_touch");
 await sql("update app.projects set changed_at = changed_at - interval '1 hour'");
 await sql("alter table app.projects enable trigger projects_touch");
 const bCursor = (await rpc("er_state", { p_token: TB })).cursor;
-await rpc("er_submit", { p_token: TT, p_project: re.id, p_link: "https://drive.google.com/file/d/vid0000000014/view", p_note: "" });
+await uploadSubmit(TT, re.id, "https://drive.google.com/file/d/vid0000000014/view");
 const bBefore = await rpc("er_state", { p_token: TB, p_since: bCursor });
 ok(!bBefore.full && !bBefore.videos.some((v) => v.id === re.id && v.link) && (await pings(buyer, "video")).length === 0, "a video waiting for the admin is not the buyers' yet", JSON.stringify(bBefore.videos));
 await rpc("er_receive", { p_token: A, p_project: re.id, p_on: true });
@@ -750,6 +770,13 @@ ok(up.days === 14 && up.today === (await one("select to_char(now() at time zone 
   && JSON.stringify(up.videos.map((v) => [v.id, v.day, v.approved])) === JSON.stringify(want14.map((r) => [r.id, r.day, r.approved])),
   "a supervisor sees every video submitted in the last 14 days, newest first, each with its day in the team's time zone and whether it's approved", up.videos.length + " videos");
 ok(up.videos.some((v) => v.approved) && up.videos.some((v) => !v.approved) && up.videos.every((v) => v.name && v.by && v.at > 0 && !("link" in v)), "including ones still waiting for approval, with who made them, and no links", JSON.stringify(up.videos[0]));
+const upIds = await sql("select id, editor_id from app.projects where id = any($1::uuid[])", [up.videos.map((v) => v.id)]);
+ok(upIds.rows.length === up.videos.length && upIds.rows.every((r) => up.videos.find((v) => v.id === r.id).u === r.editor_id), "each says who made it by id too, so an admin can open their profile");
+// an admin is told how many videos each person has made, and how many are approved
+const madeNow = (await rpc("er_state", { p_token: A })).users.find((x) => x.id === tunde).made;
+const madeWant = await one("select count(*)::int as n, count(*) filter (where received_at is not null)::int as ok from app.projects where editor_id = $1 and status = 'submitted' and not deleted", [tunde]);
+ok(Array.isArray(madeNow) && madeNow[0] === madeWant.n && madeNow[1] === madeWant.ok && madeWant.n > 0, "an admin sees how many videos each editor has made, and how many are approved", JSON.stringify([madeNow, madeWant]));
+ok(!("made" in (await rpc("er_state", { p_token: TT })).users[0]), "editors aren't told anyone's count");
 ok((await rpc("er_uploads", { p_token: A, p_days: 500 })).days === 92 && (await rpc("er_uploads", { p_token: A, p_days: 0 })).days === 1, "an admin can see them too, from 1 to 92 days back");
 await fails(rpc("er_uploads", { p_token: TB }), "forbidden", "a media buyer can't see the daily uploads");
 await fails(rpc("er_uploads", { p_token: TT }), "forbidden", "nor can an editor");
@@ -765,7 +792,7 @@ const TP = (await rpc("er_login", { p_username: "paytest", p_password: "paytest-
 const payCat = (await rpc("er_save_category", { p_token: A, p_id: null, p_name: "Pay check", p_rate: 25 })).id;
 const deliver = async (name) => {
   const id = (await rpc("er_log_brief", { p_token: TP, p_name: name, p_category: payCat })).id;
-  await rpc("er_submit", { p_token: TP, p_project: id, p_link: "https://drive.google.com/file/d/" + name.replace(/\W/g, "") + "000/view", p_note: "" });
+  await uploadSubmit(TP, id, "https://drive.google.com/file/d/" + name.replace(/\W/g, "") + "000/view");
   await rpc("er_receive", { p_token: A, p_project: id, p_on: true });
   return id;
 };
@@ -862,7 +889,8 @@ await fails(rpc("er_state", { p_token: A }), "auth", "signing out ends the sessi
 // ---- the tables themselves cannot be reached
 for (const q of ["select * from app.users", "select * from app.projects", "select * from app.featured", "select * from app.outbox", "select * from app.push_subs", "select * from app.details", "select app.details_of(null)","select app.push_keys()", "select app.push_claim(5)", "update app.meta set delivery_hours = 1", "select app.who('x')", "select app.password('aaaaaaaa')", "select app.featured_now()",
                   "select * from app.drive", "select * from app.uploads", "select * from app.drive_key()", "select app.drive_begin('x', 'https://x.example/')", "select * from app.drive_config()",
-                  "select * from app.scripts", "select app.script_new('x', null, null, 'a', 'a.docx', 1)", "select app.script_file('x', null)", "select app.script_saved(null, 'x')", "select app.push_link('video', null)", "select app.buyer_videos(5)"]) {
+                  "select * from app.scripts", "select app.script_new('x', null, null, 'a', 'a.docx', 1)", "select app.script_file('x', null)", "select app.script_saved(null, 'x')", "select app.push_link('video', null)", "select app.buyer_videos(5)",
+                  "select app.drive_submit('x', null, 'https://x.example/v', '')", "select * from app.payouts"]) {
   await fails(asAnon(q), "permission denied", "direct access is refused: " + q);
 }
 const pub = await sql("select count(*)::int as n from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname like 'er\\_%' and has_function_privilege('anon', p.oid, 'execute')");

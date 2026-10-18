@@ -29,7 +29,7 @@ const state = {
   online: true, token: null, skew: 0, cursor: null, lastFull: 0, wantFull: false,
   me: { id: null, name: "", username: "", role: "editor", owner: false, av: 0, has: false },
   isAdmin: false, isBuyer: false, isSupervisor: false,
-  config: { categories: [], weeklyTarget: null, deliveryHours: 24, graceHours: 48, currency: "", tz: "UTC", drive: { on: false, email: null, lost: false, folders: [] } },
+  config: { categories: [], weeklyTarget: null, deliveryHours: 24, graceHours: 48, currency: "", tz: "UTC", drive: { on: false, only: false, email: null, lost: false, folders: [] } },
   prefs: { bonusAmount: null },
   cats: new Map(), users: new Map(), projects: new Map(), bonuses: new Map(),
   board: { week: [], month: [], awards: [] }, weeks: [0, 0, 0, 0, 0, 0], month: 0, totals: { videos: 0, bonus: 0, month: 0, owed: { due: 0, videos: 0, bonus: 0, nv: 0, nb: 0, paid: null, paidAmt: null }, payouts: [] },
@@ -205,6 +205,7 @@ const ERRORS = {
   need_category: "Choose a category.",
   bad_name: "Enter a name. It may be too long or empty.",
   bad_link: "Paste the full link, starting with https://",
+  upload_only: "Videos are submitted by uploading them to your admin's Google Drive. Close the app, open it again, then press Submit video.",
   weak_password: "Use a password of at least 8 characters.",
   bad_username: "Usernames are 3 to 24 characters: small letters, numbers, dots and dashes.",
   taken: "That name is already taken.",
@@ -230,12 +231,12 @@ const ERRORS = {
 // What can go wrong with Google Drive, said the same way wherever it comes up.
 const DRIVE_ERRORS = {
   not_set_up: "Google Drive isn't set up for this app yet.",
-  drive_off: "Google Drive isn't connected right now. Paste a Drive link instead, or ask your admin.",
+  drive_off: "Google Drive isn't connected right now, so videos can't be uploaded. Your admin needs to connect it again in Settings.",
   drive_lost: "Google ended the Drive connection, so uploads are paused. Your admin needs to connect it again in Settings.",
   no_folder: "That folder can't be used any more. Pick another one, or ask your admin.",
   too_big: "That file is too big. Videos can be up to 50 GB.",
   not_video: "That isn't a video file. Choose the finished video.",
-  too_many: "You've started a lot of uploads today. Try again tomorrow, or paste a Drive link instead.",
+  too_many: "You've started a lot of uploads today. Try again tomorrow, or ask your admin.",
   expired: "That upload went too long without finishing. Start it again.",
   not_done: "The video didn't arrive in full. Upload it again.",
   google: "Google Drive didn't answer as expected. Try again in a minute.",
@@ -261,8 +262,13 @@ function normDrive(d) {
   const x = d && typeof d === "object" ? d : {};
   const folders = (Array.isArray(x.folders) ? x.folders : []).filter((f) => f && typeof f.id === "string" && /^[0-9a-f-]{36}$/.test(f.id)).slice(0, 100)
     .map((f) => ({ id: f.id, name: str(f.name, 200) || "Untitled folder" }));
-  return { on: x.on === true, email: str(x.email, 320) || null, lost: x.lost === true, folders: folders };
+  return { on: x.on === true, only: x.only === true, email: str(x.email, 320) || null, lost: x.lost === true, folders: folders };
 }
+// Uploading to the studio's Drive is how a video is submitted once the studio has connected its Drive ("only"):
+// possible while it is connected and has a folder to upload to. A studio that has never connected one submits
+// with links.
+const canUpload = () => state.config.drive.on && state.config.drive.folders.length > 0;
+const uploadOnly = () => state.config.drive.only;
 function normProject(r) {
   return {
     id: String(r.id), name: str(r.name, 140) || "Untitled project", catId: r.cat ? String(r.cat) : null,
@@ -316,7 +322,8 @@ function applyState(d) {
   state.prefs = { bonusAmount: amount(s.bonus) };
   state.users = new Map();
   for (const u of Array.isArray(d.users) ? d.users : []) {
-    state.users.set(String(u.id), { id: String(u.id), name: str(u.name, 40) || "Unnamed", username: str(u.username, 24), role: roleOf(u.role), owner: u.owner === true, active: u.active !== false, av: num(u.av) || 0, has: u.has === true, seen: num(u.seen), earned: amount(u.earned) || 0, bonus: amount(u.bonus) || 0, last: num(u.last) || 0, moved: num(u.moved) || 0, avAt: num(u.avAt), push: u.push === true, pay: u.pay === true, owed: normOwed(u.owed) });
+    state.users.set(String(u.id), { id: String(u.id), name: str(u.name, 40) || "Unnamed", username: str(u.username, 24), role: roleOf(u.role), owner: u.owner === true, active: u.active !== false, av: num(u.av) || 0, has: u.has === true, seen: num(u.seen), earned: amount(u.earned) || 0, bonus: amount(u.bonus) || 0, last: num(u.last) || 0, moved: num(u.moved) || 0, avAt: num(u.avAt), push: u.push === true, pay: u.pay === true, owed: normOwed(u.owed),
+      made: Array.isArray(u.made) ? { n: num(u.made[0]) || 0, ok: num(u.made[1]) || 0 } : null });      // videos submitted, and approved (admins are told)
   }
   if (Array.isArray(d.weeks) && d.weeks.length === 6) state.weeks = d.weeks.map(Number);
   state.month = Number(d.month) || 0;
@@ -571,10 +578,23 @@ function zoomable(uid, size) {
   if (!pic || !pic.url) return avatar(uid, size);
   return h("button", { class: "pic-btn" + (size ? "" : " small"), type: "button", "aria-label": "See " + displayName(uid) + "'s picture", dataset: { fk: "pic:" + uid + ":" + (size || "") }, onclick: () => openPic(uid) }, avatar(uid, size));
 }
-// An admin can tap anyone's picture; elsewhere it opens only where the caller asks (the leaderboard).
-function person(uid, size, zoom) {
+// An admin can tap anyone's picture; elsewhere it opens only where the caller asks (the leaderboard). For an
+// admin, the name opens that person's profile.
+function person(uid, size, zoom, key) {
   const z = zoom == null ? ui.view === "admin" : zoom;
-  return h("div", { class: "person" + (size ? " big" : "") }, z ? zoomable(uid, size) : avatar(uid, size), h("span", { class: "person-name", text: displayName(uid) + (uid === state.me.id ? " (you)" : "") }));
+  return h("div", { class: "person" + (size ? " big" : "") }, z ? zoomable(uid, size) : avatar(uid, size), nameLink(uid, key));
+}
+// Whose profile an admin can open from their name, wherever it shows: anyone who makes videos.
+function canProfile(uid) {
+  const u = state.isAdmin && ui.view === "admin" ? state.users.get(uid) : null;
+  return !!u && (u.role === "editor" || u.role === "admin");
+}
+// Someone's name. For an admin it's a button that opens their profile: what they've earned, their videos and
+// their payment details. key tells it apart from the same name elsewhere on the screen.
+function nameLink(uid, key) {
+  const text = displayName(uid) + (uid === state.me.id ? " (you)" : "");
+  if (!canProfile(uid)) return h("span", { class: "person-name", text: text });
+  return h("button", { class: "person-name name-link", type: "button", "aria-haspopup": "dialog", dataset: { fk: "who:" + uid + (key ? ":" + key : "") }, onclick: () => openProfile(uid) }, text);
 }
 function meter(n, target) {
   const m = h("div", { class: "meter", role: "img", "aria-label": n + " of " + target + " submitted this week" }, h("i"));
@@ -1071,7 +1091,7 @@ function viewWork(all) {
   out.push(h("section", { class: "section" },
     h("div", { class: "section-head" }, h("h2", { class: "section-title", text: "Submitted" }),
       done.some((x) => x.p.link) ? h("button", { class: "btn small", type: "button", dataset: { fk: "myvids" }, onclick: () => openVideos(uid) }, "All my videos") : null),
-    shown.length ? h("div", { class: "grid" }, shown.map(doneCard)) : empty("Nothing submitted yet.", "Finished projects show up here once you submit them with a Drive link."),
+    shown.length ? h("div", { class: "grid" }, shown.map(doneCard)) : empty("Nothing submitted yet.", "Finished projects show up here once you submit them."),
     done.length > 6 ? h("div", { class: "btn-row" }, h("button", { class: "btn small", type: "button", dataset: { fk: "older" }, onclick: () => { ui.older = !ui.older; schedule(); } }, ui.older ? "Show fewer" : "Show all " + done.length)) : null));
 
   if (moved.length) out.push(h("section", { class: "section" },
@@ -1113,7 +1133,7 @@ function editorCard(x) {
     p.update ? quote("Your last update", p.update) : null,
     metaRow(x),
     h("div", { class: "btn-row" },
-      h("button", { class: "btn primary full", type: "button", dataset: { fk: "submit:" + p.id }, onclick: () => openSubmit(p) }, state.config.drive.on && state.config.drive.folders.length ? "Submit video" : "Submit with Drive link"),
+      h("button", { class: "btn primary full", type: "button", dataset: { fk: "submit:" + p.id }, onclick: () => openSubmit(p) }, canUpload() || uploadOnly() ? "Submit video" : "Submit with Drive link"),
       p.script ? scriptBtn(p.script, p.id) : null,
       h("button", { class: "btn grow", type: "button", dataset: { fk: "upd:" + p.id }, onclick: () => openUpdate(p) }, "Add update")));
 }
@@ -1267,7 +1287,7 @@ async function openPreview(kind) {
 /* ---------- uploads by day: admins and supervisors ---------- */
 // Every video submitted in the last 14 days (more on request), grouped by the day it came in, in the team's time
 // zone. Fetched when the screen is shown, and again while it stays open, at most once a minute.
-const normUpload = (v) => ({ id: String(v.id), name: str(v.name, 140) || "Untitled video", catId: v.cat ? String(v.cat) : null, by: str(v.by, 40), at: num(v.at) || 0,
+const normUpload = (v) => ({ id: String(v.id), name: str(v.name, 140) || "Untitled video", catId: v.cat ? String(v.cat) : null, uid: v.u ? String(v.u) : null, by: str(v.by, 40), at: num(v.at) || 0,
   day: /^\d{4}-\d{2}-\d{2}$/.test(String(v.day)) ? String(v.day) : "", approved: v.approved === true });
 async function loadUploads(days) {
   const U = state.uploads;
@@ -1331,7 +1351,8 @@ function viewUploads() {
           : h("div", { class: "day-btn" }, head),
         isOpen ? h("ul", { class: "day-videos" }, d.list.map((v) => h("li", null,
           h("div", { class: "row-main" }, h("span", { class: "row-title", text: v.name }),
-            h("span", { class: "hint", text: [v.by || "Former editor", v.catId && state.cats.get(v.catId) ? state.cats.get(v.catId).name : "No category", timeOf(v.at)].join(", ") })),
+            h("span", { class: "hint" }, v.uid && canProfile(v.uid) ? nameLink(v.uid, "up:" + v.id) : v.by || "Former editor",
+              ", " + [v.catId && state.cats.get(v.catId) ? state.cats.get(v.catId).name : "No category", timeOf(v.at)].join(", "))),
           v.approved ? pill("good", "Approved") : pill("info", "Waiting for approval")))) : null);
     })),
     U.days < 92 ? h("div", { class: "btn-row" }, h("button", { class: "btn small", type: "button", id: "up-more", dataset: { fk: "upmore" }, disabled: U.busy, onclick: () => loadUploads(Math.min(92, U.days + 14)) }, U.busy ? "Loading…" : "Show 14 more days")) : null));
@@ -1357,7 +1378,7 @@ function setupCard() {
         editors ? null : h("button", { class: "btn small", type: "button", dataset: { fk: "toteam" }, onclick: () => setTab("settings") }, "Open Settings"))),
       h("li", null, h("div", { class: "step-body" },
         h("span", { class: "step-title", text: "Download finished work from this inbox" }),
-        h("span", { class: "hint", text: "Editors log a brief when they get it and submit with a Drive link. Each submission lands here. Briefs in progress are listed below it, newest first, then anything past its deadline." })))));
+        h("span", { class: "hint", text: "Editors log a brief when they get it, then submit the finished video. Each submission lands here. Briefs in progress are listed below it, newest first, then anything past its deadline." })))));
 }
 function viewInbox(all) {
   const out = [];
@@ -1379,7 +1400,7 @@ function viewInbox(all) {
   out.push(h("section", { class: "section" },
     h("div", { class: "section-head" }, h("h2", { class: "section-title", text: "Ready to download" }), waiting.length > 1 ? h("p", { class: "section-note", text: "Oldest first" }) : null),
     waiting.length ? h("div", { class: "grid" }, waiting.map(inboxCard))
-      : empty("Nothing waiting.", "When an editor submits a project with a Drive link, it lands here for you to download.")));
+      : empty("Nothing waiting.", "When an editor submits a video, it lands here for you to download.")));
   // scripts nobody has taken on yet: the ones turned down first, as they need the admin; then the oldest
   const scripts = state.scripts.slice().sort((a, b) => (a.status === b.status ? a.at - b.at : a.status === "declined" ? -1 : 1));
   if (scripts.length) out.push(h("section", { class: "section", id: "scripts" },
@@ -1401,13 +1422,12 @@ function viewInbox(all) {
 // One line per brief in progress: what it is, who has it, how far along, and how long is left.
 function progressRow(x) {
   const p = x.p, bits = [catOf(p).name, "logged " + ago(p.startedAt), p.stage === 1 ? "just started" : STAGES[p.stage - 1].toLowerCase()];
-  if (p.from) bits.push("reassigned from " + displayName(p.from));
   if (p.backAt) bits.push("sent back " + ago(p.backAt));
   return h("li", null,
     h("div", { class: "row-main" },
       h("span", { class: "row-title", text: p.name }),
-      h("div", { class: "row-head spread" }, person(x.uid), deadlinePill(x, false)),
-      h("span", { class: "hint", text: bits.join(", ") }),
+      h("div", { class: "row-head spread" }, person(x.uid, null, null, "ip:" + x.p.id), deadlinePill(x, false)),
+      h("span", { class: "hint" }, bits.join(", "), p.from ? [", reassigned from ", nameLink(p.from, "ipf:" + p.id)] : null),
       p.update ? h("span", { class: "hint", text: "Latest update: " + p.update }) : null));
 }
 function scriptCard(sc) {
@@ -1415,7 +1435,7 @@ function scriptCard(sc) {
   return h("article", { class: "clip" },
     h("div", { class: "clip-top" }, tape(cat), h("span", { class: "pills" }, declined ? pill("warn", "Can't take it") : pill("", "Sent " + ago(sc.at)))),
     h("h3", { class: "clip-title", text: sc.name }),
-    person(sc.uid),
+    person(sc.uid, null, null, key),
     declined ? quote(displayName(sc.uid) + " couldn't take it " + ago(sc.declined || sc.at), sc.note || "They didn't say why.")
       : h("p", { class: "hint", text: "Waiting for them to accept it. Their " + state.config.deliveryHours + "-hour deadline starts when they do." }),
     h("div", { class: "btn-row" },
@@ -1434,7 +1454,7 @@ function inboxCard(x) {
   return h("article", { class: "clip" },
     h("div", { class: "clip-top" }, tape(cat), h("span", { class: "pills" }, deadlinePill(x, false), pill("info", "Submitted " + ago(p.submittedAt || p.updatedAt)), momentPill(p))),
     h("h3", { class: "clip-title", text: p.name }),
-    person(uid),
+    person(uid, null, null, key),
     p.note ? quote("Note from the editor", p.note) : null,
     metaRow(x),
     h("p", { class: "hint", text: cat.rate != null ? "Marking it received adds " + money(cat.rate) + " to their earnings." : "No pay rate is set for this category." }),
@@ -1450,7 +1470,7 @@ function pastCard(x) {
   return h("article", { class: "clip" },
     h("div", { class: "clip-top" }, tape(cat), h("span", { class: "pills" }, statusPills(x, true))),
     h("h3", { class: "clip-title", text: p.name }),
-    person(uid),
+    person(uid, null, null, key),
     graceBar(x),
     trackBlock(p, false),
     p.update ? quote("Latest update", p.update) : null,
@@ -1469,9 +1489,9 @@ function adminCard(x) {
   return h("article", { class: "clip" },
     h("div", { class: "clip-top" }, tape(cat), h("span", { class: "pills" }, statusPills(x, true), momentPill(p))),
     h("h3", { class: "clip-title", text: p.name }),
-    person(uid),
-    p.from ? h("p", { class: "hint", text: "Reassigned from " + displayName(p.from) }) : null,
-    p.status === "reassigned" && p.movedTo ? h("p", { class: "hint", text: "Now with " + displayName(p.movedTo) }) : null,
+    person(uid, null, null, key),
+    p.from ? h("p", { class: "hint" }, "Reassigned from ", nameLink(p.from, "from:" + key)) : null,
+    p.status === "reassigned" && p.movedTo ? h("p", { class: "hint" }, "Now with ", nameLink(p.movedTo, "to:" + key)) : null,
     p.status === "active" && p.backAt ? quote("Sent back " + ago(p.backAt), p.backNote || "No reason given.") : null,
     graceBar(x),
     p.status === "active" ? trackBlock(p, false) : null,
@@ -1680,7 +1700,7 @@ function rosterCard(s, win, target, rank, peak) {
   if (who && who.role === "editor" && !who.pay) chips.push(pill("", "No payment details"));
   const week = s.wkOn + s.wkLate;
   return h("article", { class: "clip" },
-    h("div", { class: "clip-top" }, h("div", { class: "ranked" }, rank ? h("span", { class: "rank" + (rank === 1 ? " first" : ""), text: String(rank) }) : null, person(s.uid, "lg")), chips.length ? h("span", { class: "pills" }, chips) : null),
+    h("div", { class: "clip-top" }, h("div", { class: "ranked" }, rank ? h("span", { class: "rank" + (rank === 1 ? " first" : ""), text: String(rank) }) : null, person(s.uid, "lg", null, "roster")), chips.length ? h("span", { class: "pills" }, chips) : null),
     h("div", { class: "week" },
       h("p", { class: "week-line" }, h("span", { class: "fact-num", text: String(on) }), h("span", { class: "hint", text: "on time " + (per === "week" ? "this week" : "this month") + (late ? ", " + late + " late" : "") })),
       target && per === "week" ? meter(week, target) : null,
@@ -1693,18 +1713,24 @@ function rosterCard(s, win, target, rank, peak) {
       + " " + (owe.nv + owe.nb ? "To pay covers " + covers(owe) + (owe.paid ? " since then." : ".") : "Nothing new to pay.") }),
     s.last ? h("p", { class: "hint", text: "Last active " + ago(s.last) + "." }) : null,
     h("div", { class: "btn-row" },
-      h("button", { class: "btn small", type: "button", dataset: { fk: "profile:" + s.uid }, onclick: () => openProfile(s.uid) }, "Profile"),
-      h("button", { class: "btn small", type: "button", dataset: { fk: "vids:" + s.uid }, onclick: () => openVideos(s.uid) }, "Videos"),
-      h("button", { class: "btn small", type: "button", dataset: { fk: "view:" + s.uid }, onclick: () => { ui.fEditor = s.uid; ui.fStatus = "all"; ui.fCat = "all"; ui.limit = 40; setTab("projects"); } }, "View projects"),
+      h("button", { class: "btn small", type: "button", dataset: { fk: "profile:" + s.uid }, onclick: () => openProfile(s.uid) }, "Profile and videos"),
+      h("button", { class: "btn small", type: "button", dataset: { fk: "view:" + s.uid }, onclick: () => viewProjectsOf(s.uid) }, "View projects"),
       h("button", { class: "btn small", type: "button", dataset: { fk: "bonus:" + s.uid }, onclick: () => openBonuses(s.uid) }, "Bonuses"),
       owe.nv + owe.nb ? h("button", { class: "btn small", type: "button", dataset: { fk: "payreset:" + s.uid }, onclick: () => openResetPay(s.uid) }, "Reset payment") : null));
 }
+// Projects, showing only this person's.
+function viewProjectsOf(uid) {
+  closeSheet();
+  ui.fEditor = uid; ui.fStatus = "all"; ui.fCat = "all"; ui.limit = 40;
+  setTab("projects");
+}
 // After paying an editor: what they were owed is recorded as paid, and their earnings start again from zero.
-function openResetPay(uid) {
+// back: the sheet to go back to afterwards (their profile), if it was opened from one.
+function openResetPay(uid, back) {
   const u = state.users.get(uid), o = u ? u.owed : null;
   if (!o) return;
   formSheet({
-    title: "Reset payment", submit: "Reset to zero", danger: true,
+    title: "Reset payment", submit: "Reset to zero", danger: true, back: back,
     body: [
       h("p", null, "Have you paid ", h("strong", { text: u.name }), " " + money(o.due) + "? That's " + covers(o) + (o.paid ? " since their last payment on " + shortDate(o.paid) : "") + "."),
       h("p", { class: "hint", text: "Resetting records " + money(o.due) + " as paid today. " + u.name.split(" ")[0] + "'s earnings then start again from zero, on your screen and theirs, and count from the next video you mark received. Anything already paid can't be marked not received, removed or deleted afterwards." })],
@@ -1839,19 +1865,20 @@ function driveSettings() {
   const d = state.config.drive;
   if (!d.on) {
     return [
-      h("p", { text: d.lost ? "Google ended the Drive connection, so editors can't upload right now. Connect it again to carry on; the folder list is kept."
-        : "Connect the studio's Google Drive and editors can upload finished videos straight into folders you choose, instead of sending links. The app can only see those folders and the videos it puts there." }),
-      d.lost && d.folders.length ? h("p", { class: "hint", text: "Folders on the list: " + d.folders.map((f) => f.name).join(", ") + "." }) : null,
-      h("div", { class: "btn-row" }, h("button", { class: "btn primary", type: "button", id: "drive-connect", dataset: { fk: "drive-connect" }, onclick: (e) => driveConnect(e.currentTarget) }, d.lost ? "Connect again" : "Connect Google Drive"))];
+      h("p", { text: d.lost ? "Google ended the Drive connection, so editors can't submit videos right now. Connect it again to carry on; the folder list is kept."
+        : d.only ? "Google Drive is disconnected, so editors can't submit videos until you connect it again. The folder list is kept."
+          : "Connect the studio's Google Drive and editors upload finished videos straight into folders you choose. From then on, uploading is the only way to submit a video, so each one lands in a folder under its brief's name. The app can only see those folders and the videos it puts there." }),
+      (d.lost || d.only) && d.folders.length ? h("p", { class: "hint", text: "Folders on the list: " + d.folders.map((f) => f.name).join(", ") + "." }) : null,
+      h("div", { class: "btn-row" }, h("button", { class: "btn primary", type: "button", id: "drive-connect", dataset: { fk: "drive-connect" }, onclick: (e) => driveConnect(e.currentTarget) }, d.lost || d.only ? "Connect again" : "Connect Google Drive"))];
   }
   const rows = d.folders.length ? d.folders.map((f) => h("li", null,
     h("div", { class: "row-main" }, h("span", { class: "row-title", text: f.name })),
     h("div", { class: "row-actions" }, h("button", { class: "btn small", type: "button", dataset: { fk: "dfolder:" + f.id }, "aria-label": "Remove " + f.name, onclick: (e) => act(e.currentTarget, () => run("er_drive_remove_folder", { p_folder: f.id }), "Folder taken off the list. It stays in your Drive.") }, "Remove"))))
-    : [h("li", { class: "rows-empty", text: "No folders yet. Add the folders editors should upload to." })];
+    : [h("li", { class: "rows-empty", text: "No folders yet. Add the folders editors should upload to: until you do, they can't submit videos." })];
   return [
-    h("p", null, "Connected to ", h("strong", { text: d.email || "your Google account" }), ". Editors can upload to these folders:"),
+    h("p", null, "Connected to ", h("strong", { text: d.email || "your Google account" }), ". Editors submit videos by uploading them to these folders:"),
     h("ul", { class: "rows" }, rows),
-    h("p", { class: "hint", text: "Anyone with an uploaded video's link can watch it, like the links editors send now, so it plays in the app. Adding folders works best on a computer." }),
+    h("p", { class: "hint", text: "Anyone with an uploaded video's link can watch it, so it plays in the app. Adding folders works best on a computer." }),
     h("div", { class: "btn-row" },
       h("a", { class: "btn primary", id: "drive-add", href: "drive-folders.html", dataset: { fk: "drive-add" } }, "Add folders"),
       h("button", { class: "btn", type: "button", id: "drive-off", dataset: { fk: "drive-off" }, onclick: () => openDriveOff() }, "Disconnect"))];
@@ -1866,7 +1893,7 @@ async function driveConnect(btn) {
 function openDriveOff() {
   formSheet({
     title: "Disconnect Google Drive", submit: "Disconnect", danger: true,
-    body: [h("p", { text: "Editors won't be able to upload until you connect it again. Videos already uploaded stay in your Drive, and the folder list is kept." })],
+    body: [h("p", { text: "Editors won't be able to submit videos until you connect it again, as uploading is the only way to submit. Videos already uploaded stay in your Drive, and the folder list is kept." })],
     run: async () => {
       try { await driveCall("disconnect"); } catch (e) { throw new Oops(driveErr(e)); }
       await sync();
@@ -1878,7 +1905,7 @@ function teamRow(u) {
   const me = state.me, manage = u.id !== me.id && !u.owner && (u.role !== "admin" || me.owner);
   return h("li", null,
     h("div", { class: "row-main" },
-      h("div", { class: "row-head" }, person(u.id), u.owner ? pill("info", "Owner") : u.role === "admin" ? pill("info", "Admin") : u.role === "buyer" || u.role === "supervisor" ? pill("info", ROLE_NAMES[u.role]) : null, u.active ? null : pill("warn", "Switched off")),
+      h("div", { class: "row-head" }, person(u.id, null, null, "team"), u.owner ? pill("info", "Owner") : u.role === "admin" ? pill("info", "Admin") : u.role === "buyer" || u.role === "supervisor" ? pill("info", ROLE_NAMES[u.role]) : null, u.active ? null : pill("warn", "Switched off")),
       h("span", { class: "hint", text: "@" + u.username + (u.seen ? ", last seen " + ago(u.seen) : ", hasn't signed in yet") + (u.push ? ", notifications on" : "") })),
     manage ? h("div", { class: "row-actions" }, h("button", { class: "btn small", type: "button", dataset: { fk: "user:" + u.id }, onclick: () => openUser(u.id) }, "Manage")) : null);
 }
@@ -2017,10 +2044,10 @@ function formSheet(o) {
     try {
       const msg = await o.run();
       if (typeof msg === "function") msg();        // the next sheet takes over
-      else { closeSheet(); if (msg) toast(msg); }
+      else { if (o.back) o.back(); else closeSheet(); if (msg) toast(msg); }
     } catch (ex) { err.textContent = ex instanceof Oops ? ex.message : errText(ex); err.hidden = false; go.disabled = false; }
     busy = false;
-  } }, o.body, err, h("div", { class: "btn-row" }, go, h("button", { class: "btn grow", type: "button", onclick: closeSheet }, go ? "Cancel" : "Close")), o.foot || null);
+  } }, o.body, err, h("div", { class: "btn-row" }, go, h("button", { class: "btn grow", type: "button", onclick: o.back || closeSheet }, o.back ? "Back" : go ? "Cancel" : "Close")), o.foot || null);
   openSheet(o.title, [form]);
 }
 const field = (label, control, hint) => h("div", { class: "field" }, h("label", { for: control.id, text: label }), control, hint ? h("p", { class: "hint", text: hint }) : null);
@@ -2045,8 +2072,10 @@ function openBrief() {
     },
   });
 }
-// Submitting a finished video. With the studio's Google Drive connected, the editor uploads it straight into a
-// folder there; pasting a Drive link always works too.
+// Submitting a finished video. Once the studio has connected its Google Drive, the editor uploads it straight
+// into a folder there, and that's the only way: pasting a link is off (the server refuses one too). While the
+// connection is down, or there's no folder to upload to, nobody can submit, and the sheet says why. A studio
+// that has never connected a Drive submits with links.
 // A video is uploaded only under its brief's own name, so it can't go in under the wrong brief, and so into the
 // wrong folder. Capitals, spaces and symbols don't count: "Menotea_10.mp4" and "MENOTEA10.mov" fit the brief
 // "menotea 10"; every letter and number must match, in order, so "menotea 11.mp4" or "menotea 10 (1).mp4" doesn't.
@@ -2055,12 +2084,9 @@ const fileStem = (n) => String(n || "").replace(/\.[A-Za-z0-9]{1,5}$/, "");
 const fitsBrief = (f, p) => nameKey(fileStem(f.name)) === nameKey(p.name);
 function openSubmit(p) {
   const d = state.config.drive;
-  if (!(d.on && d.folders.length)) return openLinkSubmit(p);
-  let mode = "upload", chosen = null;
+  if (!canUpload()) return uploadOnly() ? openNoUpload(p) : openLinkSubmit(p);
+  let chosen = null;
   const before = savedUpload(p.id);
-  const modeBtn = (m, label) => h("button", { type: "button", "aria-pressed": String(m === mode), dataset: { mode: m }, onclick: () => setMode(m) }, label);
-  const seg = h("div", { class: "seg", role: "group", "aria-label": "How to send the video" }, modeBtn("upload", "Upload the video"), modeBtn("link", "Paste a link"));
-  // uploading
   const folder = h("select", { class: "input", id: "s-folder" }, h("option", { value: "", text: "Choose a folder" }), d.folders.map((f) => h("option", { value: f.id, text: f.name })));
   folder.value = before && d.folders.some((f) => f.id === before.folder) ? before.folder : guessFolder(p, d.folders);
   const file = h("input", { class: "vh", id: "s-file", type: "file", accept: "video/*", "aria-label": "Choose the video", tabindex: "-1" });
@@ -2085,11 +2111,6 @@ function openSubmit(p) {
   });
   const uploadPane = h("div", { class: "form" }, field("Folder in your admin's Google Drive", folder),
     h("div", { class: "field" }, h("label", { for: "s-file", text: "Video" }), h("div", { class: "btn-row" }, choose), info, file));
-  // pasting a link
-  const link = h("input", { class: "input", id: "s-link", type: "url", inputmode: "url", autocomplete: "off", autocapitalize: "off", spellcheck: "false", placeholder: "https://drive.google.com/…" });
-  const warn = h("p", { class: "warnline", hidden: true, text: "This doesn't look like a Google Drive link. You can still send it." });
-  link.addEventListener("input", () => { const r = readLink(link.value); warn.hidden = !(r && !r.google); });
-  const linkPane = h("div", { class: "form", hidden: true }, field("Google Drive link", link, "Paste the share link to the finished video, and check that your admin has access to the file. The link can't be changed after you submit."), warn);
   const note = h("textarea", { class: "input", id: "s-note", maxlength: "300", rows: "3" });
   // how the upload is going
   const fill = h("i"), meter = h("div", { class: "meter upload-meter", role: "progressbar", "aria-label": "Upload progress", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": "0" }, fill);
@@ -2099,28 +2120,13 @@ function openSubmit(p) {
   const err = h("p", { class: "error", role: "alert", hidden: true });
   const go = h("button", { class: "btn primary grow wide", type: "submit", id: "s-go" }, "Upload and submit");
   const cancel = h("button", { class: "btn grow", type: "button", id: "s-cancel", onclick: () => (activeUpload ? activeUpload.stop() : closeSheet()) }, "Cancel");
-  const fields = h("div", { class: "form" }, seg, uploadPane, linkPane, field("Note for your admin (optional)", note));
+  const fields = h("div", { class: "form" }, uploadPane, field("Note for your admin (optional)", note));
   const form = h("form", { class: "form", novalidate: true, oninput: () => { err.hidden = true; }, onsubmit: (e) => { e.preventDefault(); submit(); } },
     h("p", null, h("strong", { text: p.name })), fields, progress, err, h("div", { class: "btn-row" }, go, cancel));
-  function setMode(m) {
-    mode = m;
-    for (const b of seg.children) b.setAttribute("aria-pressed", String(b.dataset.mode === m));
-    uploadPane.hidden = m !== "upload"; linkPane.hidden = m !== "link";
-    go.textContent = m === "upload" ? "Upload and submit" : "Submit project";
-    err.hidden = true;
-  }
   const fail = (msg) => { err.textContent = msg; err.hidden = false; };
   async function submit() {
     if (activeUpload || go.disabled) return;
     err.hidden = true;
-    if (mode === "link") {
-      const r = readLink(link.value);
-      if (!r) return fail("Paste the full Google Drive link to your finished video.");
-      go.disabled = true;
-      try { await run("er_submit", { p_project: p.id, p_link: r.href, p_note: note.value.trim() }); closeSheet(); toast("Submitted. It's now in your admin's inbox."); }
-      catch (ex) { fail(errText(ex)); go.disabled = false; }
-      return;
-    }
     if (!folder.value) return fail("Choose the folder to upload to.");
     if (!chosen) return fail("Choose the video to upload.");
     try { localStorage.setItem("editroom.driveFolder", folder.value); } catch (e) { /* the folder isn't remembered for next time */ }
@@ -2289,6 +2295,20 @@ async function holdAwake(on) {
 }
 document.addEventListener("visibilitychange", () => { if (wantAwake && document.visibilityState === "visible") holdAwake(true); });
 window.addEventListener("beforeunload", (e) => { if (sheetHold) { e.preventDefault(); e.returnValue = ""; } });
+// When the studio's Drive is down, or has no folder to upload to, nothing can be submitted: the editor is told
+// why, and who can fix it.
+function openNoUpload(p) {
+  const d = state.config.drive;
+  formSheet({
+    title: "Submit project", submit: null,
+    body: [
+      h("p", null, h("strong", { text: p.name })),
+      h("div", { class: "notice warn", id: "s-paused" },
+        h("strong", { text: "Uploading is paused" }),
+        h("span", { text: (d.on ? "There's no Google Drive folder to upload to yet." : "Your admin's Google Drive isn't connected right now, so videos can't be uploaded.")
+          + (state.isAdmin ? " Fix it in Settings, under Google Drive, then submit." : " Videos can only be submitted by uploading them, so let your admin know. They can fix it in Settings.") }))],
+  });
+}
 function openLinkSubmit(p) {
   const link = h("input", { class: "input", id: "s-link", type: "url", inputmode: "url", autocomplete: "off", autocapitalize: "off", spellcheck: "false", placeholder: "https://drive.google.com/…" });
   const warn = h("p", { class: "warnline", hidden: true, text: "This doesn't look like a Google Drive link. You can still send it." });
@@ -2507,20 +2527,20 @@ function openAmount(uid, p, cur) {
     },
   });
 }
-function openBonuses(uid) {
+function openBonuses(uid, back) {
   const list = state.bonuses.get(uid) || [];
   const amt = h("input", { class: "input", id: "bn-amt", type: "text", inputmode: "decimal", autocomplete: "off" });
   const label = h("input", { class: "input", id: "bn-label", type: "text", maxlength: "80", autocomplete: "off" });
   if (state.prefs.bonusAmount != null) amt.value = String(state.prefs.bonusAmount);
   label.value = ui.period === "week" ? "Top performer, week of " + teamDay(state.weeks[5]) : "Top performer, " + teamMonth(state.month);
   formSheet({
-    title: "Bonuses", submit: "Award bonus",
+    title: "Bonuses", submit: "Award bonus", back: back,
     body: [
       h("p", null, "For ", h("strong", { text: displayName(uid) }), ". A bonus is added to their earnings and shown on the leaderboard every editor sees. The amount stays between you and them."),
       list.length ? h("ul", { class: "rows" }, list.map((b) => h("li", null,
         h("div", { class: "row-main" }, h("span", { class: "row-title", text: b.label || "Bonus" }), h("span", { class: "hint", text: money(b.amt) + ", awarded " + shortDate(b.at) })),
         b.at && b.at <= paidUntil(uid) ? pill("", "Paid")          // in a payment already, so it stays
-          : h("button", { class: "btn small", type: "button", onclick: (e) => act(e.currentTarget, async () => { await run("er_remove_bonus", { p_bonus: b.id }); closeSheet(); }, "Bonus removed") }, "Remove")))) : null,
+          : h("button", { class: "btn small", type: "button", onclick: (e) => act(e.currentTarget, async () => { await run("er_remove_bonus", { p_bonus: b.id }); if (back) back(); else closeSheet(); }, "Bonus removed") }, "Remove")))) : null,
       field(moneyLabel("Bonus amount"), amt),
       field("What it's for", label, "Editors see this line on the leaderboard.")],
     run: async () => {
@@ -2559,8 +2579,7 @@ function openMoment() {
     },
   });
 }
-// Every video an editor has submitted, newest first, each one playable here. An editor sees their own
-// (the latest 400 are already on the phone); an admin sees anyone's, with older ones a page at a time.
+// One submitted video: when, on time or late, received or not (for an admin, with what it paid), playable here.
 function videoRow(uid, p) {
   const f = flagsOf(p), link = parseLink(p.link), embed = link ? driveEmbed(link.href) : null, cat = catOf(p), admin = ui.view === "admin";
   const x = { id: p.id, uid: uid, name: p.name, catId: p.catId, link: p.link };
@@ -2570,22 +2589,27 @@ function videoRow(uid, p) {
       h("span", { class: "hint", text: cat.name + ", submitted " + stamp(p.submittedAt || p.updatedAt) }),
       h("span", { class: "pills" },
         f.onTime ? pill("good", "On time") : pill("warn", "Late by " + span(f.lateBy || 0)),
-        f.received ? pill("", inPayment(uid, f) ? "Paid" : "Received") : pill("info", admin ? "Waiting for you" : "With your admin"))),
+        f.received ? pill("", inPayment(uid, f) ? "Paid" : "Received") : pill("info", admin ? "Waiting for you" : "With your admin"),
+        admin && f.received ? pill("", f.amt != null ? money(f.amt) : "No amount") : null)),
     h("div", { class: "row-actions" },
       embed ? h("button", { class: "btn small", type: "button", dataset: { fk: "vplay:" + p.id }, onclick: () => openPlayer(x, embed, link) }, icon("play", 16), "Play")
         : link ? h("a", { class: "btn small", href: link.href, target: "_blank", rel: "noopener noreferrer" }, "Open", icon("out", 15, 2.6)) : null));
 }
-function openVideos(uid) {
+// Every video someone has submitted, newest first, each one playable here. An editor sees their own (the
+// latest 400 are already on the phone); an admin sees anyone's, with older ones fetched a page at a time.
+// first: show only that many until "Show all" is pressed. start() fetches the first older page.
+function videoList(uid, first) {
   const admin = ui.view === "admin", seen = new Map();
   const m = state.projects.get(uid);
   if (m) for (const p of m.values()) if (p.status === "submitted" && p.link) seen.set(p.id, p);
   const note = h("p", { class: "hint" }), list = h("ul", { class: "rows vid-list" }), more = h("div", { class: "btn-row" });
-  let next = null, done = !admin || !state.isAdmin, busy = false, failed = false;
+  let next = null, done = !admin || !state.isAdmin, busy = false, failed = false, limit = first || Infinity;
   const draw = () => {
-    const rows = Array.from(seen.values()).sort((a, b) => (b.submittedAt || 0) - (a.submittedAt || 0));
+    const rows = Array.from(seen.values()).sort((a, b) => (b.submittedAt || 0) - (a.submittedAt || 0)), shown = rows.slice(0, limit);
     note.textContent = rows.length ? plural(rows.length, "video", "videos") + (done ? "" : " so far") + ", newest first." : busy ? "Loading…" : "";
-    list.replaceChildren.apply(list, rows.length ? rows.map((p) => videoRow(uid, p)) : [h("li", { class: "rows-empty", text: busy ? "Loading…" : uid === state.me.id && !admin ? "You haven't submitted a video yet." : "No videos submitted yet." })]);
-    more.replaceChildren.apply(more, done ? [] : [h("button", { class: "btn small", type: "button", disabled: busy, onclick: () => page() }, failed ? "Try again" : busy ? "Loading…" : "Show older videos")]);
+    list.replaceChildren.apply(list, shown.length ? shown.map((p) => videoRow(uid, p)) : [h("li", { class: "rows-empty", text: busy ? "Loading…" : uid === state.me.id && !admin ? "You haven't submitted a video yet." : "No videos submitted yet." })]);
+    more.replaceChildren.apply(more, rows.length > limit ? [h("button", { class: "btn small", type: "button", dataset: { fk: "vall:" + uid }, onclick: () => { limit = Infinity; draw(); } }, done ? "Show all " + rows.length : "Show more")]
+      : done ? [] : [h("button", { class: "btn small", type: "button", disabled: busy, onclick: () => page() }, failed ? "Try again" : busy ? "Loading…" : "Show older videos")]);
   };
   const page = async () => {
     if (busy || done) return;
@@ -2599,9 +2623,13 @@ function openVideos(uid) {
     busy = false;
     if (list.isConnected) draw();
   };
-  openSheet(uid === state.me.id && !admin ? "Your videos" : displayName(uid) + "'s videos", [note, list, more, h("div", { class: "btn-row tools" }, h("button", { class: "btn grow", type: "button", onclick: closeSheet }, "Close"))]);
   draw();
-  if (!done) page();
+  return { nodes: [note, list, more], start: () => { if (!done) page(); } };
+}
+function openVideos(uid) {
+  const v = videoList(uid);
+  openSheet(uid === state.me.id && ui.view !== "admin" ? "Your videos" : displayName(uid) + "'s videos", v.nodes.concat(h("div", { class: "btn-row tools" }, h("button", { class: "btn grow", type: "button", onclick: closeSheet }, "Close"))));
+  v.start();
 }
 // Who each reminder would reach right now, from what the admin's app already has. The server works it out
 // again when one is sent.
@@ -2853,11 +2881,17 @@ function openDetails() {
     },
   });
 }
-// An editor's profile, for an admin: who they are, and their payment details, fetched when it opens.
+// Someone's profile, for an admin, opened from their name anywhere in the app: what they've earned and been
+// paid, how their work is going, every video they've submitted (playable), their payments, and their payment
+// details (fetched when it opens).
 function openProfile(uid) {
   const u = state.users.get(uid);
   if (!u) return;
   const first = u.name.split(" ")[0], body = h("div", { class: "part", id: "pf-pay" }), paidBox = h("div", { class: "part", id: "pf-paid", hidden: true });
+  const o = u.owed || normOwed(null), earn = earnedOf(uid), s = editorStats(uid), made = u.made, back = () => openProfile(uid);
+  const row = (label, value) => h("div", null, h("dt", { text: label }), h("dd", { text: value }));
+  const tally = (on, late) => on + " on time" + (late ? ", " + late + " late" : "");
+  const vids = videoList(uid, 5);
   const draw = (nodes) => body.replaceChildren.apply(body, [h("h3", { class: "part-title", text: "Payment details" })].concat(nodes.filter(Boolean)));
   const load = async () => {
     draw([h("p", { class: "hint", text: "Loading…" })]);
@@ -2870,7 +2904,7 @@ function openProfile(uid) {
         pays.length ? h("ul", { class: "rows" }, pays.map((x) => h("li", null,
           h("div", { class: "row-main" }, h("span", { class: "row-title", text: shortDate(x.at) }), h("span", { class: "hint", text: covers(x) })),
           h("span", { class: "amount", text: money(x.amt) }))))
-          : h("p", { class: "hint", text: "No payments recorded yet. After paying " + first + ", press Reset payment on their card on the Editors screen." }));
+          : h("p", { class: "hint", text: "No payments recorded yet. After paying " + first + ", press Reset payment at the top of this page." }));
       if (!d) { draw([empty("No payment details yet.", first + " sees a reminder on their home screen until they add them.")]); return; }
       draw([
         ch ? h("div", { class: "notice warn" }, h("strong", { text: "Bank details changed " + shortDate(num(ch.at)) }),
@@ -2882,12 +2916,35 @@ function openProfile(uid) {
       draw([h("p", { class: "error", role: "alert", text: errText(e) }), h("div", { class: "btn-row" }, h("button", { class: "btn small", type: "button", onclick: load }, "Try again"))]);
     }
   };
-  openSheet(u.name, [h("div", { class: "form" },
-    h("div", { class: "pic-row" }, avatar(uid, "lg"), h("div", { class: "row-main" },
-      h("span", { class: "row-title", text: "@" + u.username }),
-      h("span", { class: "hint", text: u.seen ? "Last seen " + ago(u.seen) : "Hasn't signed in yet" }))),
-    body, paidBox,
-    h("div", { class: "btn-row" }, h("button", { class: "btn grow", type: "button", onclick: closeSheet }, "Close")))]);
+  openSheet(u.name, [h("div", { class: "form profile" },
+    h("div", { class: "pic-row" }, zoomable(uid, "lg"), h("div", { class: "row-main" },
+      h("span", { class: "row-head" }, h("span", { class: "row-title", text: "@" + u.username }), u.role === "admin" ? pill("info", "Admin") : null),
+      h("span", { class: "hint", text: fullStop([s.last ? "Last worked on a brief " + ago(s.last) : "No work yet", u.seen ? "last seen " + ago(u.seen) : "hasn't signed in yet"].join(", ")) }))),
+    // what they've earned, and been paid
+    h("section", { class: "slate", id: "pf-money", "aria-label": first + "'s earnings" },
+      h("p", { class: "slate-label", text: "To pay" }),
+      hero(money(o.due)),
+      h("p", { class: "hint", text: o.paid ? (o.nv + o.nb ? "Earned since their last payment on " + shortDate(o.paid) + ": " + covers(o) + "." : "Nothing new since their last payment on " + shortDate(o.paid) + ".")
+        : o.nv + o.nb ? "Everything they've earned in the app so far, as no payment has been recorded yet: " + covers(o) + "." : "Nothing earned yet." }),
+      h("dl", { class: "slate-rows" },
+        row("Earned in total", money(earn.total)), row("Of that, from bonuses", money(earn.bonus)), row("Paid so far", money(Math.max(0, earn.total - o.due))), row("Last payment", o.paid ? money(o.paidAmt) + ", " + shortDate(o.paid) : "None yet")),
+      h("div", { class: "btn-row" },
+        o.nv + o.nb ? h("button", { class: "btn primary", type: "button", id: "pf-reset", onclick: () => openResetPay(uid, back) }, "Reset payment") : null,
+        h("button", { class: "btn", type: "button", id: "pf-bonus", onclick: () => openBonuses(uid, back) }, "Bonuses"))),
+    // how their work is going
+    h("div", { class: "part", id: "pf-work" },
+      h("h3", { class: "part-title", text: "Work" }),
+      h("dl", { class: "facts" },
+        fact(made ? String(made.n) : "–", "Videos made", made ? made.ok + " approved" : null), fact(String(s.active), "In progress"),
+        fact(s.rate != null ? Math.round(s.rate * 100) + "%" : "–", "On time, last 4 weeks"), fact(s.avg != null ? span(s.avg) : "–", "Average turnaround")),
+      h("p", { class: "hint", text: "This week " + tally(s.wkOn, s.wkLate) + ". This month " + tally(s.moOn, s.moLate) + "." })),
+    // every video they've submitted
+    h("div", { class: "part", id: "pf-vids" }, h("h3", { class: "part-title", text: "Videos" }), vids.nodes),
+    paidBox, body,
+    h("div", { class: "btn-row" },
+      h("button", { class: "btn grow", type: "button", id: "pf-projects", onclick: () => viewProjectsOf(uid) }, "View projects"),
+      h("button", { class: "btn grow", type: "button", onclick: closeSheet }, "Close")))]);
+  vids.start();
   load();
 }
 // Day, night, or whatever the phone is set to: for this phone only, and in effect at once. theme.js, which
@@ -3043,6 +3100,15 @@ function renderBanners() {
     h("strong", { text: "This is the editor screen, as your editors see it." }),
     h("span", { text: "Anything you log here is saved under your name. You can delete it from Projects afterwards." }),
     h("button", { class: "btn small", type: "button", id: "back-admin", onclick: () => { ui.view = "admin"; window.scrollTo(0, 0); schedule(); } }, "Back to admin")));
+  // once uploading is the only way to submit, a Drive that's down stops every editor: say so on every admin screen
+  if (state.phase === "ready" && state.isAdmin && ui.view === "admin" && uploadOnly() && !canUpload()) {
+    const d = state.config.drive;
+    out.push(h("div", { class: "notice crit", id: "drive-down" },
+      h("strong", { text: "Editors can't submit videos right now." }),
+      h("span", { text: d.on ? "There's no Google Drive folder for them to upload to. Add one in Settings, under Google Drive."
+        : (d.lost ? "Google ended the Drive connection." : "Google Drive is disconnected.") + " Connect it again in Settings, under Google Drive." }),
+      ui.tab !== "settings" ? h("button", { class: "btn small", type: "button", id: "drive-fix", onclick: () => { setTab("settings"); requestAnimationFrame(() => { const el = $("drive-panel"); if (el) el.scrollIntoView({ block: "start" }); }); } }, "Open Settings") : null));
+  }
   if (state.phase === "ready" && state.isAdmin && (ui.view === "buyer" || ui.view === "supervisor")) out.push(h("div", { class: "notice" },
     h("strong", { text: ui.view === "buyer" ? "This is the media buyer screen, as your media buyers see it." : "This is the supervisor screen, as your supervisors see it." }),
     h("span", { text: "Looking at it changes nothing for them. Download and Watch work here too." }),

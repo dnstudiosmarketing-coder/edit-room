@@ -231,11 +231,25 @@ try {
     "and lists it under In progress, with who has it, how far along it is and how long is left", (await inRow.innerText()).replace(/\n/g, " | "));
   await admin.locator("#in-progress").scrollIntoViewIfNeeded();
   await look(admin, "10a-admin-inbox-progress", "admin inbox with a brief in progress");
+  // an editor's name opens their profile, wherever it shows
+  await inRow.getByRole("button", { name: "Ada Obi" }).click();
+  await sheet(admin).locator("#pf-money").waitFor();
+  ok((await admin.locator("#sheet-title").innerText()) === "Ada Obi" && /To pay\s*\$0/.test(await sheet(admin).locator("#pf-money").innerText()) && /Nothing earned yet\./.test(await sheet(admin).locator("#pf-money").innerText())
+    && /Videos made\s*0/.test(await sheet(admin).locator("#pf-work").innerText()) && /In progress\s*1/.test(await sheet(admin).locator("#pf-work").innerText()),
+    "tapping an editor's name in the inbox opens their profile: what they've earned and how their work is going", (await sheet(admin).locator("#pf-money").innerText()).replace(/\n/g, " | "));
+  await sheet(admin).getByRole("button", { name: "Close" }).click();
+  await closed(admin);
   await tab(admin, "projects");
   const aCard = admin.locator("#p-list article.clip", { hasText: "Night market short" });
   await aCard.waitFor();
   ok(/Ada Obi/.test(await aCard.innerText()) && /Waiting on the voice-over/.test(await aCard.innerText()) && /Stage 2 of 3/.test(await aCard.locator(".track").getAttribute("aria-label")), "the admin sees who has it, the stage and the latest update");
   await look(admin, "10-admin-projects-active", "admin projects, one in progress");
+  await aCard.getByRole("button", { name: "Ada Obi" }).click();
+  await sheet(admin).locator("#pf-money").waitFor();
+  ok((await admin.locator("#sheet-title").innerText()) === "Ada Obi", "and in Projects");
+  await sheet(admin).getByRole("button", { name: "Close" }).click();
+  await closed(admin);
+  ok((await ada.locator(".name-link").count()) === 0, "an editor's own screen has no names that open profiles");
 
   await card.getByRole("button", { name: "Submit with Drive link" }).click();
   await sheet(ada).getByRole("button", { name: "Submit project" }).click();
@@ -493,20 +507,36 @@ try {
   await adaCard.waitFor();
   ok((await admin.locator("#view article.clip").count()) === 3 && /To pay/.test(await adaCard.innerText()) && /earned in total/.test(await adaCard.innerText()), "every editor has a card with their numbers, including what they're owed");
   await look(admin, "23-editors", "admin editors");
-  // each editor's submitted videos, on a page of their own
-  await adaCard.getByRole("button", { name: "Videos", exact: true }).click();
-  await sheet(admin).getByText("Ada Obi's videos").waitFor();
+  // each editor's profile, from their name: what they've earned, and every video they've submitted
+  ok((await adaCard.getByRole("button", { name: "Videos", exact: true }).count()) === 0, "videos are in the profile now, not behind a button of their own");
+  await adaCard.locator(".person .name-link").click();
+  await sheet(admin).locator("#pf-money").waitFor();
+  const adaEarned = (await sql("select coalesce(sum(amount), 0)::float as v from app.projects where editor_id = (select id from app.users where username = 'ada.obi') and received_at is not null and not deleted")).rows[0].v;
+  const pfMoney = (await sheet(admin).locator("#pf-money").innerText()).replace(/\s+/g, " ");
+  const dollars = (n) => "$" + (Math.abs(n - Math.round(n)) < 0.005 ? Math.round(n).toLocaleString("en-US") : n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  ok((await admin.locator("#sheet-title").innerText()) === "Ada Obi" && adaEarned > 0 && pfMoney.includes("Earned in total " + dollars(adaEarned)) && /Last payment None yet/.test(pfMoney)
+    && (await sheet(admin).locator("#pf-reset").count()) === 1, "an editor's profile shows what they're owed, what they've earned in all and been paid, with Reset payment", pfMoney);
   const vrow = sheet(admin).locator(".vid-list > li", { hasText: "Night market short" });
   await vrow.waitFor();
   await sheet(admin).getByText("1 video, newest first.").waitFor();
-  ok(/On time/.test(await vrow.innerText()) && /Received/.test(await vrow.innerText()) && /Shorts, submitted /.test(await vrow.innerText()), "an editor's videos page lists what they submitted: when, on time or late, received or not", (await vrow.innerText()).replace(/\n/g, " | "));
-  await look(admin, "23b-editor-videos", "one editor's videos");
+  ok(/On time/.test(await vrow.innerText()) && /Received/.test(await vrow.innerText()) && /Shorts, submitted /.test(await vrow.innerText()) && /\$\d/.test(await vrow.locator(".pills").innerText()),
+    "and lists the videos they submitted: when, on time or late, received or not, and what each paid", (await vrow.innerText()).replace(/\n/g, " | "));
+  ok(/Videos made\s*1\s*1 approved/.test(await sheet(admin).locator("#pf-work").innerText()), "with how many they've made", (await sheet(admin).locator("#pf-work").innerText()).replace(/\n/g, " | "));
+  await look(admin, "23b-editor-videos", "one editor's profile, with their videos");
+  await admin.setViewportSize({ width: 390, height: 2400 });          // the whole profile at once, for the record
+  await look(admin, "23c-profile-full", "a whole profile");
+  await admin.setViewportSize({ width: 390, height: 844 });
   await vrow.getByRole("button", { name: "Play" }).click();
   await admin.locator("#player .player-frame").waitFor();
   ok((await frameSrc(admin)) === "https://drive.google.com/file/d/abc123/preview", "each video plays straight from the list");
   await admin.keyboard.press("Escape");
   await admin.waitForFunction(() => !document.getElementById("player").open);
-  ok(await admin.evaluate(() => document.getElementById("sheet").open), "closing the video goes back to the list");
+  ok(await admin.evaluate(() => document.getElementById("sheet").open), "closing the video goes back to the profile");
+  // Bonuses from the profile come back to it
+  await sheet(admin).locator("#pf-bonus").click();
+  await sheet(admin).getByRole("button", { name: "Back" }).click();
+  await sheet(admin).locator("#pf-money").waitFor();
+  ok(true, "Bonuses opened from a profile goes back to it");
   await sheet(admin).getByRole("button", { name: "Close" }).click();
   await closed(admin);
   await adaCard.getByRole("button", { name: "Bonuses" }).click();
@@ -648,7 +678,8 @@ try {
   await tab(admin, "settings");
   const team = admin.locator("#view .rows").first();
   const manage = async (name) => { await team.locator("> li", { hasText: name }).getByRole("button", { name: "Manage" }).click(); await sheet(admin).getByText("Manage login").waitFor(); };
-  ok((await team.locator("> li", { hasText: "Sam Okafor" }).getByRole("button").count()) === 0, "the owner's own row has nothing to switch off by mistake");
+  ok((await team.locator("> li", { hasText: "Sam Okafor" }).locator("button:not(.name-link)").count()) === 0, "the owner's own row has nothing to switch off by mistake");
+  ok((await team.locator("> li", { hasText: "Ada" }).locator(".name-link").count()) === 1, "and an editor's name in the team list opens their profile too");
   await manage("Tunde Bello");
   await sheet(admin).getByRole("button", { name: "New password" }).click();
   const newPw = await admin.inputValue("#pw-new");
@@ -694,7 +725,7 @@ try {
   ok(true, "someone made an admin gets the admin screens");
   await tab(chidi, "settings");
   await chidi.getByText("Team logins").waitFor();
-  ok((await chidi.locator("#view .rows").first().locator("> li", { hasText: "Sam Okafor" }).getByRole("button").count()) === 0 && (await chidi.locator("#view .rows").first().locator("> li", { hasText: "Tunde Bello" }).getByRole("button", { name: "Manage" }).count()) === 1, "a second admin can manage editors but not the owner");
+  ok((await chidi.locator("#view .rows").first().locator("> li", { hasText: "Sam Okafor" }).locator("button:not(.name-link)").count()) === 0 && (await chidi.locator("#view .rows").first().locator("> li", { hasText: "Tunde Bello" }).getByRole("button", { name: "Manage" }).count()) === 1, "a second admin can manage editors but not the owner");
   await manage("Chidi Nwosu");
   await admin.selectOption("#mu-role", "editor");
   await sheet(admin).getByRole("button", { name: "Save", exact: true }).click();
@@ -830,17 +861,21 @@ try {
   await adaHist.locator(".readout b").waitFor();
   ok(/videos? in the week of .*: \d+ on time, \d+ late\./.test(await adaHist.locator(".readout").innerText()), "tapping a week's bar gives that week's numbers", await adaHist.locator(".readout").innerText());
   await look(admin, "30c-editors-history", "editors with weeks of history");
-  // the videos page reaches back through all of them, a page at a time
+  // the profile's videos reach back through all of them, a page at a time
   const adaTotal = (await sql("select count(*)::int as n from app.projects where editor_id = $1 and status = 'submitted' and not deleted and link is not null", [adaId])).rows[0].n;
-  await adaHist.getByRole("button", { name: "Videos", exact: true }).click();
+  await adaHist.locator(".person .name-link").click();
   await sheet(admin).getByText(/videos so far, newest first\./).waitFor();
+  await sheet(admin).getByRole("button", { name: "Show more" }).waitFor();
+  ok((await sheet(admin).locator(".vid-list > li").count()) === 5, "the profile shows the latest five videos at first");
+  await sheet(admin).getByRole("button", { name: "Show more" }).click();
   for (let i = 0; i < 6 && (await sheet(admin).getByRole("button", { name: "Show older videos" }).count()); i++) {
     await sheet(admin).getByRole("button", { name: "Show older videos" }).click();
     await admin.waitForTimeout(250);
   }
   await sheet(admin).getByText(adaTotal + " videos, newest first.").waitFor();
   const vnames = await sheet(admin).locator(".vid-list .row-title").allInnerTexts();
-  ok(vnames.length === adaTotal && vnames.includes("Archive video 100") && vnames.includes("Night market short"), "every video an editor ever submitted can be reached from their page", vnames.length + " of " + adaTotal);
+  ok(vnames.length === adaTotal && vnames.includes("Archive video 100") && vnames.includes("Night market short"), "every video an editor ever submitted can be reached from their profile", vnames.length + " of " + adaTotal);
+  ok((await sheet(admin).locator("#pf-work .fact", { hasText: "Videos made" }).locator(".fact-num").innerText()) === String(adaTotal), "and the profile counts them all", String(adaTotal));
   await sheet(admin).getByRole("button", { name: "Close" }).click();
   await closed(admin);
 
@@ -1354,6 +1389,12 @@ try {
   await look(admin, "54-admin-uploads", "the admin's uploads by day");
   await admin.locator("#up-more").click();
   ok(await until(async () => (await upDays.locator(".day-count").count()) === 28), "Show 14 more days reaches further back");
+  const upName = upDays.locator("li.day.open .day-videos .name-link").first(), upWho = (await upName.innerText()).trim();
+  await upName.click();
+  await sheet(admin).locator("#pf-money").waitFor();
+  ok((await admin.locator("#sheet-title").innerText()) === upWho, "a name in the uploads opens that editor's profile", upWho);
+  await sheet(admin).getByRole("button", { name: "Close" }).click();
+  await closed(admin);
   // a supervisor: the media buyers' screen, and the uploads by day
   await tab(admin, "settings");
   await admin.locator("#add-user").click();
@@ -1376,6 +1417,7 @@ try {
   ok((await sade.locator("#view .slate .week-num").innerText()) === String(todays.length) && (await sade.locator("#up-days .day-count").allInnerTexts()).join() === perDay.join(), "their Uploads show the same as the admin's");
   const statuses = await sade.locator("#up-days .day-videos .pill").allInnerTexts();
   ok(statuses.length === todays.length && statuses.every((t) => t === "Approved" || t === "Waiting for approval"), "each of today's videos says whether it's approved yet", statuses.join(","));
+  ok((await sade.locator(".name-link").count()) === 0 && /Ada O\./.test(await sade.locator("#up-days .day-videos").first().innerText()), "a supervisor sees who made each video, but can't open anyone's profile");
   await look(sade, "55-supervisor-uploads", "the supervisor's uploads by day");
   await tab(sade, "videos");
   const sadeCards = sade.locator("#view article.clip");
@@ -1415,6 +1457,14 @@ try {
   const payout = (await sql("select amount::float as amount, videos from app.payouts p join app.users u on u.id = p.editor_id where u.username = 'ada.obi'")).rows;
   ok(payout.length === 1 && payout[0].amount === Number(owedAda.due) && /Last paid .+, \$/.test(await adaPay.innerText()) && (await adaPay.getByRole("button", { name: "Reset payment" }).count()) === 0,
     "after the reset the card shows nothing to pay and when they were last paid, and the payment is on record", JSON.stringify(payout));
+  await adaPay.locator(".person .name-link").click();
+  await sheet(admin).locator("#pf-paid .rows li").first().waitFor();
+  const pfAfter = (await sheet(admin).locator("#pf-money").innerText()).replace(/\s+/g, " ");
+  ok(/^To pay \$0 Nothing new since their last payment on /.test(pfAfter) && pfAfter.includes("Paid so far " + usd(Number(owedAda.due))) && pfAfter.includes("Last payment " + usd(Number(owedAda.due)))
+    && (await sheet(admin).locator("#pf-reset").count()) === 0 && (await sheet(admin).locator("#pf-paid .rows li").count()) === 1, "and their profile shows the payment, with nothing left to pay", pfAfter);
+  await look(admin, "60b-profile-after-payment", "an editor's profile after a payment");
+  await sheet(admin).getByRole("button", { name: "Close" }).click();
+  await closed(admin);
   await sync(ada);
   await tab(ada, "earn");
   await ada.locator(".week-num", { hasText: "$0" }).waitFor();

@@ -143,6 +143,12 @@ try {
   ok(row.done && row.file_id === made.id && row.result === "submitted", "the upload is recorded as done", JSON.stringify(row));
   ok((await call({ action: "finish", token: TA, upload: up1.upload, file: made.id })).body.link === r.body.link, "finishing again just gives the link back");
   ok((await call({ action: "start", token: TA, project: p1, folder: folderId("Proxan"), size: 10, type: "video/mp4" })).body.error === "not_found", "a submitted brief can't take another upload");
+  // with the studio's Drive connected, uploading is the only way to submit: the web API refuses a pasted link
+  const pasted = (await db.rpc("er_log_brief", { p_token: TA, p_name: "Proxan video 15", p_category: cat })).id;
+  let refused = null;
+  try { await db.rpc("er_submit", { p_token: TA, p_project: pasted, p_link: "https://drive.google.com/file/d/pasted15/view" }); } catch (e) { refused = String(e && e.message); }
+  ok(/upload_only/.test(refused) && (await db.sql("select status from app.projects where id = $1", [pasted])).rows[0].status === "active", "a pasted link is refused: the brief stays in progress", refused);
+  await db.rpc("er_delete_project", { p_token: A, p_project: pasted });
 
   // ---- keys that run out, a folder that's gone, a connection Google ends
   const p2 = (await db.rpc("er_log_brief", { p_token: TA, p_name: "Proxan video 14", p_category: cat })).id;

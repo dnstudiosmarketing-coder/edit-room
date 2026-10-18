@@ -5,8 +5,8 @@
 // this function asks Google for an upload address for that one file and hands it to the editor's browser,
 // which sends the video there itself, a piece at a time, so a dropped connection costs only the piece in
 // flight and the rest carries on later. Once it's all there, the function checks the file, lets anyone with
-// its link view it (as the links editors send already do, so it plays inside the app), and submits the brief
-// with that link.
+// its link view it (so it plays inside the app), and submits the brief with that link. Once the studio's Drive
+// is connected, this is the only way a brief can be submitted: the database refuses pasted links.
 //
 // It also keeps the scripts an admin sends editors through the app: each one goes into a "DN Studios scripts"
 // folder it makes in the same Drive, and comes back out of it only for an admin, or for the editor who has
@@ -325,7 +325,7 @@ async function finish(token, b, sql, cfg) {
   }
   const link = "https://drive.google.com/file/d/" + file + "/view";
   try {
-    await sql`select public.er_submit(${token}, ${u.project}, ${link}, ${String(b.note || "").slice(0, 400)})`;
+    await sql`select app.drive_submit(${token}, ${u.upload}, ${link}, ${String(b.note || "").slice(0, 400)})`;
   } catch (e) {
     await sql`select app.drive_done(${u.upload}, ${file}, ${null}, ${"in Drive, but the brief couldn't be submitted: " + codeOf(e)})`;
     throw e;

@@ -89,7 +89,7 @@ export async function run({ ok, srv, google, sql, db, SELF, APP, APP_URL, ids })
     await admin.locator('#tabs button[data-tab="settings"]').click();
     const panel = admin.locator("#drive-panel");
     await panel.getByText("Connected to").waitFor();
-    ok(/Connected to studio@example\.com\. Editors can upload to these folders:/.test(await panel.innerText()) && (await panel.locator(".rows .row-title").allInnerTexts()).join() === "Menoprime,Proxan",
+    ok(/Connected to studio@example\.com\. Editors submit videos by uploading them to these folders:/.test(await panel.innerText()) && (await panel.locator(".rows .row-title").allInnerTexts()).join() === "Menoprime,Proxan",
       "Settings show which Google account is connected, and the folders editors can upload to", (await panel.innerText()).replace(/\n/g, " | "));
     await panel.scrollIntoViewIfNeeded();
     await shot(admin, "1-settings-drive");
@@ -115,7 +115,10 @@ export async function run({ ok, srv, google, sql, db, SELF, APP, APP_URL, ids })
     await sheet(admin).getByRole("button", { name: "Disconnect" }).click();
     await toast(admin, "Google Drive disconnected");
     await admin.locator("#drive-connect").waitFor();
-    ok(/Connect the studio's Google Drive/.test(await admin.locator("#drive-panel").innerText()) && !/\b(null|undefined)\b/.test(await admin.locator("#drive-panel").innerText()), "once disconnected, Settings offer to connect it", await admin.locator("#drive-panel").innerText());
+    ok(/Google Drive is disconnected, so editors can't submit videos until you connect it again\./.test(await admin.locator("#drive-panel").innerText()) && (await admin.locator("#drive-connect").innerText()) === "Connect again"
+      && !/\b(null|undefined)\b/.test(await admin.locator("#drive-panel").innerText()), "once disconnected, Settings say editors can't submit, and offer to connect it again", await admin.locator("#drive-panel").innerText());
+    await admin.locator("#drive-down").waitFor();
+    ok(/^Editors can't submit videos right now\.\s*Google Drive is disconnected\. Connect it again in Settings, under Google Drive\.$/.test((await admin.locator("#drive-down").innerText()).trim()), "and every admin screen says so", await admin.locator("#drive-down").innerText());
     await admin.route(google.url + "/auth**", (route) => {        // Google's screen, where the admin says yes
       const state = new URL(route.request().url()).searchParams.get("state");
       route.fulfill({ status: 302, headers: { Location: SELF + "?state=" + state + "&code=" + google.code(SELF) } });
@@ -123,7 +126,7 @@ export async function run({ ok, srv, google, sql, db, SELF, APP, APP_URL, ids })
     await admin.locator("#drive-connect").click();
     await toast(admin, "Google Drive connected. Now add the folders editors can upload to.");
     await admin.locator("#drive-panel").getByText("Connected to").waitFor();
-    ok(admin.url() === APP_URL && (await admin.locator("#drive-panel .rows .row-title").allInnerTexts()).join() === "Menotea,Proxan",
+    ok(admin.url() === APP_URL && (await admin.locator("#drive-panel .rows .row-title").allInnerTexts()).join() === "Menotea,Proxan" && (await admin.locator("#drive-down").count()) === 0,
       "Connect Google Drive goes to Google and comes back connected, with the folders as they were", admin.url());
 
     /* ------------------------------------------------ an editor's upload, with the line dropping part way */
@@ -132,7 +135,8 @@ export async function run({ ok, srv, google, sql, db, SELF, APP, APP_URL, ids })
     let ada = await opened(ectx);
     const card = (page, name) => page.locator("article.clip", { hasText: name });
     await card(ada, "Proxan video 21").getByRole("button", { name: "Submit video" }).click();
-    await sheet(ada).getByRole("button", { name: "Upload the video" }).waitFor();
+    await sheet(ada).locator("#s-choose").waitFor();
+    ok((await sheet(ada).getByRole("button", { name: "Paste a link" }).count()) === 0 && (await ada.locator("#s-link").count()) === 0, "uploading is the only way to submit: there's no link to paste");
     const proxanId = (await db.rpc("er_state", { p_token: ids.TA })).settings.drive.folders.find((f) => f.name === "Proxan").id;
     ok((await ada.locator("#s-folder").inputValue()) === proxanId, "the folder named like the brief's category is chosen for the editor");
     ok((await ada.locator("#s-file-info").innerText()) === "The finished video, from your phone or computer. Its file must be named like the brief: Proxan video 21.", "the editor is told the video must be named like the brief", await ada.locator("#s-file-info").innerText());
@@ -280,22 +284,22 @@ export async function run({ ok, srv, google, sql, db, SELF, APP, APP_URL, ids })
     ok(tundeNames === "Proxan script 16,Proxan video 27,Proxan video 28" && Buffer.compare(inDrive("Proxan video 28.pdf").content, s28.buf) === 0, "both arrive in Drive and on the editor's screen", tundeNames);
     await admin.locator('#tabs button[data-tab="settings"]').click();
 
-    /* ------------------------------------------------ pasting a link still works, and so does a phone without Drive */
+    /* ------------------------------------------------ uploading is the only way to submit, even while Drive is down */
     const brief4 = (await db.rpc("er_log_brief", { p_token: ids.TA, p_name: "Proxan video 24", p_category: ids.cat })).id;
-    await ada.reload();
-    await card(ada, "Proxan video 24").getByRole("button", { name: "Submit video" }).click();
-    await sheet(ada).getByRole("button", { name: "Paste a link" }).click();
-    await ada.fill("#s-link", "https://drive.google.com/file/d/pasted24/view");
-    await sheet(ada).getByRole("button", { name: "Submit project" }).click();
-    await toast(ada, "Submitted. It's now in your admin's inbox.");
-    ok((await project(brief4)).link === "https://drive.google.com/file/d/pasted24/view", "the editor can still paste a link instead");
+    let pasteRefused = null;
+    try { await db.rpc("er_submit", { p_token: ids.TA, p_project: brief4, p_link: "https://drive.google.com/file/d/pasted24/view" }); } catch (e) { pasteRefused = String(e && e.message); }
+    ok(/upload_only/.test(pasteRefused) && (await project(brief4)).status === "active", "a link sent some other way is refused too", pasteRefused);
     await admin.locator("#drive-panel").getByRole("button", { name: "Disconnect" }).click();
+    ok(/Editors won't be able to submit videos until you connect it again/.test(await sheet(admin).innerText()), "disconnecting warns that editors won't be able to submit");
     await sheet(admin).getByRole("button", { name: "Disconnect" }).click();
     await toast(admin, "Google Drive disconnected");
-    const brief5 = (await db.rpc("er_log_brief", { p_token: ids.TA, p_name: "Proxan video 25", p_category: ids.cat })).id;
     await ada.reload();
-    await card(ada, "Proxan video 25").getByRole("button", { name: "Submit with Drive link" }).waitFor();
-    ok(!!brief5, "with Drive disconnected, editors submit with a link as before");
+    await card(ada, "Proxan video 24").getByRole("button", { name: "Submit video" }).click();
+    await sheet(ada).locator("#s-paused").waitFor();
+    ok(/^Uploading is paused\s*Your admin's Google Drive isn't connected right now, so videos can't be uploaded\. Videos can only be submitted by uploading them, so let your admin know\. They can fix it in Settings\.$/.test((await sheet(ada).locator("#s-paused").innerText()).trim())
+      && (await ada.locator("#s-link").count()) === 0 && (await ada.locator("#s-file").count()) === 0, "with Drive disconnected, an editor is told uploading is paused, and there's no other way to submit", await sheet(ada).locator("#s-paused").innerText());
+    await shot(ada, "7-upload-paused");
+    await sheet(ada).getByRole("button", { name: "Close" }).click();
     await browser.close();
   } catch (e) {
     ok(false, "the browser run stopped early", String(e && e.message).split("\n").slice(0, 4).join(" / "));

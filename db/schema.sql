@@ -519,11 +519,13 @@ $$;
 
 -- What the app is told about Google Drive: whether it's connected, and the folders editors may upload to
 -- (editors only see them while it is). Only admins are told which Google account it is, and whether Google
--- itself ended the last connection, so they know to connect again.
+-- itself ended the last connection, so they know to connect again. Once the studio has connected its Drive,
+-- uploading is the only way to submit a video ('only'), even while the connection is down.
 create or replace function app.drive_info(p_admin boolean) returns json language sql stable set search_path = '' as $$
   with last as (select d.* from app.drive d order by d.connected_at desc, d.id desc limit 1)
   select json_build_object(
     'on', coalesce((select l.ended_at is null from last l), false),
+    'only', exists (select 1 from last),
     'email', case when p_admin then (select l.email from last l where l.ended_at is null) end,
     'lost', case when p_admin then coalesce((select l.ended_at is not null and l.ended_by is null from last l), false) end,
     'folders', case when p_admin or exists (select 1 from last l where l.ended_at is null)
@@ -902,6 +904,8 @@ begin
         'pay', exists (select 1 from app.details d where d.user_id = x.id),       -- the details themselves come from er_details
         'earned', coalesce((select sum(p.amount) from app.projects p where p.editor_id = x.id and p.received_at is not null and not p.deleted), 0),
         'owed', case when x.role in ('admin', 'editor') then app.owed(x.id) end,           -- since their latest payment
+        'made', (select json_build_array(count(*), count(*) filter (where p.received_at is not null)) from app.projects p
+                  where p.editor_id = x.id and p.status = 'submitted' and not p.deleted),          -- videos submitted, and how many approved
         'bonus', coalesce((select sum(b.amount) from app.bonuses b where b.editor_id = x.id and not b.removed), 0),
         -- last sign of work: a brief handed over by the admin counts only once the editor touches it
         'last', (select app.ms(max(greatest(q.updated_at, q.submitted_at))) from (
@@ -1032,9 +1036,10 @@ begin
 end $$;
 
 -- Videos uploaded each day, for admins and supervisors: every video submitted in the last p_days days (1 to 92,
--- today included), newest first, with the day it was submitted on in the team's time zone, who made it, its
--- category and whether an admin has approved it yet. A video sent back and submitted again counts on the day
--- it came back. No links: this is a list to read; approved videos are downloaded from the finished videos.
+-- today included), newest first, with the day it was submitted on in the team's time zone, who made it (by name,
+-- and by id so an admin can open their profile), its category and whether an admin has approved it yet. A video
+-- sent back and submitted again counts on the day it came back. No links: this is a list to read; approved
+-- videos are downloaded from the finished videos.
 create or replace function public.er_uploads(p_token text, p_days int default 14) returns json
 language plpgsql security definer set search_path = '' as $$
 declare u app.users; m app.meta; v_days int := least(greatest(coalesce(p_days, 14), 1), 92); v_from timestamptz;
@@ -1044,7 +1049,7 @@ begin
   select * into m from app.meta;
   v_from := (date_trunc('day', now() at time zone m.tz) - make_interval(days => v_days - 1)) at time zone m.tz;
   return json_build_object('days', v_days, 'today', to_char(now() at time zone m.tz, 'YYYY-MM-DD'), 'videos', coalesce((
-    select json_agg(json_build_object('id', p.id, 'name', p.name, 'cat', p.category_id, 'by', e.name, 'at', app.ms(p.submitted_at),
+    select json_agg(json_build_object('id', p.id, 'name', p.name, 'cat', p.category_id, 'u', p.editor_id, 'by', e.name, 'at', app.ms(p.submitted_at),
                                       'day', to_char(p.submitted_at at time zone m.tz, 'YYYY-MM-DD'), 'approved', p.received_at is not null)
                     order by p.submitted_at desc, p.id desc)
       from app.projects p join app.users e on e.id = p.editor_id
@@ -1127,12 +1132,12 @@ begin
   return json_build_object('ok', true);
 end $$;
 
--- Every admin's phone pings when a video comes in (an admin submitting their own work isn't told about it).
-create or replace function public.er_submit(p_token text, p_project uuid, p_link text, p_note text default '') returns json
-language plpgsql security definer set search_path = '' as $$
-declare u app.users; p app.projects;
+-- Someone submits their brief with the finished video's link. Every admin's phone pings when a video comes in
+-- (an admin submitting their own work isn't told about it).
+create or replace function app.submit(u app.users, p_project uuid, p_link text, p_note text) returns void
+language plpgsql set search_path = '' as $$
+declare p app.projects;
 begin
-  u := app.worker(p_token);
   if p_link is null or char_length(p_link) > 600 or p_link !~ '^https?://[^[:space:]]{4,}$' then raise exception 'bad_link'; end if;
   update app.projects set status = 'submitted', link = p_link, note = left(btrim(coalesce(p_note, '')), 400), submitted_at = now(), updated_at = now()
    where id = p_project and editor_id = u.id and status = 'active' and not deleted
@@ -1141,6 +1146,18 @@ begin
   perform app.notify_many(array(select x.id from app.users x where x.role = 'admin' and x.active and x.removed_at is null and x.id <> u.id),
     'submitted', p.id, 'Video submitted: ' || left(p.name, 100),
     u.name || case when p.submitted_at <= p.due_at then ' submitted it on time.' else ' submitted it after the deadline.' end);
+end $$;
+
+-- Submitting with a pasted link. Once the studio has connected its Google Drive, uploading is the only way to
+-- submit (an upload submits through app.drive_submit), so a pasted link is refused, even while Drive is
+-- disconnected: then nobody can submit until an admin connects it again.
+create or replace function public.er_submit(p_token text, p_project uuid, p_link text, p_note text default '') returns json
+language plpgsql security definer set search_path = '' as $$
+declare u app.users;
+begin
+  u := app.worker(p_token);
+  if exists (select 1 from app.drive) then raise exception 'upload_only'; end if;
+  perform app.submit(u, p_project, p_link, p_note);
   return json_build_object('ok', true);
 end $$;
 
@@ -1726,6 +1743,18 @@ language sql set search_path = '' as $$
          done_at = case when p_link is not null then now() else done_at end
    where id = p_upload
 $$;
+
+-- A finished upload submits its brief, with the link to the file in Drive. The dn-drive function calls this once
+-- it has checked the file Google holds is this upload's, whole, in its folder.
+create or replace function app.drive_submit(p_token text, p_upload uuid, p_link text, p_note text) returns void
+language plpgsql set search_path = '' as $$
+declare u app.users; x app.uploads;
+begin
+  u := app.worker(p_token);
+  select * into x from app.uploads where id = p_upload and user_id = u.id;
+  if not found then raise exception 'not_found'; end if;
+  perform app.submit(u, x.project_id, p_link, p_note);
+end $$;
 
 -- An admin takes a folder off the list editors upload to. The folder and what's in it stay in Drive.
 create or replace function public.er_drive_remove_folder(p_token text, p_folder uuid) returns json

@@ -217,6 +217,12 @@ button { cursor: pointer; touch-action: manipulation; }
 .person { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .person-name { min-width: 0; font-weight: 600; font-size: 15px; overflow-wrap: anywhere; }
 .person.big .person-name { font-size: 18px; letter-spacing: -0.005em; }
+/* a name an admin can tap, wherever it shows, to open that person's profile: underlined like a link, with a
+   tap area of at least 36px that doesn't push the lines around it apart */
+.name-link { display: inline-block; min-width: 36px; min-height: 36px; margin: -8px 0; padding: 8px 0; border: 0; border-radius: 4px; background: none; color: inherit; font-weight: 600; text-align: left; vertical-align: baseline;
+  text-decoration: underline; text-decoration-color: var(--field); text-decoration-thickness: 1.5px; text-underline-offset: 3px; cursor: pointer; }
+.name-link:hover { text-decoration-color: currentColor; }
+.hint .name-link { color: var(--ink-2); }
 .avatar { flex: none; display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--ink); object-fit: cover; color: var(--card); font: 600 13px/1 var(--font); text-transform: uppercase; }
 .avatar.lg { width: 44px; height: 44px; font-size: 18px; }
 .avatar.xl { width: 60px; height: 60px; font-size: 25px; }
