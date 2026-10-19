@@ -208,6 +208,32 @@ export async function run({ ok, srv, google, sql, db, SELF, APP, APP_URL, ids })
     const f3 = inDrive("Proxan video 23 (Ada Obi).mp4");
     ok(f3 && f3.sha256 === v3.hash && (await project(brief3)).status === "submitted", "Carry on uploading finishes it");
 
+    /* ------------------------------------------------ a phone that hides the video's name, and a brief named after a document */
+    const brief25 = (await db.rpc("er_log_brief", { p_token: ids.TA, p_name: "Proxan video 25.docx", p_category: ids.cat })).id;
+    await ada.reload();
+    await card(ada, "Proxan video 25.docx").getByRole("button", { name: "Submit video" }).click();
+    const sure = sheet(ada).locator("#s-sure-row");
+    ok(await sure.isHidden(), "nothing to confirm before a video is chosen");
+    const anon = video("229149.mp4", 3 * 1024 * 1024 + 5);          // Android's photo picker hands over a number, not the video's name
+    await ada.setInputFiles("#s-file", anon.file);
+    ok((await sure.isVisible()) && (await sure.innerText()).replace(/\s+/g, " ").trim() === "This is the video for Proxan video 25.docx Your phone shows this video only as 229149, so its name can't be checked. Tick this if it's the right one."
+      && (await ada.locator("#s-file-info").innerText()) === "229149.mp4, 3.1 MB." && await sheet(ada).getByRole("alert").isHidden(),
+      "when the phone hides the video's name, the editor is asked to confirm it's the brief's video instead of being refused", (await sure.innerText()).replace(/\s+/g, " "));
+    await sheet(ada).getByRole("button", { name: "Upload and submit" }).click();
+    ok((await sheet(ada).getByRole("alert").innerText()) === "Tick the box to confirm this is the video for Proxan video 25.docx." && !inDrive("Proxan video 25.docx (Ada Obi).mp4"), "and nothing is uploaded until they tick it");
+    await shot(ada, "5b-confirm-video");
+    await ada.setInputFiles("#s-file", video("Proxan video 25.mp4", 2000).file);        // the brief's name, its .docx ending aside
+    ok(await sure.isHidden() && await sheet(ada).getByRole("alert").isHidden() && (await ada.locator("#s-file-info").innerText()) === "Proxan video 25.mp4, 2 KB.", "a video named like the brief needs no confirming, even when the brief's name ends in .docx");
+    await ada.setInputFiles("#s-file", video("Proxan video 52.mp4", 2000).file);
+    ok(/^This video is named Proxan video 52\. It must have the same name as the brief: Proxan video 25\.docx\./.test(await sheet(ada).getByRole("alert").innerText()) && await sure.isHidden(), "a name the phone does show is still checked");
+    await ada.setInputFiles("#s-file", anon.file);
+    ok(!(await sheet(ada).locator("#s-sure").isChecked()), "choosing a video again asks again");
+    await sheet(ada).locator("#s-sure").check();
+    await sheet(ada).getByRole("button", { name: "Upload and submit" }).click();
+    await toast(ada, "Uploaded and submitted.", 30000);
+    const f25 = inDrive("Proxan video 25.docx (Ada Obi).mp4");
+    ok(f25 && f25.sha256 === anon.hash && f25.parents[0] === ids.fProxan && (await project(brief25)).status === "submitted", "once ticked, it uploads under the brief's name and submits");
+
     /* ------------------------------------------------ a script sent through the app, taken on, turned down, given to someone else, taken back */
     const scriptFile = (name, size) => { const buf = crypto.randomBytes(size), file = path.join(tmp, name); fs.writeFileSync(file, buf); return { file, buf }; };
     const scriptRow = async (name) => (await sql`select id, editor_id, status, file_id, project_id, moved_to, note from app.scripts where name = ${name} order by sent_at desc limit 1`)[0];

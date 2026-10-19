@@ -2081,13 +2081,22 @@ function openBrief() {
 // "menotea 10"; every letter and number must match, in order, so "menotea 11.mp4" or "menotea 10 (1).mp4" doesn't.
 const nameKey = (s) => String(s || "").normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
 const fileStem = (n) => String(n || "").replace(/\.[A-Za-z0-9]{1,5}$/, "");
-const fitsBrief = (f, p) => nameKey(fileStem(f.name)) === nameKey(p.name);
+// A brief named after a script file may still end in the document's type ("talking head 2.docx"): the video
+// fits with or without it.
+const briefStem = (n) => String(n || "").replace(/\.(docx?|pdf|txt|rtf|odt|pages)$/i, "");
+const fitsBrief = (f, p) => { const k = nameKey(fileStem(f.name)); return k === nameKey(p.name) || k === nameKey(briefStem(p.name)); };
+// Some phones don't pass a video's name on: Android's photo picker hands over a number instead ("229149.mp4").
+// A name with no letters in it can't be checked, so the editor confirms the video is the brief's instead.
+const nameHidden = (f) => !/\p{L}/u.test(fileStem(f.name));
 function openSubmit(p) {
   const d = state.config.drive;
   if (!canUpload()) return uploadOnly() ? openNoUpload(p) : openLinkSubmit(p);
-  let chosen = null;
+  let chosen = null, vouch = false;          // vouch: the phone hid the video's name, so the editor confirms it
   const before = savedUpload(p.id);
   const folder = h("select", { class: "input", id: "s-folder" }, h("option", { value: "", text: "Choose a folder" }), d.folders.map((f) => h("option", { value: f.id, text: f.name })));
+  const sure = h("input", { type: "checkbox", id: "s-sure" }), sureWhy = h("span", { class: "hint", id: "s-sure-why" });
+  const sureRow = h("label", { class: "option", id: "s-sure-row", hidden: true }, sure,
+    h("span", { class: "option-main" }, h("span", { class: "option-name", text: "This is the video for " + p.name }), sureWhy));
   folder.value = before && d.folders.some((f) => f.id === before.folder) ? before.folder : guessFolder(p, d.folders);
   const file = h("input", { class: "vh", id: "s-file", type: "file", accept: "video/*", "aria-label": "Choose the video", tabindex: "-1" });
   const choose = h("button", { class: "btn", type: "button", id: "s-choose", onclick: () => file.click() }, "Choose the video");
@@ -2097,20 +2106,23 @@ function openSubmit(p) {
     const f = file.files && file.files[0] ? file.files[0] : null;
     file.value = "";          // so choosing the same file again (renamed or not) still counts
     if (!f) return;
-    if (!sameFile(savedUpload(p.id), f) && !fitsBrief(f, p)) {      // (an upload already under way carries on whatever its name)
-      chosen = null;
+    const fits = sameFile(savedUpload(p.id), f) || fitsBrief(f, p);      // (an upload already under way carries on whatever its name)
+    sure.checked = false;
+    if (!fits && !nameHidden(f)) {
+      chosen = null; vouch = false; sureRow.hidden = true;
       choose.textContent = "Choose the video";
       info.textContent = "The finished video, from your phone or computer. Its file must be named like the brief: " + p.name + ".";
       fail("This video is named " + fileStem(f.name) + ". It must have the same name as the brief: " + p.name + ". Rename the video, then choose it again.");
       return;
     }
-    chosen = f;
+    chosen = f; vouch = !fits; sureRow.hidden = fits;
+    sureWhy.textContent = vouch ? "Your phone shows this video only as " + fileStem(f.name) + ", so its name can't be checked. Tick this if it's the right one." : "";
     choose.textContent = "Choose another video";
     info.textContent = chosen.name + ", " + bytes(chosen.size) + (sameFile(savedUpload(p.id), chosen) ? ". It carries on from where the last upload stopped." : ".");
     err.hidden = true;
   });
   const uploadPane = h("div", { class: "form" }, field("Folder in your admin's Google Drive", folder),
-    h("div", { class: "field" }, h("label", { for: "s-file", text: "Video" }), h("div", { class: "btn-row" }, choose), info, file));
+    h("div", { class: "field" }, h("label", { for: "s-file", text: "Video" }), h("div", { class: "btn-row" }, choose), info, file), sureRow);
   const note = h("textarea", { class: "input", id: "s-note", maxlength: "300", rows: "3" });
   // how the upload is going
   const fill = h("i"), meter = h("div", { class: "meter upload-meter", role: "progressbar", "aria-label": "Upload progress", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": "0" }, fill);
@@ -2129,6 +2141,7 @@ function openSubmit(p) {
     err.hidden = true;
     if (!folder.value) return fail("Choose the folder to upload to.");
     if (!chosen) return fail("Choose the video to upload.");
+    if (vouch && !sure.checked) return fail("Tick the box to confirm this is the video for " + p.name + ".");
     try { localStorage.setItem("editroom.driveFolder", folder.value); } catch (e) { /* the folder isn't remembered for next time */ }
     await upload(chosen, folder.value);
   }
