@@ -515,7 +515,7 @@ try {
   const pfMoney = (await sheet(admin).locator("#pf-money").innerText()).replace(/\s+/g, " ");
   const dollars = (n) => "$" + (Math.abs(n - Math.round(n)) < 0.005 ? Math.round(n).toLocaleString("en-US") : n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
   ok((await admin.locator("#sheet-title").innerText()) === "Ada Obi" && adaEarned > 0 && pfMoney.includes("Earned in total " + dollars(adaEarned)) && /Last payment None yet/.test(pfMoney)
-    && (await sheet(admin).locator("#pf-reset").count()) === 1, "an editor's profile shows what they're owed, what they've earned in all and been paid, with Reset payment", pfMoney);
+    && (await sheet(admin).locator("#pf-record").count()) === 1, "an editor's profile shows what they're owed, what they've earned in all and been paid, with Record a payment", pfMoney);
   const vrow = sheet(admin).locator(".vid-list > li", { hasText: "Night market short" });
   await vrow.waitFor();
   await sheet(admin).getByText("1 video, newest first.").waitFor();
@@ -1438,7 +1438,7 @@ try {
   await admin.locator("#try-super").waitFor();
   ok((await admin.locator("#tabs .tab-label").allInnerTexts()).join("|") === "Inbox|Projects|Uploads|Editors|Settings", "Back to admin brings back the admin's tabs");
 
-  /* ------------------------------------------------------------ paying an editor: Reset payment */
+  /* ------------------------------------------------------------ paying an editor: Record a payment */
   const usd = (n) => "$" + (Math.abs(n - Math.round(n)) < 0.005 ? Math.round(n).toLocaleString("en-US") : n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
   const owedAda = (await sql("select app.owed(id) as o from app.users where username = 'ada.obi'")).rows[0].o;
   await tab(admin, "editors");
@@ -1447,29 +1447,50 @@ try {
   await adaPay.waitFor();
   ok(owedAda.due > 0 && (await adaPay.locator(".fact", { hasText: "To pay" }).locator(".fact-num").innerText()) === usd(Number(owedAda.due)) && /Not paid in the app yet\./.test(await adaPay.innerText()),
     "each editor's card shows what they're owed", usd(Number(owedAda.due)));
-  await adaPay.getByRole("button", { name: "Reset payment" }).click();
-  ok(new RegExp("Have you paid Ada O\\. " + usd(Number(owedAda.due)).replace("$", "\\$")).test(await sheet(admin).innerText()), "Reset payment asks first, with the amount", (await sheet(admin).innerText()).slice(0, 160));
-  await look(admin, "58-reset-payment", "the Reset payment sheet");
-  await sheet(admin).getByRole("button", { name: "Reset to zero" }).click();
+  await adaPay.getByRole("button", { name: "Record a payment" }).click();
+  await sheet(admin).locator("#rp-amt").waitFor();
+  const rpText = (await sheet(admin).innerText()).replace(/\s+/g, " ");
+  ok((await admin.inputValue("#rp-amt")) === String(Number(owedAda.due)) && rpText.includes("How much did you pay Ada O.?") && new RegExp("The app counted \\d+ videos?( and \\d+ bonus(es)?)?, worth " + usd(Number(owedAda.due)).replace("$", "\\$") + " at the pay rates set\\. Put in what you actually paid\\.").test(rpText),
+    "Record a payment starts from what the app worked out, and asks for what was actually paid", rpText.slice(0, 260));
+  await admin.fill("#rp-amt", "");
+  await sheet(admin).getByRole("button", { name: "Record payment" }).click();
+  ok((await sheet(admin).getByRole("alert").innerText()) === "Enter the amount you paid.", "a payment needs an amount");
+  await admin.fill("#rp-amt", "50,000");
+  await admin.fill("#rp-note", "Bank transfer, October");
+  await look(admin, "58-record-payment", "the Record a payment sheet");
+  await sheet(admin).getByRole("button", { name: "Record payment" }).click();
   await toast(admin, "recorded as paid to Ada O.");
-  ok((await admin.locator("#toast").innerText()).trim() === "Reset. " + usd(Number(owedAda.due)) + " recorded as paid to Ada O.", "the reset is confirmed in one sentence", await admin.locator("#toast").innerText());
+  ok((await admin.locator("#toast").innerText()).trim() === "$50,000 recorded as paid to Ada O.", "the payment is confirmed with what was paid, in one sentence", await admin.locator("#toast").innerText());
   await adaPay.locator(".fact", { hasText: "To pay" }).locator(".fact-num", { hasText: "$0" }).waitFor();
-  const payout = (await sql("select amount::float as amount, videos from app.payouts p join app.users u on u.id = p.editor_id where u.username = 'ada.obi'")).rows;
-  ok(payout.length === 1 && payout[0].amount === Number(owedAda.due) && /Last paid .+, \$/.test(await adaPay.innerText()) && (await adaPay.getByRole("button", { name: "Reset payment" }).count()) === 0,
-    "after the reset the card shows nothing to pay and when they were last paid, and the payment is on record", JSON.stringify(payout));
+  const payout = (await sql("select amount::float as amount, videos, note from app.payouts p join app.users u on u.id = p.editor_id where u.username = 'ada.obi'")).rows;
+  ok(payout.length === 1 && payout[0].amount === 50000 && payout[0].note === "Bank transfer, October" && /Last paid .+, \$50,000\./.test(await adaPay.innerText()) && (await adaPay.getByRole("button", { name: "Record a payment" }).count()) === 1,
+    "what was actually paid is on record with its note; the card counts from zero again and says when they were last paid", JSON.stringify(payout));
   await adaPay.locator(".person .name-link").click();
-  await sheet(admin).locator("#pf-paid .rows li").first().waitFor();
+  await sheet(admin).locator("#pf-pays li").first().waitFor();
   const pfAfter = (await sheet(admin).locator("#pf-money").innerText()).replace(/\s+/g, " ");
-  ok(/^To pay \$0 Nothing new since their last payment on /.test(pfAfter) && pfAfter.includes("Paid so far " + usd(Number(owedAda.due))) && pfAfter.includes("Last payment " + usd(Number(owedAda.due)))
-    && (await sheet(admin).locator("#pf-reset").count()) === 0 && (await sheet(admin).locator("#pf-paid .rows li").count()) === 1, "and their profile shows the payment, with nothing left to pay", pfAfter);
+  ok(/^To pay \$0 Nothing new since their last payment on /.test(pfAfter) && pfAfter.includes("Paid so far $50,000") && pfAfter.includes("Last payment $50,000")
+    && (await sheet(admin).locator("#pf-pays li").count()) === 1 && /Bank transfer, October\. For \d+ videos?( and \d+ bonus(es)?)?\./.test(await sheet(admin).locator("#pf-pays li").first().innerText()),
+    "their profile shows the payment, with its note and what it covered", pfAfter + " || " + (await sheet(admin).locator("#pf-pays li").first().innerText()).replace(/\s+/g, " "));
+  // a payment entered wrongly can be corrected; what was first recorded stays on record
+  await sheet(admin).locator("#pf-pays li").first().getByRole("button", { name: /^Correct/ }).click();
+  await sheet(admin).locator("#ep-amt").waitFor();
+  ok((await admin.inputValue("#ep-amt")) === "50000" && (await admin.inputValue("#ep-note")) === "Bank transfer, October", "Correct opens with the payment as it was recorded");
+  await admin.fill("#ep-amt", "48,500");
+  await sheet(admin).getByRole("button", { name: "Save" }).click();
+  await toast(admin, "Payment corrected");
+  await sheet(admin).locator("#pf-pays li", { hasText: "first recorded as $50,000" }).waitFor();
+  const pfFixed = (await sheet(admin).locator("#pf-money").innerText()).replace(/\s+/g, " ");
+  ok(pfFixed.includes("Paid so far $48,500") && pfFixed.includes("Last payment $48,500") && (await sheet(admin).locator("#pf-pays li .amount").first().innerText()).trim() === "$48,500",
+    "a corrected amount shows everywhere, with what was first recorded", pfFixed);
   await look(admin, "60b-profile-after-payment", "an editor's profile after a payment");
   await sheet(admin).getByRole("button", { name: "Close" }).click();
   await closed(admin);
   await sync(ada);
   await tab(ada, "earn");
   await ada.locator(".week-num", { hasText: "$0" }).waitFor();
-  ok(/Earned since your last payment/.test(await ada.locator("#view").innerText()) && new RegExp("Last payment\\s+" + usd(Number(owedAda.due)).replace("$", "\\$")).test(await ada.locator("#view").innerText()) && /Payments/.test(await ada.locator("#view").innerText()),
-    "the editor's earnings start again from zero, and they can see the payment", (await ada.locator("#view .slate").innerText()).replace(/\n/g, " | "));
+  ok(/Earned since your last payment/.test(await ada.locator("#view").innerText()) && /Last payment\s+\$48,500/.test(await ada.locator("#view").innerText())
+    && /Bank transfer, October/.test(await ada.locator("#my-pays").innerText()) && /\$48,500/.test(await ada.locator("#my-pays").innerText()),
+    "the editor's earnings start again from zero, and they see the payment with what was paid and the note", (await ada.locator("#view .slate").innerText()).replace(/\n/g, " | "));
   await look(ada, "59-earnings-after-payment", "an editor's earnings after a payment");
   // something already paid stays as it is
   await tab(admin, "projects");

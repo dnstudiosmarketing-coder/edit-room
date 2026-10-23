@@ -828,6 +828,36 @@ ok((await rpc("er_details", { p_token: TP, p_user: payEd })).payouts.length === 
 const reset2 = await rpc("er_reset_pay", { p_token: A, p_editor: payEd });
 ok(reset2.amount === 25 && reset2.videos === 1 && (await rpc("er_state", { p_token: TP })).totals.payouts.map((x) => x.amt).join() === "25,60", "the next reset covers only what came after the last one; newest payment first");
 
+// ---- recording a payment of what was actually paid, with a note, and correcting one
+const paid4 = await deliver("Pay video 4");          // 25 counted since the last payment
+await fails(rpc("er_record_pay", { p_token: TP, p_editor: payEd, p_amount: 100 }), "forbidden", "an editor can't record a payment");
+await fails(rpc("er_record_pay", { p_token: TSup, p_editor: payEd, p_amount: 100 }), "forbidden", "nor can a supervisor");
+await fails(rpc("er_record_pay", { p_token: A, p_editor: payEd, p_amount: 0 }), "invalid", "a payment needs an amount");
+await fails(rpc("er_record_pay", { p_token: A, p_editor: payEd, p_amount: -5 }), "invalid", "and not a negative one");
+await fails(rpc("er_record_pay", { p_token: A, p_editor: sup, p_amount: 5 }), "not_found", "only people who make videos are paid here");
+const rec1 = await rpc("er_record_pay", { p_token: A, p_editor: payEd, p_amount: 40000, p_note: "  Bank   transfer,\n October " });
+const recRow = await one("select amount::float as amount, videos, bonuses, note, paid_by from app.payouts where id = $1", [rec1.id]);
+ok(rec1.ok && recRow.amount === 40000 && recRow.videos === 1 && recRow.bonuses === 0 && recRow.note === "Bank transfer, October" && recRow.paid_by === adminId,
+  "recording a payment keeps what was actually paid, what it covered, the note tidied, and who recorded it", JSON.stringify(recRow));
+const tpNow = (await rpc("er_state", { p_token: TP })).totals;
+ok(tpNow.owed.due === 0 && tpNow.owed.nv === 0 && tpNow.owed.paidAmt === 40000 && tpNow.owed.paidSum === 40085 && tpNow.payouts[0].amt === 40000 && tpNow.payouts[0].note === "Bank transfer, October",
+  "the editor's earnings start again from zero, and they see the payment with its note and what they've been paid in all", JSON.stringify(tpNow.owed));
+await fails(rpc("er_receive", { p_token: A, p_project: paid4, p_on: false }), "paid", "what it covered stays received");
+const rec2 = await rpc("er_record_pay", { p_token: A, p_editor: payEd, p_amount: 500 });
+ok(rec2.videos === 0 && rec2.bonuses === 0 && (await one("select note from app.payouts where id = $1", [rec2.id])).note === "", "a payment can be recorded when nothing new was counted, without a note");
+await fails(rpc("er_edit_pay", { p_token: TP, p_payout: rec1.id, p_amount: 1 }), "forbidden", "an editor can't change a payment");
+await fails(rpc("er_edit_pay", { p_token: A, p_payout: rec1.id, p_amount: 0 }), "invalid", "a corrected payment still needs an amount");
+ok((await rpc("er_edit_pay", { p_token: A, p_payout: rec1.id, p_amount: 40000 })).changed === false && (await one("select edited_at from app.payouts where id = $1", [rec1.id])).edited_at === null, "saving it unchanged changes nothing");
+await rpc("er_edit_pay", { p_token: A, p_payout: rec1.id, p_amount: 45000, p_note: "Bank transfer" });
+await rpc("er_edit_pay", { p_token: A, p_payout: rec1.id, p_amount: 44000 });
+const fixed = await one("select amount::float as amount, was_amount::float as was, note, edited_by, edited_at is not null as edited, videos, bonuses from app.payouts where id = $1", [rec1.id]);
+ok(fixed.amount === 44000 && fixed.was === 40000 && fixed.note === "Bank transfer" && fixed.edited && fixed.edited_by === adminId && fixed.videos === 1 && fixed.bonuses === 0,
+  "a payment can be corrected: the first amount is kept, the note can change, and a note left out stays as it was", JSON.stringify(fixed));
+const shownPay = (await rpc("er_details", { p_token: A, p_user: payEd })).payouts.find((x) => x.id === rec1.id);
+ok(shownPay.amt === 44000 && shownPay.was === 40000 && shownPay.edited > 0 && shownPay.note === "Bank transfer", "the profile shows the corrected payment, and what it was first", JSON.stringify(shownPay));
+ok((await rpc("er_state", { p_token: A })).users.find((x) => x.id === payEd).owed.paidSum === 60 + 25 + 44000 + 500, "what they've been paid in all follows the correction");
+await fails(rpc("er_edit_pay", { p_token: A, p_payout: "00000000-0000-0000-0000-000000000000", p_amount: 5 }), "not_found", "an unknown payment can't be changed");
+
 // ---- switching a login off, roles, lockout
 const admin2 =(await rpc("er_add_user", { p_token: A, p_name: "Kemi Admin", p_username: "kemi", p_password: "kemi-pass-1", p_role: "admin" })).id;
 const TK = (await rpc("er_login", { p_username: "kemi", p_password: "kemi-pass-1" })).token;

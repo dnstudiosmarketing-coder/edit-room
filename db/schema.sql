@@ -131,6 +131,14 @@ create table if not exists app.payouts (
 );
 create index if not exists payouts_editor on app.payouts(editor_id, paid_at desc);
 create index if not exists payouts_paid_by on app.payouts(paid_by);
+-- The amount is what the admin says they paid, which needn't be what the app worked out (most categories have
+-- no pay rate). A note says how or what for; the editor sees it too. A payment is never removed, only corrected:
+-- the amount first recorded is kept in was_amount, with when and by whom it was last corrected.
+alter table app.payouts add column if not exists note text not null default '' check (char_length(note) <= 200);
+alter table app.payouts add column if not exists was_amount numeric(14,2);
+alter table app.payouts add column if not exists edited_at timestamptz;
+alter table app.payouts add column if not exists edited_by uuid references app.users(id);
+create index if not exists payouts_edited_by on app.payouts(edited_by);
 
 -- Videos an admin has put on everyone's home screen ("Video of the moment"). A pick is never deleted:
 -- taking it down, or newer picks pushing it out, stamps taken_at.
@@ -824,7 +832,7 @@ end $$;
 -- ---------------------------------------------------------------- everything a screen needs, in one call
 
 -- What an editor is owed since their latest payment: the videos marked received since then and the bonuses
--- awarded since then, with when they were last paid, and how much.
+-- awarded since then, with when they were last paid, how much, and what they've been paid in all.
 create or replace function app.owed(p_editor uuid) returns json language sql stable set search_path = '' as $$
   with last as (select o.paid_at, o.amount from app.payouts o where o.editor_id = p_editor order by o.paid_at desc, o.id desc limit 1),
        v as (select coalesce(sum(p.amount), 0) as amt, count(*) as n from app.projects p
@@ -832,13 +840,15 @@ create or replace function app.owed(p_editor uuid) returns json language sql sta
        b as (select coalesce(sum(x.amount), 0) as amt, count(*) as n from app.bonuses x
               where x.editor_id = p_editor and not x.removed and x.awarded_at > coalesce((select l.paid_at from last l), '-infinity'))
   select json_build_object('due', v.amt + b.amt, 'videos', v.amt, 'bonus', b.amt, 'nv', v.n, 'nb', b.n,
-                           'paid', app.ms((select l.paid_at from last l)), 'paidAmt', (select l.amount from last l))
+                           'paid', app.ms((select l.paid_at from last l)), 'paidAmt', (select l.amount from last l),
+                           'paidSum', (select coalesce(sum(o.amount), 0) from app.payouts o where o.editor_id = p_editor))
     from v, b
 $$;
 
--- An editor's payments, newest first.
+-- An editor's payments, newest first, each with its note, and what it said before it was last corrected.
 create or replace function app.payouts_of(p_editor uuid, p_limit int) returns json language sql stable set search_path = '' as $$
-  select coalesce(json_agg(json_build_object('id', o.id, 'at', app.ms(o.paid_at), 'amt', o.amount, 'nv', o.videos, 'nb', o.bonuses) order by o.paid_at desc, o.id desc), '[]'::json)
+  select coalesce(json_agg(json_build_object('id', o.id, 'at', app.ms(o.paid_at), 'amt', o.amount, 'nv', o.videos, 'nb', o.bonuses,
+                                             'note', o.note, 'was', o.was_amount, 'edited', app.ms(o.edited_at)) order by o.paid_at desc, o.id desc), '[]'::json)
     from (select * from app.payouts where editor_id = p_editor order by paid_at desc, id desc limit p_limit) o
 $$;
 
@@ -1195,6 +1205,44 @@ begin
   if p_expect is not null and round(p_expect, 2) <> (o ->> 'due')::numeric then raise exception 'changed'; end if;
   insert into app.payouts(editor_id, paid_by, amount, videos, bonuses) values (e.id, u.id, (o ->> 'due')::numeric, (o ->> 'nv')::int, (o ->> 'nb')::int) returning id into v_id;
   return json_build_object('ok', true, 'id', v_id, 'amount', (o ->> 'due')::numeric, 'videos', (o ->> 'nv')::int, 'bonuses', (o ->> 'nb')::int);
+end $$;
+
+-- An admin records a payment they've made, of whatever amount they actually paid (what the app worked out is
+-- only a suggestion), with a note if they like. Whatever the app counted since the last payment (videos marked
+-- received, bonuses) is covered by it, and their earnings start again from zero, counting from the next video
+-- marked received. It can be recorded when nothing new was counted too (pay for work done outside the app).
+create or replace function public.er_record_pay(p_token text, p_editor uuid, p_amount numeric, p_note text default '') returns json
+language plpgsql security definer set search_path = '' as $$
+declare u app.users; e app.users; o json; v_id uuid; v_amt numeric := round(p_amount, 2);
+begin
+  u := app.admin(p_token);
+  if v_amt is null or v_amt <= 0 or v_amt > 1000000000 then raise exception 'invalid'; end if;
+  select * into e from app.users where id = p_editor and removed_at is null and role in ('admin', 'editor') for update;      -- one at a time per editor
+  if not found then raise exception 'not_found'; end if;
+  o := app.owed(e.id);
+  insert into app.payouts(editor_id, paid_by, amount, videos, bonuses, note)
+  values (e.id, u.id, v_amt, (o ->> 'nv')::int, (o ->> 'nb')::int, left(btrim(regexp_replace(coalesce(p_note, ''), '[[:space:][:cntrl:]]+', ' ', 'g')), 200))
+  returning id into v_id;
+  return json_build_object('ok', true, 'id', v_id, 'amount', v_amt, 'videos', (o ->> 'nv')::int, 'bonuses', (o ->> 'nb')::int);
+end $$;
+
+-- Correcting a payment already recorded: its amount, its note, or both (p_note null leaves the note alone). The
+-- amount first recorded is kept, and when and by whom it was last corrected; when it was paid and what it covered
+-- stay as they were.
+create or replace function public.er_edit_pay(p_token text, p_payout uuid, p_amount numeric, p_note text default null) returns json
+language plpgsql security definer set search_path = '' as $$
+declare u app.users; x app.payouts; v_amt numeric := round(p_amount, 2); v_note text;
+begin
+  u := app.admin(p_token);
+  if v_amt is null or v_amt <= 0 or v_amt > 1000000000 then raise exception 'invalid'; end if;
+  select * into x from app.payouts where id = p_payout for update;
+  if not found then raise exception 'not_found'; end if;
+  v_note := coalesce(left(btrim(regexp_replace(p_note, '[[:space:][:cntrl:]]+', ' ', 'g')), 200), x.note);
+  if v_amt = x.amount and v_note = x.note then return json_build_object('ok', true, 'changed', false); end if;
+  update app.payouts set was_amount = case when v_amt <> x.amount then coalesce(x.was_amount, x.amount) else x.was_amount end,
+         amount = v_amt, note = v_note, edited_at = now(), edited_by = u.id
+   where id = x.id;
+  return json_build_object('ok', true, 'changed', true);
 end $$;
 
 -- Marking a video received approves it: it goes into the editor's earnings, and every media buyer hears it's

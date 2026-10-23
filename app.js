@@ -32,7 +32,7 @@ const state = {
   config: { categories: [], weeklyTarget: null, deliveryHours: 24, graceHours: 48, currency: "", tz: "UTC", drive: { on: false, only: false, email: null, lost: false, folders: [] } },
   prefs: { bonusAmount: null },
   cats: new Map(), users: new Map(), projects: new Map(), bonuses: new Map(),
-  board: { week: [], month: [], awards: [] }, weeks: [0, 0, 0, 0, 0, 0], month: 0, totals: { videos: 0, bonus: 0, month: 0, owed: { due: 0, videos: 0, bonus: 0, nv: 0, nb: 0, paid: null, paidAmt: null }, payouts: [] },
+  board: { week: [], month: [], awards: [] }, weeks: [0, 0, 0, 0, 0, 0], month: 0, totals: { videos: 0, bonus: 0, month: 0, owed: { due: 0, videos: 0, bonus: 0, nv: 0, nb: 0, paid: null, paidAmt: null, paidSum: 0 }, payouts: [] },
   featured: [],                                       // "Video of the moment": up to five finished videos the admin put on everyone's home screen
   stats: { editors: new Map(), cats: new Map() },     // admin only: figures worked out by the server
   horizon: null,                                      // admin only: where history older than the loaded projects starts
@@ -284,8 +284,9 @@ function normProject(r) {
 }
 // What an editor is owed since their last payment (a reset), and their payments, as the server sends them.
 const normOwed = (o) => (o && typeof o === "object" ? { due: amount(o.due) || 0, videos: amount(o.videos) || 0, bonus: amount(o.bonus) || 0, nv: num(o.nv) || 0, nb: num(o.nb) || 0,
-  paid: num(o.paid), paidAmt: amount(o.paidAmt) } : { due: 0, videos: 0, bonus: 0, nv: 0, nb: 0, paid: null, paidAmt: null });
-const normPayouts = (list) => (Array.isArray(list) ? list : []).filter((x) => x && x.id).map((x) => ({ id: String(x.id), at: num(x.at) || 0, amt: amount(x.amt) || 0, nv: num(x.nv) || 0, nb: num(x.nb) || 0 }));
+  paid: num(o.paid), paidAmt: amount(o.paidAmt), paidSum: amount(o.paidSum) || 0 } : { due: 0, videos: 0, bonus: 0, nv: 0, nb: 0, paid: null, paidAmt: null, paidSum: 0 });
+const normPayouts = (list) => (Array.isArray(list) ? list : []).filter((x) => x && x.id).map((x) => ({ id: String(x.id), at: num(x.at) || 0, amt: amount(x.amt) || 0, nv: num(x.nv) || 0, nb: num(x.nb) || 0,
+  note: str(x.note, 200), was: amount(x.was), edited: num(x.edited) }));
 const covers = (x) => [x.nv ? plural(x.nv, "video", "videos") : null, x.nb ? plural(x.nb, "bonus", "bonuses") : null].filter(Boolean).join(" and ") || "nothing";
 const fullStop = (s) => String(s).replace(/[^.!?]$/, "$&.");      // a sentence ending in a name like "Ada O." gets one full stop, not two
 // When someone was last paid (ms), or 0. A video marked received by then, or a bonus awarded by then, is in a
@@ -1182,7 +1183,7 @@ function viewBoard() {
       h("span", { class: "rank-count", text: shortDate(x.at) }))))));
   return out;
 }
-// What the editor has earned since their admin last paid them (pressing Reset payment), their payments, and
+// What the editor has earned since their admin last paid them (recording a payment), their payments, and
 // what is still waiting for the admin. Before the first payment it's everything they've earned.
 function viewEarn(all) {
   const uid = state.me.id, mine = all.filter((x) => x.uid === uid), lines = [], out = [], o = state.totals.owed, since = o.paid || 0, pays = state.totals.payouts;
@@ -1214,9 +1215,9 @@ function viewEarn(all) {
       h("span", { class: "amount", text: r != null ? money(r) : "Rate not set" })); }))));
   if (pays.length) out.push(h("section", { class: "section" },
     h("h2", { class: "section-title", text: "Payments" }),
-    h("ul", { class: "rows" }, pays.map((x) => h("li", null,
-      h("div", { class: "row-main" }, h("span", { class: "row-title", text: shortDate(x.at) }), h("span", { class: "hint", text: covers(x) })),
-      h("span", { class: "amount", text: money(x.amt) }))))));
+    h("ul", { class: "rows", id: "my-pays" }, pays.map((x) => { const line = payLine(x); return h("li", null,
+      h("div", { class: "row-main" }, h("span", { class: "row-title", text: shortDate(x.at) }), line ? h("span", { class: "hint", text: line }) : null),
+      h("span", { class: "amount", text: money(x.amt) })); }))));
   return out;
 }
 
@@ -1716,7 +1717,7 @@ function rosterCard(s, win, target, rank, peak) {
       h("button", { class: "btn small", type: "button", dataset: { fk: "profile:" + s.uid }, onclick: () => openProfile(s.uid) }, "Profile and videos"),
       h("button", { class: "btn small", type: "button", dataset: { fk: "view:" + s.uid }, onclick: () => viewProjectsOf(s.uid) }, "View projects"),
       h("button", { class: "btn small", type: "button", dataset: { fk: "bonus:" + s.uid }, onclick: () => openBonuses(s.uid) }, "Bonuses"),
-      owe.nv + owe.nb ? h("button", { class: "btn small", type: "button", dataset: { fk: "payreset:" + s.uid }, onclick: () => openResetPay(s.uid) }, "Reset payment") : null));
+      h("button", { class: "btn small", type: "button", dataset: { fk: "payrec:" + s.uid }, onclick: () => openRecordPay(s.uid) }, "Record a payment")));
 }
 // Projects, showing only this person's.
 function viewProjectsOf(uid) {
@@ -1724,21 +1725,56 @@ function viewProjectsOf(uid) {
   ui.fEditor = uid; ui.fStatus = "all"; ui.fCat = "all"; ui.limit = 40;
   setTab("projects");
 }
-// After paying an editor: what they were owed is recorded as paid, and their earnings start again from zero.
+// After paying someone: the admin records what they actually paid (the app's To pay is filled in to start with,
+// as most categories have no pay rate), with a note if they like. Their earnings then start again from zero.
 // back: the sheet to go back to afterwards (their profile), if it was opened from one.
-function openResetPay(uid, back) {
+function openRecordPay(uid, back) {
   const u = state.users.get(uid), o = u ? u.owed : null;
   if (!o) return;
+  const first = u.name.split(" ")[0], since = o.paid ? " since their last payment on " + shortDate(o.paid) : "";
+  const amt = h("input", { class: "input", id: "rp-amt", type: "text", inputmode: "decimal", autocomplete: "off" });
+  const note = h("input", { class: "input", id: "rp-note", type: "text", maxlength: "200", autocomplete: "off", placeholder: "For example: bank transfer, October" });
+  if (o.due > 0) amt.value = String(o.due);
   formSheet({
-    title: "Reset payment", submit: "Reset to zero", danger: true, back: back,
+    title: "Record a payment", submit: "Record payment", back: back,
     body: [
-      h("p", null, "Have you paid ", h("strong", { text: u.name }), " " + money(o.due) + "? That's " + covers(o) + (o.paid ? " since their last payment on " + shortDate(o.paid) : "") + "."),
-      h("p", { class: "hint", text: "Resetting records " + money(o.due) + " as paid today. " + u.name.split(" ")[0] + "'s earnings then start again from zero, on your screen and theirs, and count from the next video you mark received. Anything already paid can't be marked not received, removed or deleted afterwards." })],
+      h("p", null, "How much did you pay ", h("strong", { text: u.name }), "?"),
+      field(moneyLabel("Amount paid"), amt, o.nv + o.nb ? "The app counted " + covers(o) + since + ", worth " + money(o.due) + " at the pay rates set. Put in what you actually paid."
+        : "The app hasn't counted anything new" + since + ". You can still record a payment."),
+      field("Note (optional)", note, first + " sees it with the payment."),
+      h("p", { class: "hint", text: "Recording it starts " + first + "'s earnings again from zero, on your screen and theirs, counting from the next video you mark received. Videos and bonuses it covers can't be marked not received, removed or deleted afterwards." })],
     run: async () => {
-      await run("er_reset_pay", { p_editor: uid, p_expect: o.due });
-      return fullStop("Reset. " + money(o.due) + " recorded as paid to " + u.name);
+      const v = parseAmount(amt.value);
+      if (v == null || v <= 0) throw new Oops("Enter the amount you paid.");
+      await run("er_record_pay", { p_editor: uid, p_amount: v, p_note: tidy(note.value) });
+      return fullStop(money(v) + " recorded as paid to " + u.name);
     },
   });
+}
+// Correcting a payment already recorded: its amount or its note. The first amount stays on record.
+function openEditPay(uid, x, back) {
+  const amt = h("input", { class: "input", id: "ep-amt", type: "text", inputmode: "decimal", autocomplete: "off" });
+  const note = h("input", { class: "input", id: "ep-note", type: "text", maxlength: "200", autocomplete: "off" });
+  amt.value = String(x.amt); note.value = x.note;
+  formSheet({
+    title: "Correct a payment", submit: "Save", back: back,
+    body: [
+      h("p", null, "The payment to ", h("strong", { text: displayName(uid) }), " recorded on " + shortDate(x.at) + "."),
+      field(moneyLabel("Amount paid"), amt, x.was != null ? "First recorded as " + money(x.was) + "." : "The amount first recorded stays on record too."),
+      field("Note (optional)", note)],
+    run: async () => {
+      const v = parseAmount(amt.value);
+      if (v == null || v <= 0) throw new Oops("Enter the amount you paid.");
+      const r = await run("er_edit_pay", { p_payout: x.id, p_amount: v, p_note: tidy(note.value) });
+      return r && r.changed === false ? "Nothing changed" : "Payment corrected";
+    },
+  });
+}
+// A payment's line under its date: the admin's note, what it covered, and whether it was corrected.
+function payLine(x) {
+  const parts = [x.note, x.nv + x.nb ? "For " + covers(x) : "", x.edited ? "Corrected " + shortDate(x.edited) + (x.was != null && x.was !== x.amt ? ", first recorded as " + money(x.was) : "") : ""];
+  const s = parts.map((p) => String(p || "").trim().replace(/[.!?]+$/, "")).filter(Boolean).join(". ");
+  return s ? fullStop(s) : "";
 }
 
 let setPanel = null;
@@ -2911,13 +2947,14 @@ function openProfile(uid) {
     try {
       const r = await call("er_details", { p_user: uid }), d = normDetails(r && r.details), ch = r && r.changed && num(r.changed.at) ? r.changed : null;
       if (!body.isConnected) return;
-      const pays = normPayouts(r && r.payouts);          // each Reset payment, newest first
+      const pays = normPayouts(r && r.payouts);          // each payment recorded, newest first
       paidBox.hidden = u.role !== "editor" && !pays.length;
       paidBox.replaceChildren(h("h3", { class: "part-title", text: "Payments" }),
-        pays.length ? h("ul", { class: "rows" }, pays.map((x) => h("li", null,
-          h("div", { class: "row-main" }, h("span", { class: "row-title", text: shortDate(x.at) }), h("span", { class: "hint", text: covers(x) })),
-          h("span", { class: "amount", text: money(x.amt) }))))
-          : h("p", { class: "hint", text: "No payments recorded yet. After paying " + first + ", press Reset payment at the top of this page." }));
+        pays.length ? h("ul", { class: "rows", id: "pf-pays" }, pays.map((x) => { const line = payLine(x); return h("li", null,
+          h("div", { class: "row-main" }, h("span", { class: "row-title", text: shortDate(x.at) }), line ? h("span", { class: "hint", text: line }) : null),
+          h("div", { class: "row-actions" }, h("span", { class: "amount", text: money(x.amt) }),
+            h("button", { class: "btn small", type: "button", "aria-label": "Correct the payment of " + shortDate(x.at), onclick: () => openEditPay(uid, x, back) }, "Correct"))); }))
+          : h("p", { class: "hint", text: "No payments recorded yet. After paying " + first + ", press Record a payment at the top of this page." }));
       if (!d) { draw([empty("No payment details yet.", first + " sees a reminder on their home screen until they add them.")]); return; }
       draw([
         ch ? h("div", { class: "notice warn" }, h("strong", { text: "Bank details changed " + shortDate(num(ch.at)) }),
@@ -2940,9 +2977,9 @@ function openProfile(uid) {
       h("p", { class: "hint", text: o.paid ? (o.nv + o.nb ? "Earned since their last payment on " + shortDate(o.paid) + ": " + covers(o) + "." : "Nothing new since their last payment on " + shortDate(o.paid) + ".")
         : o.nv + o.nb ? "Everything they've earned in the app so far, as no payment has been recorded yet: " + covers(o) + "." : "Nothing earned yet." }),
       h("dl", { class: "slate-rows" },
-        row("Earned in total", money(earn.total)), row("Of that, from bonuses", money(earn.bonus)), row("Paid so far", money(Math.max(0, earn.total - o.due))), row("Last payment", o.paid ? money(o.paidAmt) + ", " + shortDate(o.paid) : "None yet")),
+        row("Earned in total", money(earn.total)), row("Of that, from bonuses", money(earn.bonus)), row("Paid so far", money(o.paidSum)), row("Last payment", o.paid ? money(o.paidAmt) + ", " + shortDate(o.paid) : "None yet")),
       h("div", { class: "btn-row" },
-        o.nv + o.nb ? h("button", { class: "btn primary", type: "button", id: "pf-reset", onclick: () => openResetPay(uid, back) }, "Reset payment") : null,
+        h("button", { class: "btn primary", type: "button", id: "pf-record", onclick: () => openRecordPay(uid, back) }, "Record a payment"),
         h("button", { class: "btn", type: "button", id: "pf-bonus", onclick: () => openBonuses(uid, back) }, "Bonuses"))),
     // how their work is going
     h("div", { class: "part", id: "pf-work" },
