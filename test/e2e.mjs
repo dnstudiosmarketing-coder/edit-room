@@ -1447,6 +1447,20 @@ try {
   await adaPay.waitFor();
   ok(owedAda.due > 0 && (await adaPay.locator(".fact", { hasText: "To pay" }).locator(".fact-num").innerText()) === usd(Number(owedAda.due)) && /Not paid in the app yet\./.test(await adaPay.innerText()),
     "each editor's card shows what they're owed", usd(Number(owedAda.due)));
+  // the team's payments, above the cards: nothing paid out yet, and what the app counts as still to pay
+  const teamBook = async () => (await sql("select coalesce(sum(amount), 0)::float as total, count(*)::int as n, coalesce(sum(amount) filter (where paid_at >= (date_trunc('week', now() at time zone m.tz) at time zone m.tz)), 0)::float as week from app.payouts, app.meta m")).rows[0];
+  const stillDue = async () => Number((await sql("select coalesce(sum((app.owed(id) ->> 'due')::numeric), 0)::float as d from app.users where removed_at is null and role in ('admin', 'editor')")).rows[0].d);
+  const payStat = async (label) => (await admin.locator("#payments .stat", { hasText: label }).locator(".stat-num").innerText()).trim();
+  const book0 = await teamBook(), due0 = await stillDue();
+  await admin.locator("#payments").waitFor();
+  ok(book0.n === 0 && (await admin.locator("#payments .week-num").innerText()).trim() === "$0" && (await payStat("Paid this week")) === "$0" && (await payStat("Still to pay")) === usd(due0) && (await payStat("Payments")) === "0"
+    && /No payments recorded yet\. After paying someone, press Record a payment on their card below\./.test(await admin.locator("#payments").innerText()),
+    "the Editors tab shows what has been paid out to the team, and what's still to pay", (await admin.locator("#payments").innerText()).replace(/\s+/g, " "));
+  await admin.locator("#pay-all").click();
+  await sheet(admin).locator("#pay-book .empty").waitFor();
+  ok(/No payments recorded yet\./.test(await sheet(admin).innerText()), "with no payments yet, All payments says how to record one");
+  await sheet(admin).getByRole("button", { name: "Close" }).click();
+  await closed(admin);
   await adaPay.getByRole("button", { name: "Record a payment" }).click();
   await sheet(admin).locator("#rp-amt").waitFor();
   const rpText = (await sheet(admin).innerText()).replace(/\s+/g, " ");
@@ -1485,6 +1499,36 @@ try {
   await look(admin, "60b-profile-after-payment", "an editor's profile after a payment");
   await sheet(admin).getByRole("button", { name: "Close" }).click();
   await closed(admin);
+  // the team's payments follow: the total paid out, this week's, the latest payment, and every payment in a list
+  const book1 = await teamBook(), due1 = await stillDue();
+  await admin.locator("#payments .week-num", { hasText: usd(book1.total) }).waitFor();
+  const paySlateText = (await admin.locator("#payments").innerText()).replace(/\s+/g, " ");
+  ok(book1.n === 1 && book1.total === 48500 && (await payStat("Paid this week")) === usd(book1.week) && (await payStat("Still to pay")) === usd(due1) && (await payStat("Payment")) === "1"
+    && /Latest: \$48,500 to Ada O\. on [^.]+\./.test(paySlateText), "the payments section shows the total paid out, this week's, what's still to pay and the latest payment", paySlateText);
+  await admin.locator("#view .slate-head .seg button", { hasText: "This month" }).first().click();      // the period picked for the team
+  await admin.locator("#payments .stat", { hasText: "Paid this month" }).waitFor();
+  ok((await payStat("Paid this month")) === usd(book1.total), "and this month's when the month is picked");
+  await admin.locator("#view .slate-head .seg button", { hasText: "This week" }).first().click();
+  await admin.locator("#pay-all").click();
+  await sheet(admin).locator("#pay-every li").first().waitFor();
+  const bookText = (await sheet(admin).innerText()).replace(/\s+/g, " ");
+  const everyRow = (await sheet(admin).locator("#pay-every li").first().innerText()).replace(/\s+/g, " ");
+  ok(bookText.includes("Paid out in total $48,500 1 payment to 1 person.") && /Ada O\. 1 payment, on [^.]+\. \$48,500/.test((await sheet(admin).locator("#pay-people li").first().innerText()).replace(/\s+/g, " "))
+    && /^Ada O\. [^.]+\. Bank transfer, October\. For \d+ videos?( and \d+ bonus(es)?)?\. Corrected [^,]+, first recorded as \$50,000\. \$48,500 Correct$/.test(everyRow),
+    "All payments lists the total, what each person has been paid, and every payment with its note and correction", bookText.slice(0, 400) + " || " + everyRow);
+  await look(admin, "61-all-payments", "every payment, in one list");
+  await sheet(admin).locator("#pay-every li").first().getByRole("button", { name: /^Correct/ }).click();
+  await sheet(admin).locator("#ep-amt").waitFor();
+  ok((await admin.inputValue("#ep-amt")) === "48500", "a payment can be corrected from the list too");
+  await sheet(admin).getByRole("button", { name: "Back" }).click();
+  await sheet(admin).locator("#pay-every li").first().waitFor();
+  ok((await sheet(admin).locator("#sheet-title").innerText()) === "Payments", "and Back returns to the list");
+  await sheet(admin).locator("#pay-people .name-link").first().click();
+  await sheet(admin).locator("#pf-money").waitFor();
+  ok((await sheet(admin).locator("#sheet-title").innerText()) === "Ada O.", "a name in the list opens that person's profile");
+  await sheet(admin).getByRole("button", { name: "Close" }).click();
+  await closed(admin);
+  await look(admin, "61b-payments-section", "the payments section on the Editors tab");
   await sync(ada);
   await tab(ada, "earn");
   await ada.locator(".week-num", { hasText: "$0" }).waitFor();

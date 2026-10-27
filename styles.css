@@ -119,6 +119,7 @@ button { cursor: pointer; touch-action: manipulation; }
 .slate { display: grid; gap: 14px; min-width: 0; padding: 20px 18px 18px; border-radius: 22px; background: var(--slate); color: var(--on-slate); --on-time: #FFFFFF; --late: #EC835A; }
 .slate-head { display: grid; gap: 12px; min-width: 0; }
 .slate-head > .seg.inline { display: grid; }
+.slate-head > .btn { justify-self: start; }
 @media (min-width: 520px) {
   .slate-head { display: flex; align-items: center; justify-content: space-between; }
   .slate-head > .seg.inline { display: inline-grid; }

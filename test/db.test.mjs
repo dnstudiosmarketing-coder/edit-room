@@ -858,6 +858,40 @@ ok(shownPay.amt === 44000 && shownPay.was === 40000 && shownPay.edited > 0 && sh
 ok((await rpc("er_state", { p_token: A })).users.find((x) => x.id === payEd).owed.paidSum === 60 + 25 + 44000 + 500, "what they've been paid in all follows the correction");
 await fails(rpc("er_edit_pay", { p_token: A, p_payout: "00000000-0000-0000-0000-000000000000", p_amount: 5 }), "not_found", "an unknown payment can't be changed");
 
+// ---- what has been paid out to the whole team, and the list of every payment
+const goneEd = (await rpc("er_add_user", { p_token: A, p_name: "Gone Payee", p_username: "gonepayee", p_password: "gonepayee-pass-1" })).id;
+const goneRec = await rpc("er_record_pay", { p_token: A, p_editor: goneEd, p_amount: 1000, p_note: "Outside work" });
+ok((await rpc("er_delete_user", { p_token: A, p_user: goneEd })).ok === true, "someone paid for work outside the app can still be removed");
+const allPaid = await one("select coalesce(sum(amount), 0)::float as total, count(*)::int as n, count(distinct editor_id)::int as people from app.payouts");
+await fails(rpc("er_payouts", { p_token: TP }), "forbidden", "an editor can't see everyone's payments");
+await fails(rpc("er_payouts", { p_token: TSup }), "forbidden", "nor can a supervisor");
+const book = await rpc("er_payouts", { p_token: A });
+ok(book.total === allPaid.total && book.n === allPaid.n && book.list.length === allPaid.n && book.people.length === allPaid.people,
+  "the admin's list has every payment, the total paid out and everyone paid", JSON.stringify({ total: book.total, n: book.n, people: book.people.length, db: allPaid }));
+ok(book.list.every((x, i) => i === 0 || book.list[i - 1].at >= x.at), "newest payment first");
+const bookRec1 = book.list.find((x) => x.id === rec1.id);
+ok(bookRec1 && bookRec1.u === payEd && bookRec1.name === "Pay Test" && bookRec1.amt === 44000 && bookRec1.was === 40000 && bookRec1.note === "Bank transfer" && bookRec1.nv === 1 && bookRec1.by === (await one("select name from app.users where id = $1", [adminId])).name && bookRec1.edited > 0,
+  "each payment says who was paid, how much, what it covered, its note, who recorded it and whether it was corrected", JSON.stringify(bookRec1));
+const payPerson = book.people.find((x) => x.u === payEd);
+ok(payPerson && payPerson.n === 4 && payPerson.total === 60 + 25 + 44000 + 500 && payPerson.name === "Pay Test" && payPerson.gone === false && payPerson.last > 0,
+  "and what each person has been paid in all, how many times, and when last", JSON.stringify(payPerson));
+ok(book.people.every((x, i) => i === 0 || book.people[i - 1].total >= x.total), "the people paid most come first");
+const gonePerson = book.people.find((x) => x.u === goneEd), goneLine = book.list.find((x) => x.id === goneRec.id);
+ok(gonePerson && gonePerson.gone === true && gonePerson.name === "Gone Payee" && gonePerson.total === 1000 && goneLine && goneLine.name === "Gone Payee",
+  "someone removed since keeps their name on their payments, marked as gone", JSON.stringify(gonePerson));
+const bookOne = await rpc("er_payouts", { p_token: A, p_limit: 1 });
+ok(bookOne.list.length === 1 && bookOne.list[0].id === book.list[0].id && bookOne.n === allPaid.n && bookOne.total === allPaid.total && bookOne.people.length === allPaid.people,
+  "a shorter list keeps the newest, and the totals still count every payment");
+const teamPaid = (await rpc("er_state", { p_token: A })).paid;
+ok(teamPaid && teamPaid.total === allPaid.total && teamPaid.n === allPaid.n && teamPaid.people === allPaid.people && teamPaid.week === allPaid.total && teamPaid.month === allPaid.total
+  && teamPaid.last && teamPaid.last.u === goneEd && teamPaid.last.amt === 1000, "the admin's screen has the team's totals: in all, this week, this month and the latest payment", JSON.stringify(teamPaid));
+await sql("update app.payouts set paid_at = now() - interval '40 days' where id = $1", [goneRec.id]);
+const olderPaid = (await rpc("er_state", { p_token: A })).paid;
+ok(olderPaid.total === allPaid.total && olderPaid.month === allPaid.total - 1000 && olderPaid.week === allPaid.total - 1000 && olderPaid.last.u === payEd,
+  "a payment from an earlier month counts in the total only", JSON.stringify(olderPaid));
+await sql("update app.payouts set paid_at = now() where id = $1", [goneRec.id]);
+ok((await rpc("er_state", { p_token: TP })).paid == null && (await rpc("er_state", { p_token: TSup })).paid == null, "editors and supervisors aren't sent the team's totals");
+
 // ---- switching a login off, roles, lockout
 const admin2 =(await rpc("er_add_user", { p_token: A, p_name: "Kemi Admin", p_username: "kemi", p_password: "kemi-pass-1", p_role: "admin" })).id;
 const TK = (await rpc("er_login", { p_username: "kemi", p_password: "kemi-pass-1" })).token;

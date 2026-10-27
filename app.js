@@ -35,6 +35,7 @@ const state = {
   board: { week: [], month: [], awards: [] }, weeks: [0, 0, 0, 0, 0, 0], month: 0, totals: { videos: 0, bonus: 0, month: 0, owed: { due: 0, videos: 0, bonus: 0, nv: 0, nb: 0, paid: null, paidAmt: null, paidSum: 0 }, payouts: [] },
   featured: [],                                       // "Video of the moment": up to five finished videos the admin put on everyone's home screen
   stats: { editors: new Map(), cats: new Map() },     // admin only: figures worked out by the server
+  paid: null,                                         // admin only: what has been paid out to the team, in all and lately
   horizon: null,                                      // admin only: where history older than the loaded projects starts
   scripts: [],                                        // scripts not yet taken on: all of them for an admin, an editor's own waiting ones
   videos: new Map(),                                  // media buyer only: the approved videos, by id
@@ -287,7 +288,11 @@ const normOwed = (o) => (o && typeof o === "object" ? { due: amount(o.due) || 0,
   paid: num(o.paid), paidAmt: amount(o.paidAmt), paidSum: amount(o.paidSum) || 0 } : { due: 0, videos: 0, bonus: 0, nv: 0, nb: 0, paid: null, paidAmt: null, paidSum: 0 });
 const normPayouts = (list) => (Array.isArray(list) ? list : []).filter((x) => x && x.id).map((x) => ({ id: String(x.id), at: num(x.at) || 0, amt: amount(x.amt) || 0, nv: num(x.nv) || 0, nb: num(x.nb) || 0,
   note: str(x.note, 200), was: amount(x.was), edited: num(x.edited) }));
-const covers = (x) => [x.nv ? plural(x.nv, "video", "videos") : null, x.nb ? plural(x.nb, "bonus", "bonuses") : null].filter(Boolean).join(" and ") || "nothing";
+// What has been paid out to the whole team, as an admin is told: in all, this week, this month, and the latest payment.
+const sumOf = (v) => Math.max(0, num(v) || 0);        // a total can grow past what one payment may be
+const normPaid = (p) => (p && typeof p === "object" ? { total: sumOf(p.total), n: num(p.n) || 0, people: num(p.people) || 0, week: sumOf(p.week), month: sumOf(p.month),
+  last: p.last && p.last.u ? { uid: String(p.last.u), amt: amount(p.last.amt) || 0, at: num(p.last.at) || 0 } : null } : null);
+const covers =(x) => [x.nv ? plural(x.nv, "video", "videos") : null, x.nb ? plural(x.nb, "bonus", "bonuses") : null].filter(Boolean).join(" and ") || "nothing";
 const fullStop = (s) => String(s).replace(/[^.!?]$/, "$&.");      // a sentence ending in a name like "Ada O." gets one full stop, not two
 // When someone was last paid (ms), or 0. A video marked received by then, or a bonus awarded by then, is in a
 // payment: the server keeps it as it is, so the app doesn't offer to change it.
@@ -340,6 +345,7 @@ function applyState(d) {
   state.featured = (Array.isArray(d.featured) ? d.featured : []).slice(0, 5).map((x) => ({ id: String(x.id), uid: String(x.u), name: str(x.name, 140) || "Untitled project", catId: x.cat ? String(x.cat) : null, link: str(x.link, 600) || null, at: num(x.at) || 0 }));
   const t = d.totals || {};
   state.totals = { videos: amount(t.videos) || 0, bonus: amount(t.bonus) || 0, month: amount(t.month) || 0, owed: normOwed(t.owed), payouts: normPayouts(t.payouts) };
+  state.paid = normPaid(d.paid);
   const st = d.stats || {}, ed = new Map(), ct = new Map();
   for (const e of Array.isArray(st.editors) ? st.editors : []) {
     const w = Array.isArray(e.w) ? e.w : [], mo = Array.isArray(e.mo) ? e.mo : [], four = Array.isArray(e.four) ? e.four : [], weeks = [];
@@ -1658,6 +1664,7 @@ function viewEditors() {
       hero(sum.on, h("span", { class: "week-of", text: (sum.on === 1 ? "video" : "videos") + " submitted on time" })),
       h("dl", { class: "fields three" },
         stat(sum.late, "Late", sum.late ? "warn" : ""), stat(sum.active, "In progress"), stat(sum.past, "Past deadline", sum.past ? "warn" : ""))),
+    paySlate(),
     h("section", { class: "section" },
       h("p", { class: "section-note", text: "Top performers first, ranked by videos submitted within the " + hours + "-hour deadline " + (per === "week" ? "this week." : "this month.") + " This is the order editors see on their leaderboard." }),
       h("div", { class: "chart-key" }, h("span", { class: "hint", text: "Weekly bars, one scale for everyone" }), legend()),
@@ -1718,6 +1725,64 @@ function rosterCard(s, win, target, rank, peak) {
       h("button", { class: "btn small", type: "button", dataset: { fk: "view:" + s.uid }, onclick: () => viewProjectsOf(s.uid) }, "View projects"),
       h("button", { class: "btn small", type: "button", dataset: { fk: "bonus:" + s.uid }, onclick: () => openBonuses(s.uid) }, "Bonuses"),
       h("button", { class: "btn small", type: "button", dataset: { fk: "payrec:" + s.uid }, onclick: () => openRecordPay(s.uid) }, "Record a payment")));
+}
+// What has been paid out to the team: in all, in the week or month picked above, what the app counts as still to
+// pay (since each person's last payment, at the pay rates set) and how many payments. Every payment opens in a sheet.
+function paySlate() {
+  const p = state.paid || normPaid({}), wk = ui.period === "week", last = p.last;
+  let due = 0;
+  for (const u of state.users.values()) if (u.role === "editor" || u.role === "admin") due += u.owed.due;
+  return h("section", { class: "slate", id: "payments", "aria-label": "Payments" },
+    h("div", { class: "slate-head" }, h("p", { class: "slate-label", text: "Paid out to editors" }),
+      h("button", { class: "btn small", type: "button", id: "pay-all", dataset: { fk: "pay-all" }, onclick: openPayments }, "All payments")),
+    hero(money(p.total), h("span", { class: "week-of", text: "in total" })),
+    h("p", { class: "hint", text: last ? "Latest: " + money(last.amt) + " to " + displayName(last.uid) + " on " + shortDate(last.at) + "."
+      : "No payments recorded yet. After paying someone, press Record a payment on their card below." }),
+    h("dl", { class: "fields three" },
+      stat(money(wk ? p.week : p.month), wk ? "Paid this week" : "Paid this month"), stat(money(due), "Still to pay"), stat(String(p.n), p.n === 1 ? "Payment" : "Payments")));
+}
+// Every payment recorded, for an admin: what has been paid out in all, what each person has been paid, and each
+// payment, newest first, with a way to correct it. It's fetched when the sheet opens.
+function openPayments() {
+  const box = h("div", { class: "form", id: "pay-book" }), back = () => openPayments();
+  const who = (uid, name, key) => (state.users.has(uid) ? nameLink(uid, key) : h("span", { class: "person-name", text: name || "Former editor" }));
+  const draw = (nodes) => box.replaceChildren.apply(box, nodes.filter(Boolean).concat(h("div", { class: "btn-row" }, h("button", { class: "btn grow", type: "button", onclick: closeSheet }, "Close"))));
+  const load = async () => {
+    draw([h("p", { class: "hint", text: "Loading…" })]);
+    try {
+      const r = await call("er_payouts", { p_limit: 500 }) || {};
+      if (!box.isConnected) return;
+      const list = (Array.isArray(r.list) ? r.list : []).filter((x) => x && x.id && x.u).map((x) => Object.assign(normPayouts([x])[0], { uid: String(x.u), name: str(x.name, 40), by: str(x.by, 40) }));
+      const people = (Array.isArray(r.people) ? r.people : []).filter((x) => x && x.u).map((x) => ({ uid: String(x.u), name: str(x.name, 40), gone: x.gone === true, n: num(x.n) || 0, total: sumOf(x.total), last: num(x.last) || 0 }));
+      const n = num(r.n) || 0;
+      if (!n) { draw([empty("No payments recorded yet.", "After paying someone, press Record a payment on their card in Editors. Each payment shows here and on their profile.")]); return; }
+      draw([
+        h("section", { class: "slate", "aria-label": "Paid out in total" },
+          h("p", { class: "slate-label", text: "Paid out in total" }),
+          hero(money(sumOf(r.total))),
+          h("p", { class: "hint", text: plural(n, "payment", "payments") + " to " + plural(people.length, "person", "people") + "." + (list.length < n ? " The latest " + list.length + " are listed below." : "") })),
+        h("div", { class: "part", id: "pay-people" },
+          h("h3", { class: "part-title", text: "Paid to each person" }),
+          h("ul", { class: "rows" }, people.map((x) => h("li", null,
+            h("div", { class: "row-main" }, who(x.uid, x.name, "pp"),
+              h("span", { class: "hint", text: (x.gone ? "No longer on the team. " : "") + (x.n === 1 ? "1 payment, on " : x.n + " payments, the last on ") + shortDate(x.last) + "." })),
+            h("span", { class: "amount", text: money(x.total) }))))),
+        h("div", { class: "part", id: "pay-every" },
+          h("h3", { class: "part-title", text: "Every payment" }),
+          h("ul", { class: "rows" }, list.map((x) => {
+            const by = x.by && x.by !== state.me.name ? "Recorded by " + x.by + "." : "";
+            return h("li", null,
+              h("div", { class: "row-main" }, who(x.uid, x.name, "pe:" + x.id), h("span", { class: "hint", text: [shortDate(x.at) + ".", payLine(x), by].filter(Boolean).join(" ") })),
+              h("div", { class: "row-actions" }, h("span", { class: "amount", text: money(x.amt) }),
+                h("button", { class: "btn small", type: "button", "aria-label": "Correct the payment to " + (x.name || "them") + " on " + shortDate(x.at), onclick: () => openEditPay(x.uid, x, back) }, "Correct")));
+          })))]);
+    } catch (e) {
+      if (!box.isConnected) return;
+      draw([h("p", { class: "error", role: "alert", text: errText(e) }), h("div", { class: "btn-row" }, h("button", { class: "btn small", type: "button", onclick: load }, "Try again"))]);
+    }
+  };
+  openSheet("Payments", [box]);
+  load();
 }
 // Projects, showing only this person's.
 function viewProjectsOf(uid) {

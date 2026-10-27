@@ -866,7 +866,8 @@ $$;
 
 -- A first call (p_since null) returns the current picture; later calls return only the projects that changed.
 -- The reply stays small however much history there is: an admin gets every project that is still open plus
--- the last 8 days, with the figures for editors and categories worked out here; older projects are read a
+-- the last 8 days, with the figures for editors and categories worked out here and the totals paid out to the team
+-- (each payment is listed by er_payouts); older projects are read a
 -- page at a time through er_history. An editor gets their own latest 400, and the scripts waiting for them.
 -- A media buyer (or a supervisor) gets the latest 300 approved videos instead, and nothing about anyone's pay or
 -- deadlines; a supervisor reads the videos uploaded each day through er_uploads.
@@ -876,7 +877,7 @@ declare
   u app.users; m app.meta; adm boolean; buyer boolean; t0 timestamptz := clock_timestamp(); since timestamptz;
   ws timestamp; w0 timestamptz; cut4 timestamptz; mo timestamptz; horizon timestamptz; edge timestamptz; n int;
   j_weeks json; j_bw json := '[]'; j_bm json := '[]'; j_aw json := '[]'; j_users json; j_cats json; j_bonuses json; j_totals json; j_projects json; j_stats json; j_feat json := '[]';
-  j_scripts json := '[]'; j_videos json;
+  j_scripts json := '[]'; j_videos json; j_paid json;
 begin
   u := app.who(p_token);
   adm := u.role = 'admin';
@@ -928,6 +929,14 @@ begin
 
     select coalesce(json_agg(json_build_object('id', b.id, 'u', b.editor_id, 'amt', b.amount, 'label', b.label, 'at', app.ms(b.awarded_at)) order by b.awarded_at desc), '[]'::json)
       into j_bonuses from (select * from app.bonuses where not removed and awarded_at > t0 - interval '100 days' order by awarded_at desc limit 500) b;
+
+    -- what has been paid out to everyone: in all, this week and this month, and the latest payment
+    select json_build_object('total', coalesce(sum(o.amount), 0), 'n', count(*), 'people', count(distinct o.editor_id),
+                             'week', coalesce(sum(o.amount) filter (where o.paid_at >= ws at time zone m.tz), 0),
+                             'month', coalesce(sum(o.amount) filter (where o.paid_at >= mo), 0),
+                             'last', (select json_build_object('u', l.editor_id, 'amt', l.amount, 'at', app.ms(l.paid_at))
+                                        from app.payouts l order by l.paid_at desc, l.id desc limit 1))
+      into j_paid from app.payouts o;
 
     -- per editor: on time and late for each of the last six weeks (twelve numbers, oldest week first),
     -- this month, and the last four weeks with the total turnaround time; per category: the last 70 days
@@ -1033,7 +1042,7 @@ begin
                                   'drive', case when buyer then json_build_object('on', false, 'folders', '[]'::json) else app.drive_info(adm) end),
     'cats', j_cats, 'users', j_users, 'weeks', j_weeks, 'month', app.ms(mo),
     'board', json_build_object('week', j_bw, 'month', j_bm, 'awards', j_aw), 'featured', j_feat,
-    'bonuses', j_bonuses, 'totals', j_totals, 'stats', j_stats, 'horizon', case when adm and since is null then horizon end,
+    'bonuses', j_bonuses, 'totals', j_totals, 'paid', j_paid, 'stats', j_stats, 'horizon', case when adm and since is null then horizon end,
     'projects', j_projects, 'scripts', j_scripts, 'videos', j_videos);
 end $$;
 
@@ -1243,6 +1252,29 @@ begin
          amount = v_amt, note = v_note, edited_at = now(), edited_by = u.id
    where id = x.id;
   return json_build_object('ok', true, 'changed', true);
+end $$;
+
+-- Every payment recorded, for an admin's list of payments: the latest p_limit, newest first, each with who was paid
+-- (their name stays even after they're removed) and who recorded it; and what each person has been paid in all,
+-- most first, worked out over every payment however long the list is.
+create or replace function public.er_payouts(p_token text, p_limit int default 300) returns json
+language plpgsql security definer set search_path = '' as $$
+declare u app.users; v_lim int := least(greatest(coalesce(p_limit, 300), 1), 2000);
+begin
+  u := app.admin(p_token);
+  return json_build_object(
+    'list', coalesce((select json_agg(json_build_object('id', q.id, 'u', q.editor_id, 'name', q.who, 'at', app.ms(q.paid_at), 'amt', q.amount,
+                                                        'nv', q.videos, 'nb', q.bonuses, 'note', q.note, 'was', q.was_amount, 'edited', app.ms(q.edited_at), 'by', q.payer)
+                                      order by q.paid_at desc, q.id desc)
+                        from (select o.*, e.name as who, b.name as payer from app.payouts o join app.users e on e.id = o.editor_id left join app.users b on b.id = o.paid_by
+                               order by o.paid_at desc, o.id desc limit v_lim) q), '[]'::json),
+    'people', coalesce((select json_agg(json_build_object('u', s.editor_id, 'name', s.who, 'gone', s.gone, 'n', s.times, 'total', s.total, 'last', app.ms(s.last))
+                                        order by s.total desc, s.who)
+                          from (select o.editor_id, e.name as who, e.removed_at is not null as gone, count(*) as times, sum(o.amount) as total, max(o.paid_at) as last
+                                  from app.payouts o join app.users e on e.id = o.editor_id
+                                 group by o.editor_id, e.name, e.removed_at) s), '[]'::json),
+    'n', (select count(*) from app.payouts),
+    'total', (select coalesce(sum(o.amount), 0) from app.payouts o));
 end $$;
 
 -- Marking a video received approves it: it goes into the editor's earnings, and every media buyer hears it's
