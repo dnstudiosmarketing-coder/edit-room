@@ -1393,11 +1393,18 @@ function viewInbox(all) {
   const active = all.filter((x) => x.p.status === "active");
   const past = active.filter((x) => x.f.phase !== "ontrack").sort((a, b) => a.f.deadline - b.f.deadline);
   const over = past.filter((x) => x.f.phase === "over").length;
+  const paid = state.paid || normPaid({});
   out.push(h("section", { class: "slate", "aria-label": "At a glance" },
     hero(waiting.length, h("span", { class: "week-of", text: waiting.length === 1 ? "video ready to download" : "videos ready to download" })),
     h("dl", { class: "fields three" },
       stat(active.length, "In progress"), stat(past.length, "Past deadline", past.length ? "warn" : ""), stat(over, "Grace over", over ? "crit" : "")),
-    h("button", { class: "btn primary", type: "button", id: "assign", dataset: { fk: "assign" }, onclick: () => openAssign() }, "Assign a script")));
+    // what has been paid out to editors, and what's owed now; the list of payments is a tap away
+    h("dl", { class: "slate-rows", id: "glance-pay" },
+      h("div", null, h("dt", { text: "Paid out to editors" }), h("dd", { text: money(paid.total) })),
+      h("div", null, h("dt", { text: "Still to pay" }), h("dd", { text: money(stillToPay()) }))),
+    h("div", { class: "btn-row glance-actions" },
+      h("button", { class: "btn primary", type: "button", id: "assign", dataset: { fk: "assign" }, onclick: () => openAssign() }, "Assign a script"),
+      h("button", { class: "btn", type: "button", id: "glance-pays", dataset: { fk: "glance-pays" }, onclick: openPayments }, "All payments"))));
   const setup = setupCard();
   if (setup) out.push(setup);
   const ask = pushCard();
@@ -1728,10 +1735,13 @@ function rosterCard(s, win, target, rank, peak) {
 }
 // What has been paid out to the team: in all, in the week or month picked above, what the app counts as still to
 // pay (since each person's last payment, at the pay rates set) and how many payments. Every payment opens in a sheet.
-function paySlate() {
-  const p = state.paid || normPaid({}), wk = ui.period === "week", last = p.last;
+function stillToPay() {      // what the app counts as owed to everyone since their last payment, at the pay rates set
   let due = 0;
   for (const u of state.users.values()) if (u.role === "editor" || u.role === "admin") due += u.owed.due;
+  return due;
+}
+function paySlate() {
+  const p = state.paid || normPaid({}), wk = ui.period === "week", last = p.last, due = stillToPay();
   return h("section", { class: "slate", id: "payments", "aria-label": "Payments" },
     h("div", { class: "slate-head" }, h("p", { class: "slate-label", text: "Paid out to editors" }),
       h("button", { class: "btn small", type: "button", id: "pay-all", dataset: { fk: "pay-all" }, onclick: openPayments }, "All payments")),

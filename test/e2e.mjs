@@ -1529,6 +1529,17 @@ try {
   await sheet(admin).getByRole("button", { name: "Close" }).click();
   await closed(admin);
   await look(admin, "61b-payments-section", "the payments section on the Editors tab");
+  // and the admin's home screen shows what has been paid out, and what's still to pay, with the list a tap away
+  await tab(admin, "inbox");
+  await admin.locator("#glance-pay").waitFor();
+  const glance = (await admin.locator("#glance-pay").innerText()).replace(/\s+/g, " ").trim();
+  ok(glance === "Paid out to editors " + usd(book1.total) + " Still to pay " + usd(await stillDue()), "the Inbox shows the total paid out to editors and what's still to pay", glance);
+  await look(admin, "61c-inbox-payments", "the Inbox with what has been paid out");
+  await admin.locator("#glance-pays").click();
+  await sheet(admin).locator("#pay-every li").first().waitFor();
+  ok((await sheet(admin).locator("#sheet-title").innerText()) === "Payments", "All payments opens from the Inbox too");
+  await sheet(admin).getByRole("button", { name: "Close" }).click();
+  await closed(admin);
   await sync(ada);
   await tab(ada, "earn");
   await ada.locator(".week-num", { hasText: "$0" }).waitFor();
